@@ -2,10 +2,14 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media.Animation;
+using Viernes.App.Controls;
 using Viernes.App.Services;
 using Viernes.App.ViewModels;
+using Binding = System.Windows.Data.Binding;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 
 namespace Viernes.App;
@@ -27,12 +31,18 @@ public partial class MainWindow : Window
     private double _appliedWidgetHeight = 78;
     private bool _expandsLeft;
 
+    private readonly LiquidOrb _orb = new();
+
     internal MainWindow(MainViewModel viewModel, WindowPlacementStore placementStore)
     {
         InitializeComponent();
         _viewModel = viewModel;
         _placementStore = placementStore;
         DataContext = viewModel;
+
+        OrbHost.Children.Add(_orb);
+        _orb.SetBinding(LiquidOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = viewModel });
+
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
     }
 

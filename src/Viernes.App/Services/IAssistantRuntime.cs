@@ -1,4 +1,5 @@
 using Viernes.App.ViewModels;
+using Viernes.Core.Conversation;
 
 namespace Viernes.App.Services;
 
@@ -9,7 +10,9 @@ internal sealed record AssistantRuntimeUpdate(
     bool? MicrophoneActive = null,
     bool? WakeWordEnabled = null,
     PendingConfirmation? Confirmation = null,
-    bool ClearConfirmation = false);
+    bool ClearConfirmation = false,
+    IReadOnlyList<TurnStep>? Steps = null,
+    bool ClearSteps = false);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,

@@ -32,6 +32,7 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
     private readonly Lock _stateGate = new();
     private readonly List<ConversationMessage> _history = [];
     private readonly Dictionary<string, PendingToolCall> _pendingCalls = new(StringComparer.Ordinal);
+    private readonly List<TurnStep> _steps = [];
     private AssistantState _currentState = AssistantState.Idle;
 
     public ConversationOrchestrator(
@@ -60,6 +61,12 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
 
     public event EventHandler<AssistantStateChangedEventArgs>? StateChanged;
 
+    /// <summary>
+    /// Progreso del turno en curso. Hace visible que una respuesta convincente no ejecutó nada por
+    /// su cuenta: cada herramienta aparece como un paso y muestra si la política la dejó pasar.
+    /// </summary>
+    public event EventHandler<TurnProgressEventArgs>? ProgressChanged;
+
     public async Task<ConversationTurnResult> ProcessAsync(
         string input,
         CancellationToken cancellationToken = default)
@@ -73,6 +80,7 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         {
             TransitionTo(AssistantState.Thinking);
             RemoveExpiredPendingCalls();
+            BeginSteps(input.Trim());
 
             var userMessage = ConversationMessage.User(input.Trim());
             _history.Add(userMessage);
@@ -109,6 +117,8 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
 
                 foreach (var call in completion.ToolCalls)
                 {
+                    var stepIndex = PushStep(TurnStepLabels.ForTool(call.Name), TurnStepStatus.Running);
+
                     ToolExecutionResult toolResult;
                     if (results.Any(previous => string.Equals(
                             previous.ToolCallId,
@@ -128,6 +138,11 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                             cancellationToken).ConfigureAwait(false);
                     }
 
+                    UpdateStep(stepIndex, toolResult.Status switch
+                    {
+                        ToolExecutionStatus.Succeeded => TurnStepStatus.Done,
+                        _ => TurnStepStatus.Blocked
+                    });
                     results.Add(toolResult);
                     _history.Add(ConversationMessage.Tool(
                         call.Id,
@@ -307,6 +322,7 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         TokenUsage usage,
         UsageCost cost)
     {
+        CompleteSteps();
         TransitionTo(AssistantState.Speaking);
         TransitionTo(AssistantState.Idle);
         return new ConversationTurnResult(
@@ -351,6 +367,107 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 // A presentation-layer event handler must not corrupt the assistant state machine.
             }
         }
+    }
+
+    private void BeginSteps(string input)
+    {
+        lock (_steps)
+        {
+            _steps.Clear();
+            _steps.Add(new TurnStep(BuildUnderstoodLabel(input), TurnStepStatus.Done));
+            _steps.Add(new TurnStep("Pensando la respuesta", TurnStepStatus.Running));
+        }
+
+        PublishSteps();
+    }
+
+    private int PushStep(string label, TurnStepStatus status)
+    {
+        int index;
+        lock (_steps)
+        {
+            // «Pensando» deja de estar en curso apenas aparece una herramienta concreta.
+            for (var i = 0; i < _steps.Count; i++)
+            {
+                if (_steps[i].Status == TurnStepStatus.Running)
+                {
+                    _steps[i] = _steps[i] with { Status = TurnStepStatus.Done };
+                }
+            }
+
+            _steps.Add(new TurnStep(label, status));
+            index = _steps.Count - 1;
+        }
+
+        PublishSteps();
+        return index;
+    }
+
+    private void UpdateStep(int index, TurnStepStatus status)
+    {
+        lock (_steps)
+        {
+            if (index < 0 || index >= _steps.Count)
+            {
+                return;
+            }
+
+            _steps[index] = _steps[index] with { Status = status };
+        }
+
+        PublishSteps();
+    }
+
+    private void CompleteSteps()
+    {
+        lock (_steps)
+        {
+            for (var i = 0; i < _steps.Count; i++)
+            {
+                if (_steps[i].Status == TurnStepStatus.Running)
+                {
+                    _steps[i] = _steps[i] with { Status = TurnStepStatus.Done };
+                }
+            }
+        }
+
+        PublishSteps();
+    }
+
+    private void PublishSteps()
+    {
+        var handlers = ProgressChanged;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        TurnStep[] snapshot;
+        lock (_steps)
+        {
+            snapshot = _steps.ToArray();
+        }
+
+        var eventArgs = new TurnProgressEventArgs(snapshot);
+        foreach (EventHandler<TurnProgressEventArgs> handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, eventArgs);
+            }
+            catch (Exception)
+            {
+                // La presentación del progreso no puede romper el turno.
+            }
+        }
+    }
+
+    private static string BuildUnderstoodLabel(string input)
+    {
+        const int maximum = 44;
+        var single = string.Join(' ', input.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var trimmed = single.Length <= maximum ? single : single[..maximum].TrimEnd() + "…";
+        return $"Entendí: «{trimmed}»";
     }
 
     private void RememberPendingCall(ToolCall call)

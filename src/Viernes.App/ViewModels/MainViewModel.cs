@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
 using Viernes.App.Infrastructure;
@@ -58,6 +59,8 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(IsError));
             OnPropertyChanged(nameof(IsStateLabelVisible));
             OnPropertyChanged(nameof(StateShortLabel));
+            OnPropertyChanged(nameof(AreStepsVisible));
+            OnPropertyChanged(nameof(IsMessageVisible));
             NotifyShellProperties();
         }
     }
@@ -174,13 +177,30 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Pasos del turno en curso. Hacen visible que una respuesta convincente no ejecutó nada por su
+    /// cuenta: cada herramienta figura, y se ve si la política la dejó pasar o la bloqueó.
+    /// </summary>
+    public ObservableCollection<TurnStepViewModel> Steps { get; } = [];
+
+    public bool AreStepsVisible => Steps.Count > 0 && State == AssistantVisualState.Thinking;
+
     public bool IsInputAreaVisible => IsExpanded && !IsConfirmationVisible;
     public bool IsConfirmationAreaVisible => IsExpanded && IsConfirmationVisible;
+    public bool IsMessageVisible => !AreStepsVisible;
     public bool IsMinimalShellVisible =>
         State == AssistantVisualState.Idle && !IsExpanded && !IsConfirmationVisible && !_isPresentingResult;
     public bool IsAssistantShellVisible => !IsMinimalShellVisible;
     public double WidgetWidth => IsMinimalShellVisible ? 78 : IsExpanded ? 352 : 344;
-    public double WidgetHeight => IsMinimalShellVisible ? 78 : IsExpanded ? 158 : 112;
+
+    // 168 px es la altura de excepción para pasos y listas: sigue siendo temporal, nunca un panel.
+    public double WidgetHeight => IsMinimalShellVisible
+        ? 78
+        : IsExpanded
+            ? 158
+            : AreStepsVisible
+                ? 168
+                : 112;
 
     public string ConfirmationTitle
     {
@@ -348,6 +368,22 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             if (update.WakeWordEnabled.HasValue)
             {
                 IsWakeWordEnabled = update.WakeWordEnabled.Value;
+            }
+
+            if (update.Steps is not null || update.ClearSteps)
+            {
+                Steps.Clear();
+                if (update.Steps is not null)
+                {
+                    foreach (var step in update.Steps)
+                    {
+                        Steps.Add(new TurnStepViewModel(step));
+                    }
+                }
+
+                OnPropertyChanged(nameof(AreStepsVisible));
+                OnPropertyChanged(nameof(IsMessageVisible));
+                NotifyShellProperties();
             }
 
             if (update.ClearConfirmation)

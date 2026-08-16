@@ -77,6 +77,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         });
 
         _orchestrator.StateChanged += OrchestratorOnStateChanged;
+        _orchestrator.ProgressChanged += OrchestratorOnProgressChanged;
     }
 
     public event EventHandler<AssistantRuntimeUpdate>? Updated;
@@ -1008,6 +1009,12 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: false));
 
+    private void OrchestratorOnProgressChanged(object? sender, TurnProgressEventArgs e) =>
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            CurrentStateLabel(_lastVisualState),
+            Steps: e.Steps));
+
     private void OrchestratorOnStateChanged(object? sender, AssistantStateChangedEventArgs e)
     {
         if (e.CurrentState is AssistantState.Thinking or AssistantState.Error)
@@ -1068,6 +1075,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _wakeHandoffCancellation?.Cancel();
         _wakeHandoffCancellation?.Dispose();
         _orchestrator.StateChanged -= OrchestratorOnStateChanged;
+        _orchestrator.ProgressChanged -= OrchestratorOnProgressChanged;
         _reminderScheduler.ReminderDue -= ReminderSchedulerOnReminderDue;
         await _reminderScheduler.DisposeAsync().ConfigureAwait(false);
 

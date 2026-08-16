@@ -41,108 +41,19 @@
               Background="Transparent"
               MouseLeftButtonDown="DragSurface_MouseLeftButtonDown"
               ToolTip="Toque: escribir · mantener: hablar · arrastrar desde el aura: mover">
-            <Ellipse Width="66"
-                     Height="66"
-                     Stroke="#2072D9FF"
-                     StrokeThickness="1"
-                     Opacity="0.72"
-                     RenderTransformOrigin="0.5,0.5">
-                <Ellipse.RenderTransform>
-                    <ScaleTransform ScaleX="0.96" ScaleY="0.96" />
-                </Ellipse.RenderTransform>
-                <Ellipse.Effect>
-                    <DropShadowEffect Color="#FF4CCCF4"
-                                      BlurRadius="16"
-                                      ShadowDepth="0"
-                                      Opacity="0.28" />
-                </Ellipse.Effect>
-                <Ellipse.Triggers>
-                    <EventTrigger RoutedEvent="Loaded">
-                        <BeginStoryboard>
-                            <Storyboard RepeatBehavior="Forever">
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                 From="0.96" To="1.03" Duration="0:0:2.8" AutoReverse="True" />
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                 From="0.96" To="1.03" Duration="0:0:2.8" AutoReverse="True" />
-                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                                 From="0.54" To="0.9" Duration="0:0:2.8" AutoReverse="True" />
-                            </Storyboard>
-                        </BeginStoryboard>
-                    </EventTrigger>
-                </Ellipse.Triggers>
-            </Ellipse>
-
-            <Ellipse Width="61"
-                     Height="61"
-                     Stroke="#B072F0C0"
-                     StrokeThickness="1.6"
-                     Visibility="{Binding IsListening, Converter={StaticResource BoolVisibility}}"
-                     RenderTransformOrigin="0.5,0.5">
-                <Ellipse.RenderTransform>
-                    <ScaleTransform ScaleX="0.82" ScaleY="0.82" />
-                </Ellipse.RenderTransform>
-                <Ellipse.Triggers>
-                    <EventTrigger RoutedEvent="Loaded">
-                        <BeginStoryboard>
-                            <Storyboard RepeatBehavior="Forever">
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                 From="0.82" To="1.1" Duration="0:0:0.72" />
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                 From="0.82" To="1.1" Duration="0:0:0.72" />
-                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                                 From="0.95" To="0" Duration="0:0:0.72" />
-                            </Storyboard>
-                        </BeginStoryboard>
-                    </EventTrigger>
-                </Ellipse.Triggers>
-            </Ellipse>
-
-            <Ellipse Width="58"
-                     Height="58"
-                     Stroke="#CC9BB7FF"
-                     StrokeThickness="1.7"
-                     StrokeDashArray="1.5 4"
-                     Visibility="{Binding IsThinking, Converter={StaticResource BoolVisibility}}"
-                     RenderTransformOrigin="0.5,0.5">
-                <Ellipse.RenderTransform>
-                    <RotateTransform />
-                </Ellipse.RenderTransform>
-                <Ellipse.Triggers>
-                    <EventTrigger RoutedEvent="Loaded">
-                        <BeginStoryboard>
-                            <Storyboard RepeatBehavior="Forever">
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
-                                                 From="0" To="360" Duration="0:0:1.35" />
-                            </Storyboard>
-                        </BeginStoryboard>
-                    </EventTrigger>
-                </Ellipse.Triggers>
-            </Ellipse>
-
-            <Ellipse Width="60"
-                     Height="60"
-                     Stroke="#CCFFC56B"
-                     StrokeThickness="1.8"
-                     Visibility="{Binding IsAttention, Converter={StaticResource BoolVisibility}}"
-                     RenderTransformOrigin="0.5,0.5">
-                <Ellipse.RenderTransform>
-                    <ScaleTransform ScaleX="0.9" ScaleY="0.9" />
-                </Ellipse.RenderTransform>
-                <Ellipse.Triggers>
-                    <EventTrigger RoutedEvent="Loaded">
-                        <BeginStoryboard>
-                            <Storyboard RepeatBehavior="Forever">
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
-                                                 From="0.9" To="1.06" Duration="0:0:1" AutoReverse="True" />
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
-                                                 From="0.9" To="1.06" Duration="0:0:1" AutoReverse="True" />
-                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                                 From="1" To="0.42" Duration="0:0:1" AutoReverse="True" />
-                            </Storyboard>
-                        </BeginStoryboard>
-                    </EventTrigger>
-                </Ellipse.Triggers>
-            </Ellipse>
+            <!--
+                La gota. Sin anillos: el fluido mismo dice en qué estado está. Se inserta desde
+                código para evitar la compilación en dos pasadas que WPF dispara cuando el XAML
+                referencia un tipo del propio ensamblado.
+            -->
+            <Grid x:Name="OrbHost" RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="OrbArrivalScale" ScaleX="1" ScaleY="1" />
+                        <TranslateTransform x:Name="OrbArrivalOffset" X="0" Y="0" />
+                    </TransformGroup>
+                </Grid.RenderTransform>
+            </Grid>
 
             <Border Panel.ZIndex="7"
                     Margin="0,-2,0,0"
@@ -176,102 +87,60 @@
                     PreviewMouseLeftButtonDown="OrbButton_PreviewMouseLeftButtonDown"
                     PreviewMouseLeftButtonUp="OrbButton_PreviewMouseLeftButtonUp"
                     AutomationProperties.Name="Viernes: toque para escribir o mantenga para hablar">
+                <!--
+                    El botón ya no dibuja: es sólo la superficie de contacto sobre la gota. Al
+                    presionar hunde el fluido, que es lo que hace un líquido cuando lo tocás.
+                -->
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
-                        <Grid>
-                            <Ellipse x:Name="Core">
-                                <Ellipse.Style>
-                                    <Style TargetType="Ellipse">
-                                        <Setter Property="Fill">
-                                            <Setter.Value>
-                                                <RadialGradientBrush GradientOrigin="0.34,0.3">
-                                                    <GradientStop Color="#FFE8FAFF" Offset="0" />
-                                                    <GradientStop Color="#FF6BD4F6" Offset="0.38" />
-                                                    <GradientStop Color="#FF205D76" Offset="1" />
-                                                </RadialGradientBrush>
-                                            </Setter.Value>
-                                        </Setter>
-                                        <Setter Property="Effect">
-                                            <Setter.Value>
-                                                <DropShadowEffect Color="#FF58D5FF" BlurRadius="16" ShadowDepth="0" Opacity="0.62" />
-                                            </Setter.Value>
-                                        </Setter>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsListening}" Value="True">
-                                                <Setter Property="Fill" Value="#FF72F0C0" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding IsThinking}" Value="True">
-                                                <Setter Property="Fill" Value="#FF9BB7FF" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding IsSpeaking}" Value="True">
-                                                <Setter Property="Fill" Value="#FFFFCE82" />
-                                                <Setter Property="Effect">
-                                                    <Setter.Value>
-                                                        <DropShadowEffect Color="#FFFFC56B" BlurRadius="17" ShadowDepth="0" Opacity="0.68" />
-                                                    </Setter.Value>
-                                                </Setter>
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding IsAttention}" Value="True">
-                                                <Setter Property="Fill" Value="#FFFFC56B" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding IsError}" Value="True">
-                                                <Setter Property="Fill" Value="#FFFF7385" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Ellipse.Style>
-                            </Ellipse>
-
-                            <Ellipse Margin="3"
-                                     IsHitTestVisible="False"
-                                     Stroke="#38E9FAFF"
-                                     StrokeThickness="0.8" />
-
-                            <Ellipse Width="24"
-                                     Height="18"
-                                     Margin="8,7,0,0"
-                                     HorizontalAlignment="Left"
-                                     VerticalAlignment="Top"
-                                     IsHitTestVisible="False">
-                                <Ellipse.Fill>
-                                    <RadialGradientBrush GradientOrigin="0.35,0.35">
-                                        <GradientStop Color="#A8FFFFFF" Offset="0" />
-                                        <GradientStop Color="#32DDF8FF" Offset="0.48" />
-                                        <GradientStop Color="#00FFFFFF" Offset="1" />
-                                    </RadialGradientBrush>
-                                </Ellipse.Fill>
-                                <Ellipse.Effect>
-                                    <BlurEffect Radius="3.5" />
-                                </Ellipse.Effect>
-                            </Ellipse>
-
-                            <Ellipse Width="31"
-                                     Height="22"
-                                     Margin="0,0,2,3"
-                                     HorizontalAlignment="Right"
-                                     VerticalAlignment="Bottom"
-                                     Fill="#25101C27"
-                                     IsHitTestVisible="False">
-                                <Ellipse.Effect>
-                                    <BlurEffect Radius="6" />
-                                </Ellipse.Effect>
-                            </Ellipse>
-
-                            <StackPanel HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"
-                                        Orientation="Horizontal"
-                                        Visibility="{Binding IsSpeaking, Converter={StaticResource BoolVisibility}}">
-                                <Rectangle Width="2" Height="10" Margin="1" RadiusX="1" Fill="#FF1C2832" />
-                                <Rectangle Width="2" Height="16" Margin="1" RadiusX="1" Fill="#FF1C2832" />
-                                <Rectangle Width="2" Height="7" Margin="1" RadiusX="1" Fill="#FF1C2832" />
-                            </StackPanel>
+                        <Grid Background="Transparent" RenderTransformOrigin="0.5,0.5">
+                            <Grid.RenderTransform>
+                                <ScaleTransform x:Name="PressDepth" ScaleX="1" ScaleY="1" />
+                            </Grid.RenderTransform>
+                            <Ellipse x:Name="Touch" Fill="Transparent" />
+                            <Ellipse x:Name="Wet"
+                                     Margin="2"
+                                     Fill="#00FFFFFF"
+                                     IsHitTestVisible="False" />
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Core" Property="Opacity" Value="0.92" />
+                                <Setter TargetName="Wet" Property="Fill" Value="#14FFFFFF" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Core" Property="Opacity" Value="0.76" />
+                                <Setter TargetName="Wet" Property="Fill" Value="#22000000" />
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PressDepth"
+                                                             Storyboard.TargetProperty="ScaleX"
+                                                             To="0.9" Duration="0:0:0.11" />
+                                            <DoubleAnimation Storyboard.TargetName="PressDepth"
+                                                             Storyboard.TargetProperty="ScaleY"
+                                                             To="0.9" Duration="0:0:0.11" />
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PressDepth"
+                                                             Storyboard.TargetProperty="ScaleX"
+                                                             To="1" Duration="0:0:0.4">
+                                                <DoubleAnimation.EasingFunction>
+                                                    <ElasticEase Oscillations="2" Springiness="5" EasingMode="EaseOut" />
+                                                </DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="PressDepth"
+                                                             Storyboard.TargetProperty="ScaleY"
+                                                             To="1" Duration="0:0:0.4">
+                                                <DoubleAnimation.EasingFunction>
+                                                    <ElasticEase Oscillations="2" Springiness="5" EasingMode="EaseOut" />
+                                                </DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -349,7 +218,75 @@
                            LineHeight="17"
                            MaxHeight="36"
                            TextWrapping="Wrap"
-                           TextTrimming="CharacterEllipsis" />
+                           TextTrimming="CharacterEllipsis"
+                           Visibility="{Binding IsMessageVisible, Converter={StaticResource BoolVisibility}}" />
+
+                <!--
+                    Pasos del turno. Reemplazan al mensaje mientras trabaja para que la espera muestre
+                    qué está haciendo, y sobre todo si una herramienta quedó bloqueada por la política.
+                -->
+                <ItemsControl Grid.Row="0"
+                              Margin="0,0,5,2"
+                              ItemsSource="{Binding Steps}"
+                              Visibility="{Binding AreStepsVisible, Converter={StaticResource BoolVisibility}}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="13" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Ellipse Grid.Column="0"
+                                         Width="5"
+                                         Height="5"
+                                         HorizontalAlignment="Left"
+                                         VerticalAlignment="Center">
+                                    <Ellipse.Style>
+                                        <Style TargetType="Ellipse">
+                                            <Setter Property="Fill" Value="#FF2E4055" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDone}" Value="True">
+                                                    <Setter Property="Fill" Value="#FF72F0C0" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsBlocked}" Value="True">
+                                                    <Setter Property="Fill" Value="#FFFFB347" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                    <Setter Property="Fill" Value="#FF9BB7FF" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Ellipse.Style>
+                                </Ellipse>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding Label}"
+                                           ToolTip="{Binding Label}"
+                                           FontFamily="{StaticResource UiFont}"
+                                           FontSize="11"
+                                           LineHeight="15"
+                                           TextTrimming="CharacterEllipsis">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="#FF62758A" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDone}" Value="True">
+                                                    <Setter Property="Foreground" Value="#FF9DB0C2" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsBlocked}" Value="True">
+                                                    <Setter Property="Foreground" Value="#FFFFC56B" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                    <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+                                                    <Setter Property="FontWeight" Value="SemiBold" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
 
                 <Grid Grid.Row="1">
                     <Grid.ColumnDefinitions>

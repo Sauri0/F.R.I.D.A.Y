@@ -1,0 +1,109 @@
+<UserControl x:Class="Viernes.App.Controls.LiquidOrb"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:ClassModifier="internal"
+             Width="70"
+             Height="70"
+             Background="Transparent"
+             IsHitTestVisible="False"
+             UseLayoutRounding="True"
+             SnapsToDevicePixels="True">
+
+    <!--
+        La gota es un único Path cerrado de cuatro curvas Bézier. Lo que la vuelve líquida es que
+        se animan los *puntos de control*, no los anclajes: el contorno se abulta y se relaja sin
+        que la masa se despegue. Es nativo de WPF, no necesita shader y se mantiene nítido a 78 px.
+    -->
+    <Grid x:Name="Root" RenderTransformOrigin="0.5,0.5">
+        <Grid.RenderTransform>
+            <TransformGroup>
+                <ScaleTransform x:Name="MassScale" ScaleX="1" ScaleY="1" />
+                <RotateTransform x:Name="MassTilt" Angle="0" />
+            </TransformGroup>
+        </Grid.RenderTransform>
+
+        <!-- Campo de luz: la gota moja el escritorio alrededor. -->
+        <Ellipse x:Name="GlowField"
+                 Width="70"
+                 Height="70"
+                 Opacity="0.8"
+                 RenderTransformOrigin="0.5,0.5">
+            <Ellipse.RenderTransform>
+                <ScaleTransform x:Name="GlowScale" ScaleX="1" ScaleY="1" />
+            </Ellipse.RenderTransform>
+            <Ellipse.Fill>
+                <RadialGradientBrush>
+                    <GradientStop x:Name="GlowInner" Color="#4D72D9FF" Offset="0.30" />
+                    <GradientStop Color="#0072D9FF" Offset="0.62" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+
+        <!-- La masa. Los ocho puntos de control se animan con períodos distintos. -->
+        <Path x:Name="Mass">
+            <Path.Fill>
+                <RadialGradientBrush GradientOrigin="0.34,0.28" Center="0.5,0.5" RadiusX="0.62" RadiusY="0.62">
+                    <GradientStop x:Name="MassLight" Color="#FFFFFFFF" Offset="0" />
+                    <GradientStop x:Name="MassBody" Color="#FF72D9FF" Offset="0.44" />
+                    <GradientStop x:Name="MassDeep" Color="#FF1B5A73" Offset="1" />
+                </RadialGradientBrush>
+            </Path.Fill>
+            <Path.Effect>
+                <DropShadowEffect x:Name="MassGlow"
+                                  Color="#FF72D9FF"
+                                  BlurRadius="20"
+                                  ShadowDepth="0"
+                                  Opacity="0.6" />
+            </Path.Effect>
+            <Path.Data>
+                <PathGeometry>
+                    <PathFigure StartPoint="35,9" IsClosed="True" IsFilled="True">
+                        <BezierSegment x:Name="ArcNE" Point1="49,9"  Point2="61,21" Point3="61,35" />
+                        <BezierSegment x:Name="ArcSE" Point1="61,49" Point2="49,61" Point3="35,61" />
+                        <BezierSegment x:Name="ArcSW" Point1="21,61" Point2="9,49"  Point3="9,35" />
+                        <BezierSegment x:Name="ArcNW" Point1="9,21"  Point2="21,9"  Point3="35,9" />
+                    </PathFigure>
+                </PathGeometry>
+            </Path.Data>
+        </Path>
+
+        <!--
+            El brillo especular va por encima y NO se deforma con la masa: es luz reflejada sobre
+            la superficie, no parte del fluido. Deriva con su propio ciclo.
+        -->
+        <Ellipse x:Name="Sheen"
+                 Width="46"
+                 Height="46"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center"
+                 IsHitTestVisible="False"
+                 RenderTransformOrigin="0.5,0.5">
+            <Ellipse.RenderTransform>
+                <TranslateTransform x:Name="SheenDrift" X="0" Y="0" />
+            </Ellipse.RenderTransform>
+            <Ellipse.Fill>
+                <RadialGradientBrush GradientOrigin="0.32,0.24" Center="0.32,0.24" RadiusX="0.46" RadiusY="0.34">
+                    <GradientStop Color="#F2FFFFFF" Offset="0" />
+                    <GradientStop Color="#40FFFFFF" Offset="0.45" />
+                    <GradientStop Color="#00FFFFFF" Offset="1" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+
+        <!-- Segundo reflejo, más chico y abajo: le da volumen de gota, no de esfera. -->
+        <Ellipse Width="22"
+                 Height="13"
+                 Margin="0,0,10,14"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Bottom"
+                 IsHitTestVisible="False"
+                 Opacity="0.5">
+            <Ellipse.Fill>
+                <RadialGradientBrush>
+                    <GradientStop Color="#66FFFFFF" Offset="0" />
+                    <GradientStop Color="#00FFFFFF" Offset="1" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+    </Grid>
+</UserControl>
