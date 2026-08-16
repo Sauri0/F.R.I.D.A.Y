@@ -54,6 +54,8 @@ El ejecutable queda en `%LOCALAPPDATA%\Viernes\Published\win-x64\Viernes.exe`. E
 - **Escribir:** hacé un toque corto sobre el núcleo; aparece una entrada compacta. `Enter` envía.
 - **Hablar por PTT:** mantené presionado el núcleo y soltá al terminar. Es el fallback manual y privado.
 - **Wake word:** al primer inicio se intenta activar la demo local con `Viernes` y `Hola Viernes`. Admite entre una y ocho frases configurables. El detector incluido usa SAPI con gramática exacta y está marcado **DEMO/no robusto**: puede perder activaciones o activarse por error. No debe confundirse con un wake engine de producción.
+- **Aparecer al ser llamado:** con `Escuchar aunque esté oculto` (activado por defecto, toggle en la bandeja), Viernes sigue atento con el orbe escondido y se muestra solo al oír su nombre, sin robarte el foco del teclado. Mute sigue siendo el corte duro que libera el micrófono. Ver [seguridad](docs/SECURITY.md#escucha-con-el-orbe-oculto).
+- **Recordatorios que suenan:** un recordatorio vencido trae el orbe al frente, avisa por la bandeja y lo dice en voz alta. Si la máquina estuvo apagada, los que quedaron viejos no se vuelcan todos juntos: se marcan en silencio y siguen listados en `/recordatorios`.
 - **Privacidad:** el indicador unido al orbe muestra si el micrófono está activo. Mute detiene captura y síntesis; PTT sigue siendo la alternativa si wake word no resulta fiable.
 - **Estado breve:** la etiqueta muestra `Escuchando`, `Pensando`, `Hablando` o `Revisar`; la burbuja conserva sólo dos líneas de contexto y desaparece después de unos segundos.
 - **Bandeja:** permite mostrar/ocultar, silenciar, encender/apagar la activación por voz demo, habilitar inicio con Windows y salir realmente.
@@ -95,22 +97,28 @@ Recordatorios y agenda viven en `%LOCALAPPDATA%\Viernes\assistant-data.json`; su
 
 ## OpenRouter, sin guardar secretos
 
-La única credencial prevista es `OPENROUTER_API_KEY`. Viernes la lee del entorno del proceso y no ofrece un campo de clave, archivo `.env`, argumento de línea de comandos ni almacenamiento local para ella. Este repositorio se entrega y se prueba sin una clave.
+La única credencial prevista es `OPENROUTER_API_KEY`. Viernes la lee del entorno del proceso y **no ofrece un campo de clave, archivo `.env`, argumento de línea de comandos ni almacenamiento local para ella**. No existe un archivo donde pegarla: es a propósito. Este repositorio se entrega y se prueba sin una clave.
 
-Cuando el usuario decida habilitar OpenRouter fuera de esta prueba, debe crear `OPENROUTER_API_KEY` desde **Editar las variables de entorno de esta cuenta** de Windows y reiniciar Viernes. No pegues la clave en comandos, archivos, logs, capturas, issues ni reportes; la documentación no solicita ni contiene un valor real.
+Para habilitarla hay que crearla como variable de entorno **de usuario**, desde `Editar las variables de entorno de esta cuenta` de Windows, y reiniciar Viernes. No la pegues en comandos, archivos, logs, capturas, issues ni reportes; la documentación no solicita ni contiene un valor real.
 
-La cartera inicial se puede cambiar sin recompilar:
+### Selección de modelo
 
-```powershell
-$env:VIERNES_OPENROUTER_FAST_MODEL = 'openai/gpt-5.6-luna'
-$env:VIERNES_OPENROUTER_FAST_FALLBACK_MODELS = '~google/gemini-flash-latest'
-$env:VIERNES_OPENROUTER_AGENT_MODEL = 'openai/gpt-5.6-terra'
-$env:VIERNES_OPENROUTER_REASONING_MODEL = '~anthropic/claude-sonnet-latest'
-```
+El valor por defecto es el **router automático** de OpenRouter (`openrouter/auto`): clasifica el pedido y elige entre los modelos que la comunidad más usa para esa tarea, sin recargo, con tool calling y actualizándose solo. Lo que distingue a cada rol ya no es un slug fijo sino la **banda de costo**.
 
-El MVP conversacional usa el rol **fast**. Agent, reasoning, premium, embeddings y resumen local están modelados como selecciones explícitas, pero el widget no escala automáticamente a un modelo más caro. Premium no tiene modelo predeterminado y exige aprobación explícita en su contrato. Al cambiar un modelo hay que validar soporte real de tool calling, español rioplatense, latencia y costo.
+| Variable | Función | Default |
+|---|---|---|
+| `VIERNES_OPENROUTER_PRESET` | preset del dashboard; gobierna modelo y routing desde el servidor | sin valor |
+| `VIERNES_OPENROUTER_FAST_COST_TIER` | banda del lane fast | `low` |
+| `VIERNES_OPENROUTER_AGENT_COST_TIER` | banda de agent | `medium` |
+| `VIERNES_OPENROUTER_REASONING_COST_TIER` | banda de reasoning | `high` |
+| `VIERNES_OPENROUTER_ALLOWED_MODELS` | patrones permitidos, ej. `anthropic/*,openai/*` | sin restricción |
+| `VIERNES_OPENROUTER_EXCLUDED_MODELS` | patrones excluidos | sin valor |
+| `VIERNES_OPENROUTER_MAX_PROMPT_PRICE` | techo USD por millón de tokens de entrada | sin valor |
+| `VIERNES_OPENROUTER_MAX_COMPLETION_PRICE` | techo USD por millón de salida | sin valor |
 
-Los nombres legacy `VIERNES_OPENROUTER_MODEL` y `VIERNES_OPENROUTER_FALLBACK_MODELS` siguen aceptados, con menor precedencia que las variables `FAST_*`.
+Fijar un modelo concreto sigue siendo posible con `VIERNES_OPENROUTER_FAST_MODEL`; en ese caso vuelven a aplicarse los fallbacks locales de `VIERNES_OPENROUTER_FAST_FALLBACK_MODELS`. Con router o preset no se encadenan slugs locales: el servidor ya resuelve alternativas.
+
+El MVP conversacional usa el rol **fast**. Agent, reasoning y premium están modelados como selecciones explícitas; el widget no escala automáticamente a una banda más cara. Como el modelo puede cambiar entre días, el ledger guarda el modelo realmente resuelto de cada completion.
 
 Más detalle: [cerebro, modelos y costo](docs/BRAIN.md) y [registro de capacidades](docs/CAPABILITIES.md).
 
@@ -171,9 +179,10 @@ Un modelo no concede permisos: archivos, agenda externa, navegador y acciones Wi
 
 ## Siguiente tramo
 
-1. Validar el recorrido wake→Whisper con voces reales, ruido y español rioplatense, y corregir UX/falsos positivos.
-2. Sustituir la demo SAPI por un wake engine local evaluado con ruido, distancia y voces reales.
-3. Mostrar totales/costo y aprobación de override en una vista breve, y estimar el costo de la próxima petición antes de enviarla.
-4. Agregar aprobación/rechazo de sugerencias y borrado total con confirmación, sin convertir el orbe en un panel permanente.
-5. Agregar notificaciones Windows y calendarios externos con OAuth, scopes mínimos y confirmaciones.
-6. Empaquetar y firmar la aplicación, y sumar pruebas UI/DPI/múltiples monitores.
+1. Sustituir la demo SAPI por un wake engine local evaluado con ruido, distancia y voces reales; el candidato es openWakeWord (ONNX, español, sin vencimiento) sobre `IWakeWordService`.
+2. Reemplazar el VAD energético por Silero VAD y subir el modelo Whisper a `large-v3-turbo`.
+3. Elegir la dirección visual del orbe entre los bocetos de [`docs/bocetos/`](docs/bocetos/) e implementarla.
+4. Sumar pruebas a `Viernes.Platform.Windows`, empezando por el handoff wake→STT.
+5. Mostrar totales/costo y aprobación de override en una vista breve.
+6. Agregar aprobación/rechazo de sugerencias y borrado total con confirmación, sin convertir el orbe en un panel permanente.
+7. Agregar calendarios externos con OAuth, scopes mínimos y confirmaciones.

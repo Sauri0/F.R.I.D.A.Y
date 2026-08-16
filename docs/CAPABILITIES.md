@@ -16,7 +16,7 @@ Un modelo no obtiene permisos por ser más capaz. Viernes sólo puede hacer algo
 | TTS | SAPI/voz local de Windows | sí | cancelable y sujeto a mute |
 | Conversación | OpenRouter chat completions fast | sí, sólo con clave | HTTPS, fallback fast, máximo de iteraciones |
 | Selección por rol | fast/agent/reasoning/premium/embeddings/resumen | API de Core | sólo fast en flujo normal; premium opt-in |
-| Recordatorios | JSON local + tools create/list | sí, por comandos o tool calls | no agenda notificaciones todavía |
+| Recordatorios | JSON local + tools create/list + scheduler | sí, con aviso al vencer | orbe al frente, globo de bandeja y voz; sin toast nativo de Windows |
 | Agenda local | JSON local + tools create/list | sí, por comandos o tool calls | no sincroniza calendarios externos |
 | Búsqueda web | tool placeholder | sí | simulada; no hace red ni abre navegador |
 | Acciones Windows | `pc_action` | sí | confirmación; resultado simulado; sensible/destructivo bloqueado |

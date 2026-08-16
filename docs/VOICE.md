@@ -127,7 +127,9 @@ Ese umbral es un VAD simple de demostración y puede necesitar calibración; nun
 - PTT: mantener el núcleo; soltar finaliza y transcribe.
 - Toque corto: cancela la captura iniciada y abre texto.
 
-Con wake activo, el indicador permanece encendido aun si el orbe está idle. La bandeja muestra el estado y permite apagar wake sin cerrar la app. Ocultar el orbe cancela la frase activa y pausa wake por privacidad; al mostrarlo lo reanuda si seguía habilitado y no está muted. Salir dispone todos los servicios.
+Con wake activo, el indicador permanece encendido aun si el orbe está idle. La bandeja muestra el estado y permite apagar wake sin cerrar la app.
+
+Ocultar el orbe cancela la frase en curso pero mantiene la escucha: con `ListenWhileHidden` —activado por defecto, con toggle en la bandeja y override por `VIERNES_LISTEN_WHILE_HIDDEN`— Viernes sigue atento y **se muestra solo al oír su nombre**, sin robar el foco del teclado. Mute es el corte duro que libera el micrófono. Salir dispone todos los servicios.
 
 ## Privacidad operacional
 

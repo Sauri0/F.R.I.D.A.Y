@@ -29,8 +29,24 @@ Controles obligatorios ya expresados en la arquitectura:
 - wake y STT nunca toman el dispositivo simultáneamente;
 - timeouts de silencio y duración máxima tras activación;
 - PTT permanece como fallback;
-- ocultar el orbe cancela la frase activa y pausa wake por privacidad; al volver a mostrarlo, lo reanuda sólo si seguía habilitado y no está muted;
+- ocultar el orbe cancela la frase activa pero **no** apaga la escucha: el micrófono sigue abierto para que Viernes pueda aparecer al ser llamado;
 - salir dispone wake, STT y TTS.
+
+### Escucha con el orbe oculto
+
+`ListenWhileHidden` viene activado y mantiene el wake vivo aunque el orbe no esté en pantalla; al
+detectar la frase, Viernes se muestra solo. Esto es un cambio deliberado del contrato anterior, en el
+que ocultar equivalía a apagar el micrófono.
+
+La consecuencia hay que decirla sin vueltas: **con esta opción activa el micrófono puede estar abierto
+sin ningún elemento visible en pantalla**. Los controles que la acotan son:
+
+- **mute sigue siendo el corte duro**: libera el dispositivo, apaga wake y cancela TTS, esté oculto o no;
+- el ícono de bandeja expone el estado y permite apagar `Escuchar aunque esté oculto` sin cerrar la app;
+- `VIERNES_LISTEN_WHILE_HIDDEN=false` restaura el comportamiento anterior;
+- salir de Viernes libera todo.
+
+El audio se sigue procesando localmente y nada de lo capturado antes de la frase se guarda ni se envía.
 
 Whisper y SAPI procesan audio localmente. OpenRouter recibe texto, no audio. Las transcripciones parciales no se guardan en telemetría ni memoria. Un proveedor STT externo futuro necesitará consentimiento y credencial propia; no reutilizará la clave de OpenRouter de manera implícita.
 
