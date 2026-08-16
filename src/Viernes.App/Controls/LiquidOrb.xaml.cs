@@ -24,21 +24,38 @@ internal partial class LiquidOrb : UserControl
 {
     private static readonly Duration ColorFade = new(TimeSpan.FromMilliseconds(420));
 
-    /// <summary>Posición en calma y posición abultada de cada punto de control.</summary>
+    /// <summary>
+    /// Puntos de control y anclajes de la masa. Las excursiones son amplias a propósito: con
+    /// desplazamientos de dos o tres píxeles el contorno se ve rígido, no líquido.
+    /// </summary>
     private static readonly (string Segment, string Property, Point Calm, Point Swell)[] ControlPoints =
     [
-        ("ArcNE", "Point1", new Point(49, 9),  new Point(52, 6)),
-        ("ArcNE", "Point2", new Point(61, 21), new Point(65, 19)),
-        ("ArcSE", "Point1", new Point(61, 49), new Point(64, 53)),
-        ("ArcSE", "Point2", new Point(49, 61), new Point(46, 65)),
-        ("ArcSW", "Point1", new Point(21, 61), new Point(17, 64)),
-        ("ArcSW", "Point2", new Point(9, 49),  new Point(5, 46)),
-        ("ArcNW", "Point1", new Point(9, 21),  new Point(6, 24)),
-        ("ArcNW", "Point2", new Point(21, 9),  new Point(24, 5))
+        ("ArcNE", "Point1", new Point(48, 11), new Point(55, 4)),
+        ("ArcNE", "Point2", new Point(59, 22), new Point(67, 17)),
+        ("ArcNE", "Point3", new Point(59, 35), new Point(64, 31)),
+        ("ArcSE", "Point1", new Point(59, 48), new Point(66, 54)),
+        ("ArcSE", "Point2", new Point(48, 59), new Point(42, 67)),
+        ("ArcSE", "Point3", new Point(35, 59), new Point(32, 65)),
+        ("ArcSW", "Point1", new Point(22, 59), new Point(14, 65)),
+        ("ArcSW", "Point2", new Point(11, 48), new Point(3, 43)),
+        ("ArcSW", "Point3", new Point(11, 35), new Point(6, 38)),
+        ("ArcNW", "Point1", new Point(11, 22), new Point(4, 27)),
+        ("ArcNW", "Point2", new Point(22, 11), new Point(28, 3))
+    ];
+
+    /// <summary>
+    /// Gotas satélite. Orbitan cerca del borde y siempre solapan la masa, así la unión Nonzero
+    /// las funde sin costura: se ven como lóbulos que crecen y se reabsorben, no como puntos sueltos.
+    /// </summary>
+    private static readonly (string Name, Point Calm, Point Swell, double CalmRadius, double SwellRadius, double Seconds)[] Droplets =
+    [
+        ("Drop1", new Point(50, 26), new Point(58, 18), 9.5, 13.0, 5.3),
+        ("Drop2", new Point(21, 44), new Point(12, 50), 8.5, 12.0, 6.7),
+        ("Drop3", new Point(38, 52), new Point(33, 62), 8.0, 11.0, 4.9)
     ];
 
     /// <summary>Períodos deliberadamente no conmensurables: el conjunto no vuelve a alinearse.</summary>
-    private static readonly double[] Periods = [7.0, 8.3, 9.1, 10.7, 11.3, 12.1, 13.7, 6.7];
+    private static readonly double[] Periods = [4.3, 5.1, 6.7, 5.9, 7.3, 4.7, 6.1, 8.3, 5.5, 7.9, 6.3];
 
     private Storyboard? _liquid;
     private Storyboard? _sheen;
@@ -213,20 +230,51 @@ internal partial class LiquidOrb : UserControl
             storyboard.Children.Add(animation);
         }
 
-        // Respiración global: la masa entera se estira apenas, en otro período todavía.
-        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleXProperty, 1.0, 1.035, 11.9));
-        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleYProperty, 1.02, 0.975, 9.7));
-        storyboard.Children.Add(Rotate("MassTilt", -4.5, 4.5, 13.1));
+        foreach (var (name, calm, swell, calmRadius, swellRadius, seconds) in Droplets)
+        {
+            var move = new PointAnimation
+            {
+                From = calm,
+                To = swell,
+                Duration = new Duration(TimeSpan.FromSeconds(seconds)),
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            };
+            Storyboard.SetTargetName(move, name);
+            Storyboard.SetTargetProperty(move, new PropertyPath(EllipseGeometry.CenterProperty));
+            storyboard.Children.Add(move);
+
+            // El radio corre en otro período que el desplazamiento: la gota se hincha fuera de fase.
+            storyboard.Children.Add(Timeline(
+                name,
+                EllipseGeometry.RadiusXProperty,
+                calmRadius,
+                swellRadius,
+                seconds * 1.37));
+            storyboard.Children.Add(Timeline(
+                name,
+                EllipseGeometry.RadiusYProperty,
+                swellRadius,
+                calmRadius,
+                seconds * 1.11));
+        }
+
+        // Respiración global: la masa entera se estira, con un desfasaje más que hace de latido lento.
+        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleXProperty, 0.97, 1.07, 6.9));
+        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleYProperty, 1.06, 0.95, 5.7));
+        storyboard.Children.Add(Rotate("MassTilt", -9, 9, 8.1));
         return storyboard;
     }
 
     private static Storyboard BuildSheenStoryboard()
     {
         var storyboard = new Storyboard { RepeatBehavior = RepeatBehavior.Forever };
-        storyboard.Children.Add(Translate("SheenDrift", TranslateTransform.XProperty, -1.6, 2.4, 10.3));
-        storyboard.Children.Add(Translate("SheenDrift", TranslateTransform.YProperty, 1.2, -2.0, 12.7));
-        storyboard.Children.Add(Scale("GlowScale", ScaleTransform.ScaleXProperty, 0.97, 1.06, 8.9));
-        storyboard.Children.Add(Scale("GlowScale", ScaleTransform.ScaleYProperty, 0.97, 1.06, 8.9));
+        // El brillo se desplaza más que la masa: es luz corriendo sobre una superficie mojada.
+        storyboard.Children.Add(Translate("SheenDrift", TranslateTransform.XProperty, -5.5, 6.5, 6.3));
+        storyboard.Children.Add(Translate("SheenDrift", TranslateTransform.YProperty, 4.0, -5.0, 7.7));
+        storyboard.Children.Add(Scale("GlowScale", ScaleTransform.ScaleXProperty, 0.94, 1.11, 5.9));
+        storyboard.Children.Add(Scale("GlowScale", ScaleTransform.ScaleYProperty, 0.94, 1.11, 5.9));
         return storyboard;
     }
 

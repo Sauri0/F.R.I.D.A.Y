@@ -55,15 +55,25 @@
                                   ShadowDepth="0"
                                   Opacity="0.6" />
             </Path.Effect>
+            <!--
+                Nonzero funde las geometrías en una sola silueta: las gotas satélite se unen a la
+                masa sin costura. Es el equivalente nativo a las metaballs, sin shader ni filtro.
+                Nunca se separan del todo, así el conjunto siempre lee como un cuerpo continuo.
+            -->
             <Path.Data>
-                <PathGeometry>
-                    <PathFigure StartPoint="35,9" IsClosed="True" IsFilled="True">
-                        <BezierSegment x:Name="ArcNE" Point1="49,9"  Point2="61,21" Point3="61,35" />
-                        <BezierSegment x:Name="ArcSE" Point1="61,49" Point2="49,61" Point3="35,61" />
-                        <BezierSegment x:Name="ArcSW" Point1="21,61" Point2="9,49"  Point3="9,35" />
-                        <BezierSegment x:Name="ArcNW" Point1="9,21"  Point2="21,9"  Point3="35,9" />
-                    </PathFigure>
-                </PathGeometry>
+                <GeometryGroup FillRule="Nonzero">
+                    <PathGeometry>
+                        <PathFigure StartPoint="35,11" IsClosed="True" IsFilled="True">
+                            <BezierSegment x:Name="ArcNE" Point1="48,11" Point2="59,22" Point3="59,35" />
+                            <BezierSegment x:Name="ArcSE" Point1="59,48" Point2="48,59" Point3="35,59" />
+                            <BezierSegment x:Name="ArcSW" Point1="22,59" Point2="11,48" Point3="11,35" />
+                            <BezierSegment x:Name="ArcNW" Point1="11,22" Point2="22,11" Point3="35,11" />
+                        </PathFigure>
+                    </PathGeometry>
+                    <EllipseGeometry x:Name="Drop1" Center="52,24" RadiusX="10" RadiusY="10" />
+                    <EllipseGeometry x:Name="Drop2" Center="20,45" RadiusX="9"  RadiusY="9" />
+                    <EllipseGeometry x:Name="Drop3" Center="38,54" RadiusX="8"  RadiusY="8" />
+                </GeometryGroup>
             </Path.Data>
         </Path>
 
