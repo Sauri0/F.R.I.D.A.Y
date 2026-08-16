@@ -24,8 +24,8 @@ namespace Viernes.App.Diagnostics;
 /// </remarks>
 internal static class OrbSnapshot
 {
-    private const int Cell = 90;
-    private const int Zoom = 4;
+    private const int Cell = 108;
+    private const int Zoom = 3;
     private const double Dpi = 96 * Zoom;
 
     private static readonly (AssistantVisualState State, double Seconds, bool Microphone)[] Frames =

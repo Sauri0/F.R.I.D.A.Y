@@ -27,8 +27,8 @@ public partial class MainWindow : Window
     private readonly WindowPlacementStore _placementStore;
     private bool _pushToTalkActive;
     private CancellationTokenSource? _pushToTalkCancellation;
-    private double _appliedWidgetWidth = 90;
-    private double _appliedWidgetHeight = 90;
+    private double _appliedWidgetWidth = 108;
+    private double _appliedWidgetHeight = 108;
     private bool _expandsLeft;
 
     private readonly LiquidOrb _orb = new();
@@ -99,8 +99,8 @@ public partial class MainWindow : Window
 
         var workArea = SystemParameters.WorkArea;
         var previousWidth = _appliedWidgetWidth;
-        var isBecomingExpanded = previousWidth <= 100 && targetWidth > 100;
-        var isBecomingMinimal = previousWidth > 100 && targetWidth <= 100;
+        var isBecomingExpanded = previousWidth <= 120 && targetWidth > 120;
+        var isBecomingMinimal = previousWidth > 120 && targetWidth <= 120;
 
         if (isBecomingExpanded)
         {
@@ -147,7 +147,7 @@ public partial class MainWindow : Window
         if (expandsLeft)
         {
             LeadingColumn.Width = new GridLength(1, GridUnitType.Star);
-            TrailingColumn.Width = new GridLength(80);
+            TrailingColumn.Width = new GridLength(96);
             Grid.SetColumn(AssistantBubble, 0);
             Grid.SetColumn(OrbDragSurface, 1);
             OrbDragSurface.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
@@ -157,7 +157,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        LeadingColumn.Width = new GridLength(80);
+        LeadingColumn.Width = new GridLength(96);
         TrailingColumn.Width = new GridLength(1, GridUnitType.Star);
         Grid.SetColumn(OrbDragSurface, 0);
         Grid.SetColumn(AssistantBubble, 1);
@@ -167,12 +167,41 @@ public partial class MainWindow : Window
         AssistantBubble.CornerRadius = new CornerRadius(5, 24, 24, 5);
     }
 
-    private void DragSurface_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// Presionar en cualquier parte del orbe arrastra; si se suelta sin haberse movido, cuenta como
+    /// toque y abre el panel. Antes había que apuntar al aro exterior, que a 96 px es una franja
+    /// de pocos píxeles y volvía tedioso algo que se hace todo el tiempo.
+    /// </summary>
+    private void Orb_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.LeftButton == MouseButtonState.Pressed)
+        if (e.LeftButton != MouseButtonState.Pressed)
         {
+            return;
+        }
+
+        e.Handled = true;
+        var origin = PointToScreen(e.GetPosition(this));
+
+        try
+        {
+            // DragMove no vuelve hasta que se suelta el botón.
             DragMove();
         }
+        catch (InvalidOperationException)
+        {
+            // El botón se soltó antes de que arrancara el arrastre; sigue contando como toque.
+        }
+
+        var travelled = (PointToScreen(Mouse.GetPosition(this)) - origin).Length;
+        if (travelled <= 4)
+        {
+            _viewModel.OpenTextInput();
+            PromptTextBox.Focus();
+            Keyboard.Focus(PromptTextBox);
+            return;
+        }
+
+        SaveOrbPlacement();
     }
 
     private void HideButton_Click(object sender, RoutedEventArgs e)
@@ -270,8 +299,8 @@ public partial class MainWindow : Window
 
     internal void SaveOrbPlacement()
     {
-        var anchorLeft = Left + (_expandsLeft ? Math.Max(0, _appliedWidgetWidth - 90) : 0);
-        var anchorTop = Top + Math.Max(0, _appliedWidgetHeight - 90) / 2;
+        var anchorLeft = Left + (_expandsLeft ? Math.Max(0, _appliedWidgetWidth - 108) : 0);
+        var anchorTop = Top + Math.Max(0, _appliedWidgetHeight - 108) / 2;
         _placementStore.Save(this, anchorLeft, anchorTop);
     }
 
@@ -289,17 +318,6 @@ public partial class MainWindow : Window
         _ = _viewModel.CancelVoiceAsync(CancellationToken.None);
     }
 
-    /// <summary>
-    /// Tocar el orbe abre la entrada de texto y nada más. Antes mantenerlo presionado abría el
-    /// micrófono, lo que convertía un gesto de uso corriente en una toma de audio no buscada.
-    /// Para hablar está el nombre; el micrófono se abre sólo cuando se lo llama.
-    /// </summary>
-    private void OrbButton_Click(object sender, RoutedEventArgs e)
-    {
-        _viewModel.OpenTextInput();
-        PromptTextBox.Focus();
-        Keyboard.Focus(PromptTextBox);
-    }
 
     private async void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {

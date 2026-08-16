@@ -5,10 +5,10 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         mc:Ignorable="d"
         Title="Viernes"
-        Width="{Binding WidgetWidth, FallbackValue=90}"
-        Height="{Binding WidgetHeight, FallbackValue=90}"
-        MinWidth="84"
-        MinHeight="84"
+        Width="{Binding WidgetWidth, FallbackValue=108}"
+        Height="{Binding WidgetHeight, FallbackValue=108}"
+        MinWidth="100"
+        MinHeight="100"
         WindowStyle="None"
         ResizeMode="NoResize"
         AllowsTransparency="True"
@@ -27,20 +27,20 @@
 
     <Grid x:Name="ShellGrid" Margin="4" Background="Transparent">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition x:Name="LeadingColumn" Width="80" />
+            <ColumnDefinition x:Name="LeadingColumn" Width="96" />
             <ColumnDefinition x:Name="TrailingColumn" Width="*" />
         </Grid.ColumnDefinitions>
 
         <!-- El aura es también la zona de arrastre. El núcleo interior conserva PTT. -->
         <Grid x:Name="OrbDragSurface"
               Grid.Column="0"
-              Width="80"
-              Height="80"
+              Width="96"
+              Height="96"
               HorizontalAlignment="Left"
               VerticalAlignment="Center"
               Background="Transparent"
-              MouseLeftButtonDown="DragSurface_MouseLeftButtonDown"
-              ToolTip="Tocar: escribir · arrastrar desde el aura: mover · decí «Viernes» para hablar">
+              PreviewMouseLeftButtonDown="Orb_PreviewMouseLeftButtonDown"
+              ToolTip="Tocar: escribir · arrastrar: mover · decí «Viernes» para hablar">
             <!--
                 La gota. Sin anillos: el fluido mismo dice en qué estado está. Se inserta desde
                 código para evitar la compilación en dos pasadas que WPF dispara cuando el XAML
@@ -74,8 +74,8 @@
             </Border>
 
             <Button x:Name="OrbButton"
-                    Width="60"
-                    Height="60"
+                    Width="72"
+                    Height="72"
                     Padding="0"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -83,8 +83,8 @@
                     Background="Transparent"
                     Cursor="Hand"
                     Focusable="True"
-                    Click="OrbButton_Click"
-                    AutomationProperties.Name="Viernes: tocar para escribir">
+                    PreviewMouseLeftButtonDown="Orb_PreviewMouseLeftButtonDown"
+                    AutomationProperties.Name="Viernes: tocar para escribir, arrastrar para mover">
                 <!--
                     El botón ya no dibuja: es sólo la superficie de contacto sobre la gota. Al
                     presionar hunde el fluido, que es lo que hace un líquido cuando lo tocás.

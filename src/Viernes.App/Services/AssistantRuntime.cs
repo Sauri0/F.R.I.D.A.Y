@@ -8,11 +8,17 @@ using Viernes.Core.Persistence;
 using Viernes.Core.Scheduling;
 using Viernes.Core.Tools;
 using Viernes.Core.Usage;
+using Viernes.Core.Voice;
 using Viernes.Memory.Persistence;
 using Viernes.Platform.Windows.Speech;
 using Viernes.Platform.Windows.Speech.Recognition;
 using Viernes.Platform.Windows.Speech.WakeWord;
 using Viernes.Platform.Windows.Storage;
+
+// Ambos ensamblados declaran el modo de activación; el shell usa el de la capa de plataforma,
+// que es el que se persiste en las preferencias locales.
+using VoiceActivationMode = Viernes.Platform.Windows.Storage.VoiceActivationMode;
+using SpeechRecognitionResult = Viernes.Platform.Windows.Speech.SpeechRecognitionResult;
 
 namespace Viernes.App.Services;
 
@@ -36,6 +42,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private readonly UsageLedger _usageLedger;
     private readonly LocalCommandRouter _localCommands;
     private readonly ISpeechService _speechSynthesizer;
+    private readonly OpenRouterSpeechClient _neuralVoice;
+    private readonly NeuralSpeechPlayer _neuralPlayer = new();
+    private CancellationTokenSource? _speechCancellation;
     private readonly JsonUserDataStore _dataStore = new();
     private readonly ReminderScheduler _reminderScheduler;
     private readonly LocalSettingsStore _settingsStore = new();
@@ -80,6 +89,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _localCommands = new LocalCommandRouter(_orchestrator, new JsonPersonalMemoryStore());
         _reminderScheduler = new ReminderScheduler(_dataStore);
         _reminderScheduler.ReminderDue += ReminderSchedulerOnReminderDue;
+        _neuralVoice = new OpenRouterSpeechClient(
+            _httpClient,
+            _options,
+            SpeechSynthesisOptions.FromEnvironment());
         _speechSynthesizer = new SpeechService(new SpeechServiceOptions
         {
             RecognitionCulture = "es-AR",
@@ -203,7 +216,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         try
         {
             await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
-            await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
+            _speechCancellation?.Cancel();
+        _neuralPlayer.Stop();
+        await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
             return await ProcessRequestAsync(text, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -347,7 +362,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         try
         {
             await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
-            await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
+            _speechCancellation?.Cancel();
+        _neuralPlayer.Stop();
+        await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
             _orchestrator.SetListening(true);
             var result = await _recognition.StartPushToTalkAsync(cancellationToken).ConfigureAwait(false);
             if (!result.Succeeded)
@@ -446,6 +463,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             await _recognition.CancelPushToTalkAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        _speechCancellation?.Cancel();
+        _neuralPlayer.Stop();
         await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
         _orchestrator.SetListening(false);
         Publish(new AssistantRuntimeUpdate(
@@ -635,10 +654,139 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         Publish(new AssistantRuntimeUpdate(
             AssistantVisualState.Speaking,
             "Hablando · podés silenciarme cuando quieras"));
-        var result = await _speechSynthesizer.SpeakAsync(spokenText, cancellationToken).ConfigureAwait(false);
+
+        _speechCancellation?.Dispose();
+        _speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var token = _speechCancellation.Token;
+
+        var spoke = await TrySpeakNeuralAsync(spokenText, token).ConfigureAwait(false);
+        if (!spoke && !token.IsCancellationRequested)
+        {
+            // La voz de Windows queda como red: peor timbre, pero siempre disponible y sin red.
+            var result = await _speechSynthesizer.SpeakAsync(spokenText, token).ConfigureAwait(false);
+            spoke = result.Succeeded;
+        }
+
         Publish(new AssistantRuntimeUpdate(
-            result.Succeeded ? AssistantVisualState.Idle : AssistantVisualState.Error,
-            result.Succeeded ? "Disponible" : "La respuesta quedó en pantalla; la voz no está disponible"));
+            spoke || token.IsCancellationRequested ? AssistantVisualState.Idle : AssistantVisualState.Error,
+            spoke || token.IsCancellationRequested
+                ? "Disponible"
+                : "La respuesta quedó en pantalla; la voz no está disponible"));
+    }
+
+    /// <summary>
+    /// Habla por oraciones: sintetiza la siguiente mientras suena la actual, así el primer sonido
+    /// llega en cuanto está lista la primera frase en vez de esperar la respuesta entera.
+    /// </summary>
+    private async Task<bool> TrySpeakNeuralAsync(string text, CancellationToken cancellationToken)
+    {
+        if (!_neuralVoice.IsAvailable)
+        {
+            return false;
+        }
+
+        var chunks = SplitIntoSpokenChunks(text);
+        if (chunks.Count == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var pending = _neuralVoice.SynthesizeAsync(chunks[0], cancellationToken);
+            for (var index = 0; index < chunks.Count; index++)
+            {
+                var audio = await pending.ConfigureAwait(false);
+                if (audio is null)
+                {
+                    // El primer tramo define si hay voz neural; a mitad de camino se corta y listo.
+                    return index > 0;
+                }
+
+                pending = index + 1 < chunks.Count
+                    ? _neuralVoice.SynthesizeAsync(chunks[index + 1], cancellationToken)
+                    : Task.FromResult<byte[]?>(null);
+
+                if (!await _neuralPlayer.PlayAsync(audio, cancellationToken).ConfigureAwait(false))
+                {
+                    return index > 0;
+                }
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Corta en oraciones y agrupa las cortas: un tramo de tres palabras gasta una ida y vuelta
+    /// entera para casi nada de audio.
+    /// </summary>
+    internal static IReadOnlyList<string> SplitIntoSpokenChunks(string text)
+    {
+        const int minimum = 70;
+        const int maximum = 260;
+
+        var chunks = new List<string>();
+        var current = new System.Text.StringBuilder();
+
+        foreach (var sentence in SplitSentences(text))
+        {
+            if (current.Length > 0 && current.Length + sentence.Length > maximum)
+            {
+                chunks.Add(current.ToString().Trim());
+                current.Clear();
+            }
+
+            current.Append(sentence);
+            if (current.Length >= minimum)
+            {
+                chunks.Add(current.ToString().Trim());
+                current.Clear();
+            }
+        }
+
+        if (current.Length > 0)
+        {
+            chunks.Add(current.ToString().Trim());
+        }
+
+        return chunks.Where(chunk => chunk.Length > 0).ToArray();
+    }
+
+    private static IEnumerable<string> SplitSentences(string text)
+    {
+        var start = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] is not ('.' or '!' or '?' or '…' or '\n'))
+            {
+                continue;
+            }
+
+            // Se corta después del signo y de los espacios que lo siguen, no antes.
+            var end = index + 1;
+            while (end < text.Length && char.IsWhiteSpace(text[end]))
+            {
+                end++;
+            }
+
+            yield return text[start..end];
+            start = end;
+            index = end - 1;
+        }
+
+        if (start < text.Length)
+        {
+            yield return text[start..];
+        }
     }
 
     private async Task ApplyMuteAsync(bool isMuted)
@@ -1172,6 +1320,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             await _recognition.DisposeAsync().ConfigureAwait(false);
         }
 
+        _speechCancellation?.Cancel();
+        _speechCancellation?.Dispose();
+        await _neuralPlayer.DisposeAsync().ConfigureAwait(false);
         await _speechSynthesizer.DisposeAsync().ConfigureAwait(false);
         _voiceTransitionGate.Dispose();
         _httpClient.Dispose();
