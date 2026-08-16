@@ -1,0 +1,16 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+TestResults/
+artifacts/
+publish/
+
+# Local settings and secrets must never be committed.
+.env
+.env.*
+appsettings.Local.json
+*.secrets.json
+

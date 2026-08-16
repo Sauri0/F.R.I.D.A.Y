@@ -1,0 +1,519 @@
+<Window x:Class="Viernes.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        mc:Ignorable="d"
+        Title="Viernes"
+        Width="{Binding WidgetWidth, FallbackValue=78}"
+        Height="{Binding WidgetHeight, FallbackValue=78}"
+        MinWidth="72"
+        MinHeight="72"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display"
+        AutomationProperties.Name="Viernes, asistente de escritorio"
+        Loaded="Window_Loaded"
+        Closed="Window_Closed"
+        Closing="Window_Closing"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewKeyUp="Window_PreviewKeyUp">
+
+    <Grid x:Name="ShellGrid" Margin="4" Background="Transparent">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="LeadingColumn" Width="70" />
+            <ColumnDefinition x:Name="TrailingColumn" Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- El aura es también la zona de arrastre. El núcleo interior conserva PTT. -->
+        <Grid x:Name="OrbDragSurface"
+              Grid.Column="0"
+              Width="70"
+              Height="70"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Center"
+              Background="Transparent"
+              MouseLeftButtonDown="DragSurface_MouseLeftButtonDown"
+              ToolTip="Toque: escribir · mantener: hablar · arrastrar desde el aura: mover">
+            <Ellipse Width="66"
+                     Height="66"
+                     Stroke="#2072D9FF"
+                     StrokeThickness="1"
+                     Opacity="0.72"
+                     RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform ScaleX="0.96" ScaleY="0.96" />
+                </Ellipse.RenderTransform>
+                <Ellipse.Effect>
+                    <DropShadowEffect Color="#FF4CCCF4"
+                                      BlurRadius="16"
+                                      ShadowDepth="0"
+                                      Opacity="0.28" />
+                </Ellipse.Effect>
+                <Ellipse.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                        <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever">
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                 From="0.96" To="1.03" Duration="0:0:2.8" AutoReverse="True" />
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                 From="0.96" To="1.03" Duration="0:0:2.8" AutoReverse="True" />
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                 From="0.54" To="0.9" Duration="0:0:2.8" AutoReverse="True" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Ellipse.Triggers>
+            </Ellipse>
+
+            <Ellipse Width="61"
+                     Height="61"
+                     Stroke="#B072F0C0"
+                     StrokeThickness="1.6"
+                     Visibility="{Binding IsListening, Converter={StaticResource BoolVisibility}}"
+                     RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform ScaleX="0.82" ScaleY="0.82" />
+                </Ellipse.RenderTransform>
+                <Ellipse.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                        <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever">
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                 From="0.82" To="1.1" Duration="0:0:0.72" />
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                 From="0.82" To="1.1" Duration="0:0:0.72" />
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                 From="0.95" To="0" Duration="0:0:0.72" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Ellipse.Triggers>
+            </Ellipse>
+
+            <Ellipse Width="58"
+                     Height="58"
+                     Stroke="#CC9BB7FF"
+                     StrokeThickness="1.7"
+                     StrokeDashArray="1.5 4"
+                     Visibility="{Binding IsThinking, Converter={StaticResource BoolVisibility}}"
+                     RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <RotateTransform />
+                </Ellipse.RenderTransform>
+                <Ellipse.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                        <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever">
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                 From="0" To="360" Duration="0:0:1.35" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Ellipse.Triggers>
+            </Ellipse>
+
+            <Ellipse Width="60"
+                     Height="60"
+                     Stroke="#CCFFC56B"
+                     StrokeThickness="1.8"
+                     Visibility="{Binding IsAttention, Converter={StaticResource BoolVisibility}}"
+                     RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform ScaleX="0.9" ScaleY="0.9" />
+                </Ellipse.RenderTransform>
+                <Ellipse.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                        <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever">
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                 From="0.9" To="1.06" Duration="0:0:1" AutoReverse="True" />
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                 From="0.9" To="1.06" Duration="0:0:1" AutoReverse="True" />
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                 From="1" To="0.42" Duration="0:0:1" AutoReverse="True" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Ellipse.Triggers>
+            </Ellipse>
+
+            <Border Panel.ZIndex="7"
+                    Margin="0,-2,0,0"
+                    Padding="6,2"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Top"
+                    CornerRadius="7"
+                    Background="#E60B1116"
+                    BorderBrush="#36FFFFFF"
+                    BorderThickness="1"
+                    IsHitTestVisible="False"
+                    Visibility="{Binding IsStateLabelVisible, Converter={StaticResource BoolVisibility}}">
+                <TextBlock Text="{Binding StateShortLabel}"
+                           Foreground="#FFE9F4F8"
+                           FontFamily="{StaticResource UiFont}"
+                           FontSize="8.5"
+                           FontWeight="SemiBold" />
+            </Border>
+
+            <Button x:Name="OrbButton"
+                    Width="52"
+                    Height="52"
+                    Padding="0"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    BorderThickness="0"
+                    Background="Transparent"
+                    Cursor="Hand"
+                    Focusable="True"
+                    Click="OrbButton_Click"
+                    PreviewMouseLeftButtonDown="OrbButton_PreviewMouseLeftButtonDown"
+                    PreviewMouseLeftButtonUp="OrbButton_PreviewMouseLeftButtonUp"
+                    AutomationProperties.Name="Viernes: toque para escribir o mantenga para hablar">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Ellipse x:Name="Core">
+                                <Ellipse.Style>
+                                    <Style TargetType="Ellipse">
+                                        <Setter Property="Fill">
+                                            <Setter.Value>
+                                                <RadialGradientBrush GradientOrigin="0.34,0.3">
+                                                    <GradientStop Color="#FFE8FAFF" Offset="0" />
+                                                    <GradientStop Color="#FF6BD4F6" Offset="0.38" />
+                                                    <GradientStop Color="#FF205D76" Offset="1" />
+                                                </RadialGradientBrush>
+                                            </Setter.Value>
+                                        </Setter>
+                                        <Setter Property="Effect">
+                                            <Setter.Value>
+                                                <DropShadowEffect Color="#FF58D5FF" BlurRadius="16" ShadowDepth="0" Opacity="0.62" />
+                                            </Setter.Value>
+                                        </Setter>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsListening}" Value="True">
+                                                <Setter Property="Fill" Value="#FF72F0C0" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsThinking}" Value="True">
+                                                <Setter Property="Fill" Value="#FF9BB7FF" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsSpeaking}" Value="True">
+                                                <Setter Property="Fill" Value="#FFFFCE82" />
+                                                <Setter Property="Effect">
+                                                    <Setter.Value>
+                                                        <DropShadowEffect Color="#FFFFC56B" BlurRadius="17" ShadowDepth="0" Opacity="0.68" />
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsAttention}" Value="True">
+                                                <Setter Property="Fill" Value="#FFFFC56B" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsError}" Value="True">
+                                                <Setter Property="Fill" Value="#FFFF7385" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Ellipse.Style>
+                            </Ellipse>
+
+                            <Ellipse Margin="3"
+                                     IsHitTestVisible="False"
+                                     Stroke="#38E9FAFF"
+                                     StrokeThickness="0.8" />
+
+                            <Ellipse Width="24"
+                                     Height="18"
+                                     Margin="8,7,0,0"
+                                     HorizontalAlignment="Left"
+                                     VerticalAlignment="Top"
+                                     IsHitTestVisible="False">
+                                <Ellipse.Fill>
+                                    <RadialGradientBrush GradientOrigin="0.35,0.35">
+                                        <GradientStop Color="#A8FFFFFF" Offset="0" />
+                                        <GradientStop Color="#32DDF8FF" Offset="0.48" />
+                                        <GradientStop Color="#00FFFFFF" Offset="1" />
+                                    </RadialGradientBrush>
+                                </Ellipse.Fill>
+                                <Ellipse.Effect>
+                                    <BlurEffect Radius="3.5" />
+                                </Ellipse.Effect>
+                            </Ellipse>
+
+                            <Ellipse Width="31"
+                                     Height="22"
+                                     Margin="0,0,2,3"
+                                     HorizontalAlignment="Right"
+                                     VerticalAlignment="Bottom"
+                                     Fill="#25101C27"
+                                     IsHitTestVisible="False">
+                                <Ellipse.Effect>
+                                    <BlurEffect Radius="6" />
+                                </Ellipse.Effect>
+                            </Ellipse>
+
+                            <StackPanel HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Visibility="{Binding IsSpeaking, Converter={StaticResource BoolVisibility}}">
+                                <Rectangle Width="2" Height="10" Margin="1" RadiusX="1" Fill="#FF1C2832" />
+                                <Rectangle Width="2" Height="16" Margin="1" RadiusX="1" Fill="#FF1C2832" />
+                                <Rectangle Width="2" Height="7" Margin="1" RadiusX="1" Fill="#FF1C2832" />
+                            </StackPanel>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Core" Property="Opacity" Value="0.92" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Core" Property="Opacity" Value="0.76" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Button.Template>
+            </Button>
+
+            <Border Width="18"
+                    Height="18"
+                    Margin="0,0,2,2"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Bottom"
+                    CornerRadius="9"
+                    BorderThickness="1"
+                    BorderBrush="#6658D5FF"
+                    ToolTip="{Binding PrivacyHint}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="#F0192530" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsMicrophoneActive}" Value="True">
+                                <Setter Property="Background" Value="#FF285E54" />
+                                <Setter Property="BorderBrush" Value="#FF72F0C0" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsMuted}" Value="True">
+                                <Setter Property="Background" Value="#FF4A2930" />
+                                <Setter Property="BorderBrush" Value="#FFFF7385" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding PrivacyGlyph}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           FontFamily="Segoe Fluent Icons"
+                           FontSize="8"
+                           Foreground="#FFE9F5FA" />
+            </Border>
+        </Grid>
+
+        <!-- La burbuja aparece sólo durante interacción o cuando el usuario abre texto. -->
+        <Border x:Name="AssistantBubble"
+                Grid.Column="1"
+                Margin="-1,2,2,2"
+                Padding="14,10,8,8"
+                VerticalAlignment="Stretch"
+                CornerRadius="5,24,24,5"
+                BorderThickness="1"
+                BorderBrush="#4072D9FF"
+                Visibility="{Binding IsAssistantShellVisible, Converter={StaticResource BoolVisibility}}">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <GradientStop Color="#F31A242E" Offset="0" />
+                    <GradientStop Color="#F5202832" Offset="1" />
+                </LinearGradientBrush>
+            </Border.Background>
+            <Border.Effect>
+                <DropShadowEffect Color="#B0000000" BlurRadius="18" Direction="270" ShadowDepth="5" Opacity="0.55" />
+            </Border.Effect>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="26" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Margin="0,0,5,2"
+                           Text="{Binding MessageText}"
+                           ToolTip="{Binding MessageText}"
+                           Foreground="{StaticResource TextPrimary}"
+                           FontFamily="{StaticResource UiFont}"
+                           FontSize="12.5"
+                           FontWeight="Medium"
+                           LineHeight="17"
+                           MaxHeight="36"
+                           TextWrapping="Wrap"
+                           TextTrimming="CharacterEllipsis" />
+
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0"
+                               Margin="0,0,4,0"
+                               VerticalAlignment="Center"
+                               Text="{Binding StatusText}"
+                               ToolTip="{Binding StatusText}"
+                               Foreground="{StaticResource TextSecondary}"
+                               FontFamily="{StaticResource UiFont}"
+                               FontSize="9.5"
+                               TextTrimming="CharacterEllipsis" />
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Style="{StaticResource CompactCircleButton}"
+                                Width="26" Height="26"
+                                Command="{Binding ToggleMuteCommand}"
+                                Content="{Binding MuteGlyph}"
+                                ToolTip="{Binding MuteToolTip}"
+                                AutomationProperties.Name="{Binding MuteToolTip}" />
+                        <Button Style="{StaticResource CompactCircleButton}"
+                                Width="26" Height="26"
+                                Command="{Binding ToggleExpandedCommand}"
+                                Content="&#xE70D;"
+                                ToolTip="Escribir"
+                                AutomationProperties.Name="Abrir entrada de texto" />
+                        <Button Style="{StaticResource CompactCircleButton}"
+                                Width="26" Height="26"
+                                Click="HideButton_Click"
+                                Content="&#xE921;"
+                                ToolTip="Ocultar en la bandeja"
+                                AutomationProperties.Name="Ocultar en la bandeja" />
+                    </StackPanel>
+                </Grid>
+
+                <Border Grid.Row="2"
+                        Height="34"
+                        Margin="0,5,0,0"
+                        Padding="10,0,4,0"
+                        CornerRadius="11"
+                        Background="#76101820"
+                        BorderBrush="#30FFFFFF"
+                        BorderThickness="1"
+                        Visibility="{Binding IsInputAreaVisible, Converter={StaticResource BoolVisibility}}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="30" />
+                        </Grid.ColumnDefinitions>
+                        <Grid Grid.Column="0">
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="Escribí una instrucción…"
+                                       Foreground="#FF718293"
+                                       FontFamily="{StaticResource UiFont}"
+                                       FontSize="10.5"
+                                       IsHitTestVisible="False">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding InputText}" Value="">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <TextBox x:Name="PromptTextBox"
+                                     Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                     VerticalContentAlignment="Center"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     Foreground="{StaticResource TextPrimary}"
+                                     CaretBrush="{StaticResource Cyan}"
+                                     FontFamily="{StaticResource UiFont}"
+                                     FontSize="11"
+                                     SpellCheck.IsEnabled="True"
+                                     KeyDown="PromptTextBox_KeyDown"
+                                     AutomationProperties.Name="Instrucción escrita" />
+                        </Grid>
+                        <Button Grid.Column="1"
+                                Width="26" Height="26"
+                                Command="{Binding SendCommand}"
+                                Content="&#xE122;"
+                                FontFamily="Segoe Fluent Icons"
+                                FontSize="10"
+                                Foreground="#FF14202A"
+                                Background="{StaticResource Cyan}"
+                                BorderThickness="0"
+                                Cursor="Hand"
+                                ToolTip="Enviar">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="SendSurface" Background="{TemplateBinding Background}" CornerRadius="9">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter TargetName="SendSurface" Property="Opacity" Value="0.35" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="2"
+                        Height="34"
+                        Margin="0,5,0,0"
+                        Padding="9,0,4,0"
+                        CornerRadius="11"
+                        Background="#45FFC56B"
+                        BorderBrush="#88FFC56B"
+                        BorderThickness="1"
+                        ToolTip="{Binding ConfirmationDetail}"
+                        Visibility="{Binding IsConfirmationAreaVisible, Converter={StaticResource BoolVisibility}}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="67" />
+                            <ColumnDefinition Width="27" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   VerticalAlignment="Center"
+                                   Text="{Binding ConfirmationTitle}"
+                                   Foreground="{StaticResource TextPrimary}"
+                                   FontFamily="{StaticResource UiFont}"
+                                   FontSize="9.5"
+                                   FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" />
+                        <Button Grid.Column="1"
+                                Height="24"
+                                Margin="2,0"
+                                Command="{Binding ConfirmCommand}"
+                                Content="Confirmar"
+                                Foreground="#FF1A202A"
+                                Background="{StaticResource Amber}"
+                                BorderThickness="0"
+                                FontFamily="{StaticResource UiFont}"
+                                FontSize="9"
+                                FontWeight="SemiBold"
+                                Cursor="Hand">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border Background="{TemplateBinding Background}" CornerRadius="8">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <Button Grid.Column="2"
+                                Style="{StaticResource IconButton}"
+                                Width="26" Height="26"
+                                Command="{Binding DismissConfirmationCommand}"
+                                Content="&#xE711;"
+                                ToolTip="Cancelar" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
