@@ -43,6 +43,8 @@ public sealed class ViernesOptions
     public const string ExcludedModelsEnvironmentVariable = "VIERNES_OPENROUTER_EXCLUDED_MODELS";
     public const string MaxPromptPriceEnvironmentVariable = "VIERNES_OPENROUTER_MAX_PROMPT_PRICE";
     public const string MaxCompletionPriceEnvironmentVariable = "VIERNES_OPENROUTER_MAX_COMPLETION_PRICE";
+    public const string WebSearchEnvironmentVariable = "VIERNES_WEB_SEARCH";
+    public const string WebSearchMaxResultsEnvironmentVariable = "VIERNES_WEB_SEARCH_MAX_RESULTS";
 
     /// <summary>
     /// El router automático es el valor por defecto: es un slug real, soporta tool calling y se
@@ -78,8 +80,17 @@ public sealed class ViernesOptions
         IEnumerable<RoleBudgetLimits>? roleBudgetLimits = null,
         UsageRateCard? usageRateCard = null,
         AutoRouterOptions? autoRouter = null,
-        string? preset = null)
+        string? preset = null,
+        bool webSearchEnabled = false,
+        int webSearchMaxResults = 3)
     {
+        WebSearchEnabled = webSearchEnabled;
+        WebSearchMaxResults = webSearchMaxResults is >= 1 and <= 10
+            ? webSearchMaxResults
+            : throw new ArgumentOutOfRangeException(
+                nameof(webSearchMaxResults),
+                "Usá entre 1 y 10 resultados de búsqueda.");
+
         _apiKey = NormalizeSecret(apiKey);
         Model = NormalizeModel(model) ?? DefaultModel;
         Preset = NormalizePreset(preset);
@@ -134,6 +145,14 @@ public sealed class ViernesOptions
     public string? Preset { get; }
 
     public AutoRouterOptions AutoRouter { get; }
+
+    /// <summary>
+    /// Busca en la web a través del plugin de OpenRouter. Viene apagado porque cada búsqueda tiene
+    /// costo propio, aparte de los tokens del turno.
+    /// </summary>
+    public bool WebSearchEnabled { get; }
+
+    public int WebSearchMaxResults { get; }
 
     /// <summary>Identifica la conversación ante el router para que no salte de modelo entre turnos.</summary>
     public string SessionId { get; } = $"viernes-{Guid.NewGuid():N}"[..24];
@@ -248,7 +267,14 @@ public sealed class ViernesOptions
             roleBudgetLimits: roleLimits,
             usageRateCard: UsageRateCard.ParseJson(readVariable(RateCardEnvironmentVariable)),
             autoRouter: ReadAutoRouterOptions(readVariable),
-            preset: readVariable(PresetEnvironmentVariable));
+            preset: readVariable(PresetEnvironmentVariable),
+            webSearchEnabled: ParseBoolean(
+                readVariable(WebSearchEnvironmentVariable),
+                WebSearchEnvironmentVariable,
+                defaultValue: false),
+            webSearchMaxResults: ParseOptionalInt(
+                readVariable(WebSearchMaxResultsEnvironmentVariable),
+                WebSearchMaxResultsEnvironmentVariable) ?? 3);
     }
 
     /// <summary>Variable de banda de costo por rol, por ejemplo <c>VIERNES_OPENROUTER_FAST_COST_TIER</c>.</summary>

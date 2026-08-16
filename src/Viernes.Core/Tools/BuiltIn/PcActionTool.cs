@@ -10,6 +10,14 @@ public sealed class PcActionTool : IAssistantTool
 {
     public const string ToolName = "pc_action";
 
+    private readonly IPcActionExecutor? _executor;
+
+    /// <summary>
+    /// Sin ejecutor la herramienta previsualiza y nada más. Con ejecutor, las acciones previsualizables
+    /// se ejecutan de verdad —pero recién después de que la política las haya dejado pasar.
+    /// </summary>
+    public PcActionTool(IPcActionExecutor? executor = null) => _executor = executor;
+
     private static readonly HashSet<string> DestructiveActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "delete_file", "delete_folder", "format_disk", "wipe", "uninstall"
@@ -53,7 +61,7 @@ public sealed class PcActionTool : IAssistantTool
         return ToolRiskLevel.RequiresConfirmation;
     }
 
-    public Task<ToolExecutionResult> ExecuteAsync(
+    public async Task<ToolExecutionResult> ExecuteAsync(
         JsonElement arguments,
         ToolExecutionContext context,
         CancellationToken cancellationToken = default)
@@ -62,11 +70,26 @@ public sealed class PcActionTool : IAssistantTool
         var action = JsonToolArguments.RequiredString(arguments, "action", 80);
         var target = JsonToolArguments.OptionalString(arguments, "target", 260);
 
-        // There is deliberately no Process.Start, shell, filesystem mutation, or Win32 call here.
-        return Task.FromResult(ToolExecutionResult.Success(
-            context.ToolCallId,
-            ToolName,
-            "Acción aprobada y simulada; no se modificó la PC.",
-            new { action, target, simulated = true }));
+        // Doble llave: aunque llegue hasta acá, sólo se ejecuta lo previsualizable. Las acciones
+        // sensibles y destructivas ya fueron detenidas por la política y nunca alcanzan esta línea.
+        if (_executor is null ||
+            !PreviewableActions.Contains(action) ||
+            !_executor.SupportedActions.Contains(action.ToLowerInvariant()))
+        {
+            return ToolExecutionResult.Success(
+                context.ToolCallId,
+                ToolName,
+                "Acción aprobada y simulada; no se modificó la PC.",
+                new { action, target, simulated = true });
+        }
+
+        var outcome = await _executor.ExecuteAsync(action, target, cancellationToken).ConfigureAwait(false);
+        return outcome.Executed
+            ? ToolExecutionResult.Success(
+                context.ToolCallId,
+                ToolName,
+                outcome.Message,
+                new { action, target, simulated = false })
+            : ToolExecutionResult.Failure(context.ToolCallId, ToolName, outcome.Message);
     }
 }

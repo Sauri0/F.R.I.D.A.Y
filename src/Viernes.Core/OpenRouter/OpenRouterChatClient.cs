@@ -186,7 +186,7 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
             tool_choice = tools.Count == 0 ? null : "auto",
             // El router prefiere el modelo ya elegido para esta conversación mientras siga entre los
             // mejores candidatos, así un diálogo no salta de voz entre turnos.
-            session_id = plugins is null ? null : _options.SessionId,
+            session_id = AutoRouterOptions.IsAutoRouted(requestModel) ? _options.SessionId : null,
             plugins,
             provider = BuildProviderPreferences()
         };
@@ -206,22 +206,28 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
     /// </summary>
     private object[]? BuildAutoRouterPlugins(string requestModel, ModelRole role)
     {
-        if (!AutoRouterOptions.IsAutoRouted(requestModel))
-        {
-            return null;
-        }
+        var plugins = new List<object>(2);
 
-        var router = _options.AutoRouter;
-        return
-        [
-            new
+        if (AutoRouterOptions.IsAutoRouted(requestModel))
+        {
+            var router = _options.AutoRouter;
+            plugins.Add(new
             {
                 id = AutoRouterOptions.ResolvePluginId(requestModel),
                 cost_tier = AutoRouterOptions.ToWireValue(router.ResolveCostTier(role)),
                 allowed_models = router.AllowedModels.Count == 0 ? null : router.AllowedModels.ToArray(),
                 excluded_models = router.ExcludedModels.Count == 0 ? null : router.ExcludedModels.ToArray()
-            }
-        ];
+            });
+        }
+
+        // Búsqueda real: el proveedor inyecta resultados en el contexto del turno. Tiene costo
+        // propio por búsqueda, por eso viene apagada salvo que se la pida explícitamente.
+        if (_options.WebSearchEnabled)
+        {
+            plugins.Add(new { id = "web", max_results = _options.WebSearchMaxResults });
+        }
+
+        return plugins.Count == 0 ? null : plugins.ToArray();
     }
 
     /// <summary>Techo de precio por millón de tokens; los endpoints por encima quedan descartados.</summary>

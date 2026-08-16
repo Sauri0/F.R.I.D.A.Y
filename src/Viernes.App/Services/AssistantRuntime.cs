@@ -10,6 +10,7 @@ using Viernes.Core.Tools;
 using Viernes.Core.Usage;
 using Viernes.Core.Voice;
 using Viernes.Memory.Persistence;
+using Viernes.Platform.Windows.Actions;
 using Viernes.Platform.Windows.Speech;
 using Viernes.Platform.Windows.Speech.Recognition;
 using Viernes.Platform.Windows.Speech.WakeWord;
@@ -85,7 +86,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _httpClient,
             _options,
             _dataStore,
-            _usageLedger);
+            _usageLedger,
+            new WindowsPcActionExecutor());
         _localCommands = new LocalCommandRouter(_orchestrator, new JsonPersonalMemoryStore());
         _reminderScheduler = new ReminderScheduler(_dataStore);
         _reminderScheduler.ReminderDue += ReminderSchedulerOnReminderDue;

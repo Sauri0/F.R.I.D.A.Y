@@ -15,13 +15,16 @@ public static class ViernesCoreFactory
         HttpClient httpClient,
         ViernesOptions? options = null,
         IUserDataStore? dataStore = null,
-        UsageLedger? usageLedger = null)
+        UsageLedger? usageLedger = null,
+        IPcActionExecutor? pcActions = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         options ??= ViernesOptions.FromEnvironment();
         dataStore ??= new JsonUserDataStore();
 
-        var tools = new ToolExecutor(BuiltInTools.Create(dataStore), new SafeToolPolicy());
+        var tools = new ToolExecutor(
+            BuiltInTools.Create(dataStore, pcActions, options.WebSearchEnabled),
+            new SafeToolPolicy());
         IChatCompletionClient chatClient = new OpenRouterChatClient(httpClient, options);
         if (usageLedger is not null)
         {

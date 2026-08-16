@@ -10,6 +10,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Core no referencia a la plataforma, así que esta dirección no crea ciclo. -->
+    <ProjectReference Include="..\Viernes.Core\Viernes.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="NAudio.WinMM" Version="2.3.0" />
     <PackageReference Include="System.Speech" Version="10.0.0" />
     <PackageReference Include="Whisper.net" Version="1.9.1" />
