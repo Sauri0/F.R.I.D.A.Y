@@ -5,10 +5,10 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         mc:Ignorable="d"
         Title="Viernes"
-        Width="{Binding WidgetWidth, FallbackValue=78}"
-        Height="{Binding WidgetHeight, FallbackValue=78}"
-        MinWidth="72"
-        MinHeight="72"
+        Width="{Binding WidgetWidth, FallbackValue=90}"
+        Height="{Binding WidgetHeight, FallbackValue=90}"
+        MinWidth="84"
+        MinHeight="84"
         WindowStyle="None"
         ResizeMode="NoResize"
         AllowsTransparency="True"
@@ -27,15 +27,15 @@
 
     <Grid x:Name="ShellGrid" Margin="4" Background="Transparent">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition x:Name="LeadingColumn" Width="70" />
+            <ColumnDefinition x:Name="LeadingColumn" Width="80" />
             <ColumnDefinition x:Name="TrailingColumn" Width="*" />
         </Grid.ColumnDefinitions>
 
         <!-- El aura es también la zona de arrastre. El núcleo interior conserva PTT. -->
         <Grid x:Name="OrbDragSurface"
               Grid.Column="0"
-              Width="70"
-              Height="70"
+              Width="80"
+              Height="80"
               HorizontalAlignment="Left"
               VerticalAlignment="Center"
               Background="Transparent"
@@ -74,8 +74,8 @@
             </Border>
 
             <Button x:Name="OrbButton"
-                    Width="52"
-                    Height="52"
+                    Width="60"
+                    Height="60"
                     Padding="0"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -147,37 +147,6 @@
                 </Button.Template>
             </Button>
 
-            <Border Width="18"
-                    Height="18"
-                    Margin="0,0,2,2"
-                    HorizontalAlignment="Right"
-                    VerticalAlignment="Bottom"
-                    CornerRadius="9"
-                    BorderThickness="1"
-                    BorderBrush="#6658D5FF"
-                    ToolTip="{Binding PrivacyHint}">
-                <Border.Style>
-                    <Style TargetType="Border">
-                        <Setter Property="Background" Value="#F0192530" />
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding IsMicrophoneActive}" Value="True">
-                                <Setter Property="Background" Value="#FF285E54" />
-                                <Setter Property="BorderBrush" Value="#FF72F0C0" />
-                            </DataTrigger>
-                            <DataTrigger Binding="{Binding IsMuted}" Value="True">
-                                <Setter Property="Background" Value="#FF4A2930" />
-                                <Setter Property="BorderBrush" Value="#FFFF7385" />
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </Border.Style>
-                <TextBlock Text="{Binding PrivacyGlyph}"
-                           HorizontalAlignment="Center"
-                           VerticalAlignment="Center"
-                           FontFamily="Segoe Fluent Icons"
-                           FontSize="8"
-                           Foreground="#FFE9F5FA" />
-            </Border>
         </Grid>
 
         <!-- La burbuja aparece sólo durante interacción o cuando el usuario abre texto. -->

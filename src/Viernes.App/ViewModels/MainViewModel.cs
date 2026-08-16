@@ -191,11 +191,11 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsMinimalShellVisible =>
         State == AssistantVisualState.Idle && !IsExpanded && !IsConfirmationVisible && !_isPresentingResult;
     public bool IsAssistantShellVisible => !IsMinimalShellVisible;
-    public double WidgetWidth => IsMinimalShellVisible ? 78 : IsExpanded ? 352 : 344;
+    public double WidgetWidth => IsMinimalShellVisible ? 90 : IsExpanded ? 352 : 344;
 
     // 168 px es la altura de excepción para pasos y listas: sigue siendo temporal, nunca un panel.
     public double WidgetHeight => IsMinimalShellVisible
-        ? 78
+        ? 90
         : IsExpanded
             ? 158
             : AreStepsVisible || AreListItemsVisible

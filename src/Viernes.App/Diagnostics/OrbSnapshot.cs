@@ -24,20 +24,20 @@ namespace Viernes.App.Diagnostics;
 /// </remarks>
 internal static class OrbSnapshot
 {
-    private const int Cell = 78;
+    private const int Cell = 90;
     private const int Zoom = 4;
     private const double Dpi = 96 * Zoom;
 
-    private static readonly (AssistantVisualState State, double Seconds)[] Frames =
+    private static readonly (AssistantVisualState State, double Seconds, bool Microphone)[] Frames =
     [
-        (AssistantVisualState.Idle, 0.4),
-        (AssistantVisualState.Idle, 1.7),
-        (AssistantVisualState.Idle, 3.1),
-        (AssistantVisualState.Idle, 4.6),
-        (AssistantVisualState.Listening, 1.2),
-        (AssistantVisualState.Thinking, 1.2),
-        (AssistantVisualState.Speaking, 1.2),
-        (AssistantVisualState.Attention, 1.2)
+        (AssistantVisualState.Idle, 0.4, false),
+        (AssistantVisualState.Idle, 1.7, false),
+        (AssistantVisualState.Idle, 3.1, false),
+        (AssistantVisualState.Idle, 1.0, true),
+        (AssistantVisualState.Listening, 1.2, true),
+        (AssistantVisualState.Thinking, 1.2, false),
+        (AssistantVisualState.Speaking, 1.2, false),
+        (AssistantVisualState.Attention, 1.2, false)
     ];
 
     public static async Task<string> RunAsync(string outputDirectory)
@@ -63,9 +63,10 @@ internal static class OrbSnapshot
         host.Show();
 
         var shots = new List<(BitmapSource Image, string Caption)>();
-        foreach (var (state, seconds) in Frames)
+        foreach (var (state, seconds, microphone) in Frames)
         {
             orb.State = state;
+            orb.IsMicrophoneActive = microphone;
 
             // El reloj de las animaciones corre en tiempo real, así que se espera de verdad.
             await Task.Delay(TimeSpan.FromSeconds(seconds));
@@ -74,7 +75,7 @@ internal static class OrbSnapshot
             var target = new RenderTargetBitmap(Cell * Zoom, Cell * Zoom, Dpi, Dpi, PixelFormats.Pbgra32);
             target.Render(orb);
             target.Freeze();
-            shots.Add((target, $"{state} · {seconds:0.0}s"));
+            shots.Add((target, $"{state}{(microphone ? " · mic" : string.Empty)} · {seconds:0.0}s"));
         }
 
         host.Close();

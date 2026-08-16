@@ -28,8 +28,8 @@ public partial class MainWindow : Window
     private bool _pushToTalkActive;
     private DateTimeOffset _pushToTalkStartedAt;
     private CancellationTokenSource? _pushToTalkCancellation;
-    private double _appliedWidgetWidth = 78;
-    private double _appliedWidgetHeight = 78;
+    private double _appliedWidgetWidth = 90;
+    private double _appliedWidgetHeight = 90;
     private bool _expandsLeft;
 
     private readonly LiquidOrb _orb = new();
@@ -43,6 +43,9 @@ public partial class MainWindow : Window
 
         OrbHost.Children.Add(_orb);
         _orb.SetBinding(LiquidOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = viewModel });
+        _orb.SetBinding(
+            LiquidOrb.IsMicrophoneActiveProperty,
+            new Binding(nameof(MainViewModel.IsMicrophoneActive)) { Source = viewModel });
 
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
     }
@@ -97,8 +100,8 @@ public partial class MainWindow : Window
 
         var workArea = SystemParameters.WorkArea;
         var previousWidth = _appliedWidgetWidth;
-        var isBecomingExpanded = previousWidth <= 80 && targetWidth > 80;
-        var isBecomingMinimal = previousWidth > 80 && targetWidth <= 80;
+        var isBecomingExpanded = previousWidth <= 100 && targetWidth > 100;
+        var isBecomingMinimal = previousWidth > 100 && targetWidth <= 100;
 
         if (isBecomingExpanded)
         {
@@ -145,7 +148,7 @@ public partial class MainWindow : Window
         if (expandsLeft)
         {
             LeadingColumn.Width = new GridLength(1, GridUnitType.Star);
-            TrailingColumn.Width = new GridLength(70);
+            TrailingColumn.Width = new GridLength(80);
             Grid.SetColumn(AssistantBubble, 0);
             Grid.SetColumn(OrbDragSurface, 1);
             OrbDragSurface.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
@@ -155,7 +158,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        LeadingColumn.Width = new GridLength(70);
+        LeadingColumn.Width = new GridLength(80);
         TrailingColumn.Width = new GridLength(1, GridUnitType.Star);
         Grid.SetColumn(OrbDragSurface, 0);
         Grid.SetColumn(AssistantBubble, 1);
@@ -268,8 +271,8 @@ public partial class MainWindow : Window
 
     internal void SaveOrbPlacement()
     {
-        var anchorLeft = Left + (_expandsLeft ? Math.Max(0, _appliedWidgetWidth - 78) : 0);
-        var anchorTop = Top + Math.Max(0, _appliedWidgetHeight - 78) / 2;
+        var anchorLeft = Left + (_expandsLeft ? Math.Max(0, _appliedWidgetWidth - 90) : 0);
+        var anchorTop = Top + Math.Max(0, _appliedWidgetHeight - 90) / 2;
         _placementStore.Save(this, anchorLeft, anchorTop);
     }
 
