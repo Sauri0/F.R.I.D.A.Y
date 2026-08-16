@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using Viernes.App.Controls;
 using Viernes.App.Services;
@@ -179,6 +180,75 @@ public partial class MainWindow : Window
         SaveOrbPlacement();
         Hide();
         App.Current.NotifyWindowVisibilityChanged(false);
+    }
+
+    /// <summary>
+    /// La gota se desprende de la bandeja, se estira en el trayecto y rebota al aterrizar. El
+    /// estiramiento es lo que la hace leer como líquido y no como una ventana que aparece.
+    /// </summary>
+    internal void PlayArrivalFromTray()
+    {
+        var workArea = SystemParameters.WorkArea;
+        var targetLeft = Left;
+        var targetTop = Top;
+
+        // El área de notificación vive en la esquina inferior derecha del área de trabajo.
+        var startLeft = Math.Clamp(workArea.Right - 52, workArea.Left, workArea.Right - 8);
+        var startTop = Math.Clamp(workArea.Bottom - 34, workArea.Top, workArea.Bottom - 8);
+        if (Math.Abs(startLeft - targetLeft) < 2 && Math.Abs(startTop - targetTop) < 2)
+        {
+            return;
+        }
+
+        Left = startLeft;
+        Top = startTop;
+        Opacity = 0;
+
+        var travel = TimeSpan.FromMilliseconds(420);
+        var glide = new CubicEase { EasingMode = EasingMode.EaseOut };
+
+        var slideLeft = new DoubleAnimation(startLeft, targetLeft, travel) { EasingFunction = glide };
+        slideLeft.Completed += (_, _) =>
+        {
+            // Soltar la animación devuelve el control de la posición a DragMove.
+            BeginAnimation(LeftProperty, null);
+            BeginAnimation(TopProperty, null);
+            Left = targetLeft;
+            Top = targetTop;
+        };
+
+        BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)));
+        BeginAnimation(LeftProperty, slideLeft);
+        BeginAnimation(TopProperty, new DoubleAnimation(startTop, targetTop, travel) { EasingFunction = glide });
+
+        PlaySquashAndStretch(travel);
+    }
+
+    private void PlaySquashAndStretch(TimeSpan travel)
+    {
+        // Se alarga mientras viaja rápido, se aplasta al llegar y se recompone con una oscilación.
+        var stretch = new DoubleAnimationUsingKeyFrames { Duration = travel + TimeSpan.FromMilliseconds(240) };
+        stretch.KeyFrames.Add(new LinearDoubleKeyFrame(1.0, KeyTime.FromPercent(0)));
+        stretch.KeyFrames.Add(new EasingDoubleKeyFrame(0.78, KeyTime.FromPercent(0.28)));
+        stretch.KeyFrames.Add(new EasingDoubleKeyFrame(0.84, KeyTime.FromPercent(0.6)));
+        stretch.KeyFrames.Add(new EasingDoubleKeyFrame(1.24, KeyTime.FromPercent(0.72)));
+        stretch.KeyFrames.Add(new EasingDoubleKeyFrame(1.0, KeyTime.FromPercent(1))
+        {
+            EasingFunction = new ElasticEase { Oscillations = 2, Springiness = 5, EasingMode = EasingMode.EaseOut }
+        });
+
+        var squash = new DoubleAnimationUsingKeyFrames { Duration = travel + TimeSpan.FromMilliseconds(240) };
+        squash.KeyFrames.Add(new LinearDoubleKeyFrame(1.0, KeyTime.FromPercent(0)));
+        squash.KeyFrames.Add(new EasingDoubleKeyFrame(1.3, KeyTime.FromPercent(0.28)));
+        squash.KeyFrames.Add(new EasingDoubleKeyFrame(1.2, KeyTime.FromPercent(0.6)));
+        squash.KeyFrames.Add(new EasingDoubleKeyFrame(0.78, KeyTime.FromPercent(0.72)));
+        squash.KeyFrames.Add(new EasingDoubleKeyFrame(1.0, KeyTime.FromPercent(1))
+        {
+            EasingFunction = new ElasticEase { Oscillations = 2, Springiness = 5, EasingMode = EasingMode.EaseOut }
+        });
+
+        OrbArrivalScale.BeginAnimation(ScaleTransform.ScaleXProperty, stretch);
+        OrbArrivalScale.BeginAnimation(ScaleTransform.ScaleYProperty, squash);
     }
 
     /// <summary>

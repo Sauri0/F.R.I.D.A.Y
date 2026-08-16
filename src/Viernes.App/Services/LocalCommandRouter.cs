@@ -8,7 +8,13 @@ using Viernes.Memory.Privacy;
 
 namespace Viernes.App.Services;
 
-internal sealed record LocalCommandOutcome(string Text, ToolExecutionResult? ToolResult = null);
+/// <summary>Una fila de la burbuja: cuándo, qué, y una etiqueta corta opcional.</summary>
+internal sealed record BubbleListItem(string When, string What, string? Tag = null);
+
+internal sealed record LocalCommandOutcome(
+    string Text,
+    ToolExecutionResult? ToolResult = null,
+    IReadOnlyList<BubbleListItem>? Items = null);
 
 /// <summary>
 /// Small, deterministic command surface that remains useful without any cloud model.
@@ -43,7 +49,7 @@ internal sealed class LocalCommandRouter
 
         if (normalized is "/memoria" or "qué recordás de mí" or "mostrame mi memoria")
         {
-            return new LocalCommandOutcome(await FormatMemoryReviewAsync(cancellationToken).ConfigureAwait(false));
+            return await ReviewMemoryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         if (normalized.StartsWith("/recordá que ", StringComparison.Ordinal) ||
@@ -198,29 +204,56 @@ internal sealed class LocalCommandRouter
             JsonSerializer.SerializeToElement(arguments),
             confirmationGranted: false,
             cancellationToken).ConfigureAwait(false);
-        return new LocalCommandOutcome(FormatResult(result), result);
+        return new LocalCommandOutcome(FormatResult(result), result, ExtractItems(result));
     }
 
-    private async Task<string> FormatMemoryReviewAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Convierte el arreglo devuelto por una tool de listado en filas. La burbuja alta las muestra
+    /// completas en vez de recortarlas a tres en una sola línea de texto.
+    /// </summary>
+    private static IReadOnlyList<BubbleListItem>? ExtractItems(ToolExecutionResult result)
+    {
+        if (result.Data is not { ValueKind: JsonValueKind.Array } data || data.GetArrayLength() == 0)
+        {
+            return null;
+        }
+
+        return data.EnumerateArray()
+            .Take(5)
+            .Select(item =>
+            {
+                var title = ReadString(item, "title") ?? "Sin título";
+                var when = ReadString(item, "dueAt") ?? ReadString(item, "startsAt");
+                return new BubbleListItem(when is null ? string.Empty : FormatDate(when), title);
+            })
+            .ToArray();
+    }
+
+    private async Task<LocalCommandOutcome> ReviewMemoryAsync(CancellationToken cancellationToken)
     {
         var review = await _memory.ReviewAsync(cancellationToken).ConfigureAwait(false);
         if (review.TotalCount == 0)
         {
-            return review.IsObservationPaused
+            return new LocalCommandOutcome(review.IsObservationPaused
                 ? "La memoria está vacía y las observaciones de hábitos están pausadas. Usá /recordá que … para guardar algo explícito."
-                : "La memoria está vacía. Las observaciones son temporales y requieren aprobación para volverse permanentes.";
+                : "La memoria está vacía. Las observaciones son temporales y requieren aprobación para volverse permanentes.");
         }
 
+        // El ID corto va en la primera columna porque es lo que hace falta para poder olvidar algo.
         var items = review.Explicit.Cast<PersonalMemoryItem>()
             .Concat(review.TemporaryObservations)
             .Concat(review.Suggestions)
             .OrderByDescending(item => item.UpdatedAt)
-            .Take(4)
-            .Select(item => $"{MemoryKindLabel(item.Kind)} {ShortId(item.Id)} · {item.Content}")
+            .Take(5)
+            .Select(item => new BubbleListItem(
+                ShortId(item.Id),
+                item.Content,
+                MemoryKindLabel(item.Kind).ToLowerInvariant()))
             .ToArray();
-        var suffix = review.TotalCount > items.Length ? " · …" : string.Empty;
+
         var observationState = review.IsObservationPaused ? "hábitos pausados" : "hábitos temporales activos";
-        return $"Memoria local ({observationState}): {string.Join(" · ", items)}{suffix}";
+        var summary = $"{review.TotalCount} dato{(review.TotalCount == 1 ? "" : "s")} · {observationState} · /olvidar ID para borrar";
+        return new LocalCommandOutcome(summary, Items: items);
     }
 
     private async Task<PersonalMemoryItem?> ResolveMemoryItemAsync(

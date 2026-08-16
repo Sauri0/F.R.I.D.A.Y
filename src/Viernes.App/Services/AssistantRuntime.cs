@@ -23,6 +23,10 @@ namespace Viernes.App.Services;
 internal sealed class AssistantRuntime : IAssistantRuntime
 {
     private const int MaximumSpokenCharacters = 1_200;
+
+    /// <summary>Identifica la confirmación de gasto; no es una tool y nunca llega al modelo.</summary>
+    private const string BudgetOverrideCallId = "viernes:budget-override";
+
     private static readonly System.Globalization.CultureInfo ArgentineCulture =
         System.Globalization.CultureInfo.GetCultureInfo("es-AR");
 
@@ -43,6 +47,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private IWakeWordService? _wakeWord;
     private ViernesLocalSettings _settings = new();
     private PendingConfirmation? _pendingConfirmation;
+
+    /// <summary>
+    /// Autorización de gasto, deliberadamente frágil: vive sólo en memoria, no se persiste y muere
+    /// con el proceso o con el día. Un botón que gasta plata no debería sobrevivir a un reinicio.
+    /// </summary>
+    private DateOnly? _budgetOverrideDay;
+    private string? _budgetOverridePendingInput;
     private CancellationTokenSource? _wakeHandoffCancellation;
     private AssistantVisualState _lastVisualState = AssistantVisualState.Idle;
     private string _recognitionProviderName = "Preparando voz local";
@@ -220,18 +231,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         if (IsCloudConfigured)
         {
+            var authorizedToday = _budgetOverrideDay == DateOnly.FromDateTime(DateTime.Now);
             var guard = await _usageLedger.EvaluateAsync(
-                new BudgetCheckRequest(ModelRole.Fast),
+                new BudgetCheckRequest(ModelRole.Fast, ExplicitBudgetOverride: authorizedToday),
                 cancellationToken).ConfigureAwait(false);
             if (!guard.CanProceed)
             {
-                var budgetMessage = string.Join(" ", guard.Reasons);
-                Publish(new AssistantRuntimeUpdate(
-                    AssistantVisualState.Idle,
-                    "Límite local de uso alcanzado · no se llamó al modelo",
-                    budgetMessage,
-                    ClearConfirmation: true));
-                return budgetMessage;
+                return OfferBudgetOverride(text, guard);
             }
         }
 
@@ -304,7 +310,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 failed ? AssistantVisualState.Error : AssistantVisualState.Idle,
                 failed ? "La política local no permitió la acción" : "Completado localmente",
                 outcome.Text,
-                ClearConfirmation: true));
+                ClearConfirmation: true,
+                ClearSteps: true,
+                Items: outcome.Items,
+                ClearItems: outcome.Items is null));
         }
 
         await SpeakIfEnabledAsync(outcome.Text, cancellationToken).ConfigureAwait(false);
@@ -567,6 +576,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (await TryConfirmBudgetOverrideAsync(confirmation, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+
             Publish(new AssistantRuntimeUpdate(
                 AssistantVisualState.Thinking,
                 "Verificando la acción confirmada…"));
@@ -596,6 +610,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         lock (_confirmationGate)
         {
             _pendingConfirmation = null;
+            _budgetOverridePendingInput = null;
         }
 
         if (publish)
@@ -671,6 +686,68 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             // El cierre ganó la carrera y los dispositivos ya fueron liberados.
         }
+    }
+
+    /// <summary>
+    /// El guard cortó antes de llamar al modelo. Se ofrece autorizar, pero nunca se autoriza solo:
+    /// hace falta el mismo gesto explícito que para una acción de PC.
+    /// </summary>
+    private string OfferBudgetOverride(string input, BudgetGuardResult guard)
+    {
+        var reasons = string.Join(" ", guard.Reasons);
+        var detail = string.IsNullOrWhiteSpace(reasons)
+            ? "Alcanzaste un límite local de uso."
+            : reasons;
+
+        var confirmation = new PendingConfirmation(
+            BudgetOverrideCallId,
+            "Seguir gastando por hoy",
+            detail);
+        lock (_confirmationGate)
+        {
+            _pendingConfirmation = confirmation;
+            _budgetOverridePendingInput = input;
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Attention,
+            "Límite local alcanzado · no se llamó al modelo",
+            $"{detail} Los comandos locales siguen funcionando.",
+            Confirmation: confirmation,
+            ClearSteps: true));
+        return detail;
+    }
+
+    private async Task<bool> TryConfirmBudgetOverrideAsync(
+        PendingConfirmation confirmation,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(confirmation.ToolCallId, BudgetOverrideCallId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string? input;
+        lock (_confirmationGate)
+        {
+            input = _budgetOverridePendingInput;
+            _budgetOverridePendingInput = null;
+            _pendingConfirmation = null;
+        }
+
+        // Sólo por hoy y sólo en memoria: mañana, o tras reiniciar, vuelve a preguntar.
+        _budgetOverrideDay = DateOnly.FromDateTime(DateTime.Now);
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Thinking,
+            "Gasto autorizado sólo por hoy · se olvida al reiniciar",
+            ClearConfirmation: true));
+
+        if (!string.IsNullOrWhiteSpace(input))
+        {
+            await ProcessRequestAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+
+        return true;
     }
 
     private void ReminderSchedulerOnReminderDue(object? sender, ReminderDueEventArgs eventArgs) =>

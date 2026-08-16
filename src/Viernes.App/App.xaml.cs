@@ -120,7 +120,8 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        if (!_window.IsVisible)
+        var wasHidden = !_window.IsVisible;
+        if (wasHidden)
         {
             _window.Show();
             _ = _viewModel?.SetShellVisibilityAsync(true, CancellationToken.None);
@@ -134,6 +135,13 @@ public partial class App : System.Windows.Application
 
         _window.Topmost = true;
         _window.ShowWithoutStealingFocus();
+
+        // Sólo hay llegada cuando realmente venía de estar guardado; si ya estaba a la vista, saltar
+        // desde la bandeja sería una animación mentirosa.
+        if (wasHidden)
+        {
+            _window.PlayArrivalFromTray();
+        }
 
         if (request.Reason == ShellActivationReason.Reminder)
         {

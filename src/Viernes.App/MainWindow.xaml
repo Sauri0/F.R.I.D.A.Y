@@ -222,6 +222,50 @@
                            Visibility="{Binding IsMessageVisible, Converter={StaticResource BoolVisibility}}" />
 
                 <!--
+                    Listas de agenda, recordatorios o memoria. La burbuja crece a 168 px sólo mientras
+                    las muestra: sigue siendo temporal, nunca un panel fijo.
+                -->
+                <ItemsControl Grid.Row="0"
+                              Margin="0,0,5,2"
+                              ItemsSource="{Binding ListItems}"
+                              Visibility="{Binding AreListItemsVisible, Converter={StaticResource BoolVisibility}}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,0,0,2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" MinWidth="62" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Margin="0,0,8,0"
+                                           Text="{Binding When}"
+                                           Foreground="{StaticResource Cyan}"
+                                           FontFamily="Consolas"
+                                           FontSize="10"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding What}"
+                                           ToolTip="{Binding What}"
+                                           Foreground="#FFE3EBF2"
+                                           FontFamily="{StaticResource UiFont}"
+                                           FontSize="11.5"
+                                           LineHeight="15"
+                                           TextTrimming="CharacterEllipsis"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="2"
+                                           Margin="8,0,0,0"
+                                           Text="{Binding Tag}"
+                                           Foreground="{StaticResource TextSecondary}"
+                                           FontFamily="Consolas"
+                                           FontSize="9"
+                                           VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!--
                     Pasos del turno. Reemplazan al mensaje mientras trabaja para que la espera muestre
                     qué está haciendo, y sobre todo si una herramienta quedó bloqueada por la política.
                 -->

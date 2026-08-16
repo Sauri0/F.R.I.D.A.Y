@@ -12,7 +12,9 @@ internal sealed record AssistantRuntimeUpdate(
     PendingConfirmation? Confirmation = null,
     bool ClearConfirmation = false,
     IReadOnlyList<TurnStep>? Steps = null,
-    bool ClearSteps = false);
+    bool ClearSteps = false,
+    IReadOnlyList<BubbleListItem>? Items = null,
+    bool ClearItems = false);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,

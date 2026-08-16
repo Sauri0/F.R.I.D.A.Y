@@ -59,9 +59,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(IsError));
             OnPropertyChanged(nameof(IsStateLabelVisible));
             OnPropertyChanged(nameof(StateShortLabel));
-            OnPropertyChanged(nameof(AreStepsVisible));
-            OnPropertyChanged(nameof(IsMessageVisible));
-            NotifyShellProperties();
+            NotifyContentProperties();
         }
     }
 
@@ -149,12 +147,9 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         {
             if (SetProperty(ref _isExpanded, value))
             {
-                OnPropertyChanged(nameof(WidgetHeight));
-                OnPropertyChanged(nameof(WidgetWidth));
-                OnPropertyChanged(nameof(IsMinimalShellVisible));
-                OnPropertyChanged(nameof(IsAssistantShellVisible));
                 OnPropertyChanged(nameof(IsInputAreaVisible));
                 OnPropertyChanged(nameof(IsConfirmationAreaVisible));
+                NotifyContentProperties();
             }
         }
     }
@@ -183,11 +178,16 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     public ObservableCollection<TurnStepViewModel> Steps { get; } = [];
 
+    /// <summary>Filas de agenda, recordatorios o memoria. Vacío en cualquier otro caso.</summary>
+    public ObservableCollection<BubbleListItem> ListItems { get; } = [];
+
     public bool AreStepsVisible => Steps.Count > 0 && State == AssistantVisualState.Thinking;
+
+    public bool AreListItemsVisible => ListItems.Count > 0 && !AreStepsVisible && !IsExpanded;
 
     public bool IsInputAreaVisible => IsExpanded && !IsConfirmationVisible;
     public bool IsConfirmationAreaVisible => IsExpanded && IsConfirmationVisible;
-    public bool IsMessageVisible => !AreStepsVisible;
+    public bool IsMessageVisible => !AreStepsVisible && !AreListItemsVisible;
     public bool IsMinimalShellVisible =>
         State == AssistantVisualState.Idle && !IsExpanded && !IsConfirmationVisible && !_isPresentingResult;
     public bool IsAssistantShellVisible => !IsMinimalShellVisible;
@@ -198,7 +198,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         ? 78
         : IsExpanded
             ? 158
-            : AreStepsVisible
+            : AreStepsVisible || AreListItemsVisible
                 ? 168
                 : 112;
 
@@ -381,9 +381,21 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                     }
                 }
 
-                OnPropertyChanged(nameof(AreStepsVisible));
-                OnPropertyChanged(nameof(IsMessageVisible));
-                NotifyShellProperties();
+                NotifyContentProperties();
+            }
+
+            if (update.Items is not null || update.ClearItems)
+            {
+                ListItems.Clear();
+                if (update.Items is not null)
+                {
+                    foreach (var item in update.Items)
+                    {
+                        ListItems.Add(item);
+                    }
+                }
+
+                NotifyContentProperties();
             }
 
             if (update.ClearConfirmation)
@@ -462,6 +474,14 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(IsAssistantShellVisible));
         OnPropertyChanged(nameof(WidgetWidth));
         OnPropertyChanged(nameof(WidgetHeight));
+    }
+
+    private void NotifyContentProperties()
+    {
+        OnPropertyChanged(nameof(AreStepsVisible));
+        OnPropertyChanged(nameof(AreListItemsVisible));
+        OnPropertyChanged(nameof(IsMessageVisible));
+        NotifyShellProperties();
     }
 
     public async ValueTask DisposeAsync()
