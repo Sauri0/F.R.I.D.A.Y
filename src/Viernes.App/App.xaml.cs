@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using System.Threading;
 using System.Windows;
 using Viernes.App.Services;
@@ -24,6 +25,18 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // Modo de diagnóstico visual: dibuja la gota a PNG y sale. No toca voz, preferencias ni red.
+        var renderIndex = Array.IndexOf(e.Args, "--render-orb");
+        if (renderIndex >= 0)
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var outputDirectory = renderIndex + 1 < e.Args.Length
+                ? e.Args[renderIndex + 1]
+                : Path.Combine(Path.GetTempPath(), "viernes-orb");
+            _ = RenderOrbAndExitAsync(outputDirectory);
+            return;
+        }
 
         _singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isFirstInstance);
         if (!isFirstInstance)
@@ -53,6 +66,23 @@ public partial class App : System.Windows.Application
         _trayIcon.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
         _window.Show();
         _window.Activate();
+    }
+
+    private async Task RenderOrbAndExitAsync(string outputDirectory)
+    {
+        try
+        {
+            var path = await Diagnostics.OrbSnapshot.RunAsync(outputDirectory);
+            Console.WriteLine(path);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"No se pudo renderizar la gota: {exception.Message}");
+        }
+        finally
+        {
+            Shutdown();
+        }
     }
 
     internal void NotifyWindowVisibilityChanged(bool visible) => _trayIcon?.SetWindowVisible(visible);

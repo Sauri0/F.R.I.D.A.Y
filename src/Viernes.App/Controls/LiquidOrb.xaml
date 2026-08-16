@@ -15,102 +15,130 @@
         que la masa se despegue. Es nativo de WPF, no necesita shader y se mantiene nítido a 78 px.
     -->
     <Grid x:Name="Root" RenderTransformOrigin="0.5,0.5">
-        <Grid.RenderTransform>
-            <TransformGroup>
-                <ScaleTransform x:Name="MassScale" ScaleX="1" ScaleY="1" />
-                <RotateTransform x:Name="MassTilt" Angle="0" />
-            </TransformGroup>
-        </Grid.RenderTransform>
 
-        <!-- Campo de luz: la gota moja el escritorio alrededor. -->
+        <!-- Halo apenas insinuado. De más, la gota se vuelve niebla y pierde el borde. -->
         <Ellipse x:Name="GlowField"
                  Width="70"
                  Height="70"
-                 Opacity="0.8"
+                 Opacity="0.55"
                  RenderTransformOrigin="0.5,0.5">
             <Ellipse.RenderTransform>
                 <ScaleTransform x:Name="GlowScale" ScaleX="1" ScaleY="1" />
             </Ellipse.RenderTransform>
             <Ellipse.Fill>
                 <RadialGradientBrush>
-                    <GradientStop x:Name="GlowInner" Color="#4D72D9FF" Offset="0.30" />
-                    <GradientStop Color="#0072D9FF" Offset="0.62" />
+                    <GradientStop Color="#0072D9FF" Offset="0.52" />
+                    <GradientStop x:Name="GlowInner" Color="#3872D9FF" Offset="0.72" />
+                    <GradientStop Color="#0072D9FF" Offset="1" />
                 </RadialGradientBrush>
             </Ellipse.Fill>
         </Ellipse>
 
-        <!-- La masa. Los ocho puntos de control se animan con períodos distintos. -->
-        <Path x:Name="Mass">
+        <!--
+            La masa: casi un círculo. La tensión superficial mantiene una gota redonda; las
+            excursiones son de dos o tres píxeles, apenas perceptibles de a una. Lo que la hace
+            leer como agua no es la silueta, es el borde denso y el reflejo.
+        -->
+        <!--
+            Sólo la masa recibe la deformación. Los reflejos quedan fuera de este transform: la luz
+            viene del ambiente, no del objeto, así que no puede girar ni estirarse con el fluido.
+            La escala base la deja apenas más ancha que alta, como una gota apoyada.
+        -->
+        <Path x:Name="Mass" RenderTransformOrigin="0.5,0.5">
+            <Path.RenderTransform>
+                <TransformGroup>
+                    <ScaleTransform x:Name="MassScale" ScaleX="1.035" ScaleY="0.965" />
+                    <RotateTransform x:Name="MassTilt" Angle="0" />
+                </TransformGroup>
+            </Path.RenderTransform>
             <Path.Fill>
-                <RadialGradientBrush GradientOrigin="0.34,0.28" Center="0.5,0.5" RadiusX="0.62" RadiusY="0.62">
-                    <GradientStop x:Name="MassLight" Color="#FFFFFFFF" Offset="0" />
-                    <GradientStop x:Name="MassBody" Color="#FF72D9FF" Offset="0.44" />
-                    <GradientStop x:Name="MassDeep" Color="#FF1B5A73" Offset="1" />
+                <RadialGradientBrush GradientOrigin="0.36,0.30" Center="0.44,0.40" RadiusX="0.78" RadiusY="0.78">
+                    <GradientStop x:Name="MassLight" Color="#FFEAFBFF" Offset="0" />
+                    <GradientStop x:Name="MassBody" Color="#FF72D9FF" Offset="0.36" />
+                    <GradientStop x:Name="MassDeep" Color="#FF17607F" Offset="0.84" />
+                    <GradientStop x:Name="MassRim" Color="#FF08314A" Offset="1" />
                 </RadialGradientBrush>
             </Path.Fill>
             <Path.Effect>
                 <DropShadowEffect x:Name="MassGlow"
                                   Color="#FF72D9FF"
-                                  BlurRadius="20"
+                                  BlurRadius="14"
                                   ShadowDepth="0"
-                                  Opacity="0.6" />
+                                  Opacity="0.45" />
             </Path.Effect>
-            <!--
-                Nonzero funde las geometrías en una sola silueta: las gotas satélite se unen a la
-                masa sin costura. Es el equivalente nativo a las metaballs, sin shader ni filtro.
-                Nunca se separan del todo, así el conjunto siempre lee como un cuerpo continuo.
-            -->
             <Path.Data>
-                <GeometryGroup FillRule="Nonzero">
-                    <PathGeometry>
-                        <PathFigure StartPoint="35,11" IsClosed="True" IsFilled="True">
-                            <BezierSegment x:Name="ArcNE" Point1="48,11" Point2="59,22" Point3="59,35" />
-                            <BezierSegment x:Name="ArcSE" Point1="59,48" Point2="48,59" Point3="35,59" />
-                            <BezierSegment x:Name="ArcSW" Point1="22,59" Point2="11,48" Point3="11,35" />
-                            <BezierSegment x:Name="ArcNW" Point1="11,22" Point2="22,11" Point3="35,11" />
-                        </PathFigure>
-                    </PathGeometry>
-                    <EllipseGeometry x:Name="Drop1" Center="52,24" RadiusX="10" RadiusY="10" />
-                    <EllipseGeometry x:Name="Drop2" Center="20,45" RadiusX="9"  RadiusY="9" />
-                    <EllipseGeometry x:Name="Drop3" Center="38,54" RadiusX="8"  RadiusY="8" />
-                </GeometryGroup>
+                <PathGeometry>
+                    <PathFigure StartPoint="35,10" IsClosed="True" IsFilled="True">
+                        <BezierSegment x:Name="ArcNE" Point1="48.8,10"   Point2="60,21.2" Point3="60,35" />
+                        <BezierSegment x:Name="ArcSE" Point1="60,48.8"   Point2="48.8,60" Point3="35,60" />
+                        <BezierSegment x:Name="ArcSW" Point1="21.2,60"   Point2="10,48.8" Point3="10,35" />
+                        <BezierSegment x:Name="ArcNW" Point1="10,21.2"   Point2="21.2,10" Point3="35,10" />
+                    </PathFigure>
+                </PathGeometry>
             </Path.Data>
         </Path>
 
         <!--
-            El brillo especular va por encima y NO se deforma con la masa: es luz reflejada sobre
-            la superficie, no parte del fluido. Deriva con su propio ciclo.
+            Luz que atraviesa la gota y se concentra contra el borde opuesto. Va teñida del color
+            del estado: en blanco puro leía como una mancha gris sucia sobre el cuerpo.
+        -->
+        <Ellipse x:Name="RimLight"
+                 Width="26"
+                 Height="15"
+                 Margin="0,0,12,13"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Bottom"
+                 IsHitTestVisible="False"
+                 Opacity="0.85"
+                 RenderTransformOrigin="0.5,0.5">
+            <Ellipse.RenderTransform>
+                <RotateTransform Angle="-34" />
+            </Ellipse.RenderTransform>
+            <Ellipse.Fill>
+                <RadialGradientBrush GradientOrigin="0.5,0.5">
+                    <GradientStop x:Name="RimCore" Color="#B8CFF6FF" Offset="0" />
+                    <GradientStop x:Name="RimEdge" Color="#0072D9FF" Offset="1" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+
+        <!--
+            Reflejo especular: chico, muy brillante y de borde marcado. Es la diferencia entre algo
+            mojado y una mancha de color. Va por encima y no se deforma con el fluido.
         -->
         <Ellipse x:Name="Sheen"
-                 Width="46"
-                 Height="46"
-                 HorizontalAlignment="Center"
-                 VerticalAlignment="Center"
+                 Width="17"
+                 Height="12"
+                 Margin="19,17,0,0"
+                 HorizontalAlignment="Left"
+                 VerticalAlignment="Top"
                  IsHitTestVisible="False"
                  RenderTransformOrigin="0.5,0.5">
             <Ellipse.RenderTransform>
-                <TranslateTransform x:Name="SheenDrift" X="0" Y="0" />
+                <TransformGroup>
+                    <RotateTransform Angle="-26" />
+                    <TranslateTransform x:Name="SheenDrift" X="0" Y="0" />
+                </TransformGroup>
             </Ellipse.RenderTransform>
             <Ellipse.Fill>
-                <RadialGradientBrush GradientOrigin="0.32,0.24" Center="0.32,0.24" RadiusX="0.46" RadiusY="0.34">
-                    <GradientStop Color="#F2FFFFFF" Offset="0" />
-                    <GradientStop Color="#40FFFFFF" Offset="0.45" />
+                <RadialGradientBrush GradientOrigin="0.42,0.36" Center="0.46,0.42" RadiusX="0.58" RadiusY="0.58">
+                    <GradientStop Color="#FFFFFFFF" Offset="0" />
+                    <GradientStop Color="#D8FFFFFF" Offset="0.42" />
                     <GradientStop Color="#00FFFFFF" Offset="1" />
                 </RadialGradientBrush>
             </Ellipse.Fill>
         </Ellipse>
 
-        <!-- Segundo reflejo, más chico y abajo: le da volumen de gota, no de esfera. -->
-        <Ellipse Width="22"
-                 Height="13"
-                 Margin="0,0,10,14"
+        <!-- Punto de luz secundario: difuso, no un disco sólido, o parece una pastilla pegada encima. -->
+        <Ellipse Width="7"
+                 Height="5"
+                 Margin="0,23,19,0"
                  HorizontalAlignment="Right"
-                 VerticalAlignment="Bottom"
-                 IsHitTestVisible="False"
-                 Opacity="0.5">
+                 VerticalAlignment="Top"
+                 IsHitTestVisible="False">
             <Ellipse.Fill>
-                <RadialGradientBrush>
-                    <GradientStop Color="#66FFFFFF" Offset="0" />
+                <RadialGradientBrush GradientOrigin="0.5,0.45">
+                    <GradientStop Color="#9EFFFFFF" Offset="0" />
                     <GradientStop Color="#00FFFFFF" Offset="1" />
                 </RadialGradientBrush>
             </Ellipse.Fill>
