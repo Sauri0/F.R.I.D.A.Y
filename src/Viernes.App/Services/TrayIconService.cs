@@ -11,6 +11,7 @@ internal sealed class TrayIconService : IDisposable
     private readonly Forms.ToolStripMenuItem _showItem;
     private readonly Forms.ToolStripMenuItem _muteItem;
     private readonly Forms.ToolStripMenuItem _wakeWordItem;
+    private readonly Forms.ToolStripMenuItem _listenWhileHiddenItem;
     private readonly Forms.ToolStripMenuItem _autoStartItem;
     private readonly Icon _icon;
 
@@ -18,6 +19,7 @@ internal sealed class TrayIconService : IDisposable
         Action toggleVisibility,
         Action toggleMute,
         Action toggleWakeWord,
+        Action toggleListenWhileHidden,
         Action toggleAutoStart,
         Action exit)
     {
@@ -25,6 +27,10 @@ internal sealed class TrayIconService : IDisposable
         _showItem = new Forms.ToolStripMenuItem("Ocultar widget", null, (_, _) => toggleVisibility());
         _muteItem = new Forms.ToolStripMenuItem("Silenciar voz", null, (_, _) => toggleMute());
         _wakeWordItem = new Forms.ToolStripMenuItem("Activación por voz (demo)", null, (_, _) => toggleWakeWord());
+        _listenWhileHiddenItem = new Forms.ToolStripMenuItem(
+            "Escuchar aunque esté oculto",
+            null,
+            (_, _) => toggleListenWhileHidden());
         _autoStartItem = new Forms.ToolStripMenuItem("Iniciar con Windows", null, (_, _) => toggleAutoStart());
 
         var menu = new Forms.ContextMenuStrip();
@@ -33,6 +39,7 @@ internal sealed class TrayIconService : IDisposable
             new Forms.ToolStripSeparator(),
             _muteItem,
             _wakeWordItem,
+            _listenWhileHiddenItem,
             _autoStartItem,
             new Forms.ToolStripSeparator(),
             new Forms.ToolStripMenuItem("Salir de Viernes", null, (_, _) => exit())
@@ -63,6 +70,14 @@ internal sealed class TrayIconService : IDisposable
         _wakeWordItem.Text = enabled
             ? "Activación por voz (demo) · activa"
             : "Activación por voz (demo) · apagada";
+    }
+
+    public void SetListenWhileHidden(bool enabled)
+    {
+        _listenWhileHiddenItem.Checked = enabled;
+        _listenWhileHiddenItem.Text = enabled
+            ? "Escuchar aunque esté oculto · sí"
+            : "Escuchar aunque esté oculto · no";
     }
 
     public void SetAutoStart(bool enabled) => _autoStartItem.Checked = enabled;

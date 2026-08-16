@@ -18,6 +18,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isWakeWordEnabled;
     private bool _isExpanded;
     private bool _isConfirmationVisible;
+    private bool _isListeningWhileHidden = true;
     private string _confirmationTitle = "Confirmación necesaria";
     private string _confirmationDetail = string.Empty;
     private bool _isPresentingResult;
@@ -27,10 +28,12 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         _runtime = runtime;
         _runtime.Updated += RuntimeOnUpdated;
+        _runtime.ActivationRequested += RuntimeOnActivationRequested;
 
         _sendCommand = new AsyncRelayCommand(SendAsync, CanSend, ShowError);
         ToggleMuteCommand = new RelayCommand(ToggleMute);
         ToggleWakeWordCommand = new AsyncRelayCommand(ToggleWakeWordAsync, () => true, ShowError);
+        ToggleListenWhileHiddenCommand = new AsyncRelayCommand(ToggleListenWhileHiddenAsync, () => true, ShowError);
         ToggleExpandedCommand = new RelayCommand(() => IsExpanded = !IsExpanded);
         ClearInputCommand = new RelayCommand(() => InputText = string.Empty, () => !string.IsNullOrEmpty(InputText));
         ConfirmCommand = new AsyncRelayCommand(ConfirmAsync, () => IsConfirmationVisible, ShowError);
@@ -124,6 +127,18 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    public bool IsListeningWhileHidden
+    {
+        get => _isListeningWhileHidden;
+        private set
+        {
+            if (SetProperty(ref _isListeningWhileHidden, value))
+            {
+                OnPropertyChanged(nameof(PrivacyHint));
+            }
+        }
+    }
+
     public bool IsExpanded
     {
         get => _isExpanded;
@@ -188,10 +203,12 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         ? "Micrófono y voz silenciados"
         : IsMicrophoneActive
             ? IsWakeWordEnabled
-                ? "Micrófono activo · wake demo local visible"
+                ? "Micrófono activo · atento a tu nombre (demo local)"
                 : "Micrófono activo · dictado local"
             : IsWakeWordEnabled
-                ? "Wake demo preparado · PTT disponible"
+                ? IsListeningWhileHidden
+                    ? "Atento a tu nombre, incluso oculto · PTT disponible"
+                    : "Atento a tu nombre · PTT disponible"
                 : "Micrófono inactivo · PTT disponible";
     public string WakeWordToolTip => IsWakeWordEnabled
         ? "Desactivar activación por voz (demo local)"
@@ -216,16 +233,20 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand SendCommand => _sendCommand;
     public ICommand ToggleMuteCommand { get; }
     public ICommand ToggleWakeWordCommand { get; }
+    public ICommand ToggleListenWhileHiddenCommand { get; }
     public ICommand ToggleExpandedCommand { get; }
     public ICommand ClearInputCommand { get; }
     public ICommand ConfirmCommand { get; }
     public ICommand DismissConfirmationCommand { get; }
+
+    public event EventHandler<ShellActivationRequest>? ActivationRequested;
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         await _runtime.InitializeAsync(cancellationToken);
         IsMuted = _runtime.IsMuted;
         IsWakeWordEnabled = _runtime.IsWakeWordEnabled;
+        IsListeningWhileHidden = _runtime.IsListeningWhileHidden;
         OnPropertyChanged(nameof(IsCloudConfigured));
         OnPropertyChanged(nameof(ModeLabel));
     }
@@ -296,6 +317,16 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         await _runtime.SetWakeWordEnabledAsync(!IsWakeWordEnabled, cancellationToken);
         IsWakeWordEnabled = _runtime.IsWakeWordEnabled;
     }
+
+    private async Task ToggleListenWhileHiddenAsync(CancellationToken cancellationToken)
+    {
+        await _runtime.SetListenWhileHiddenAsync(!IsListeningWhileHidden, cancellationToken);
+        IsListeningWhileHidden = _runtime.IsListeningWhileHidden;
+    }
+
+    private void RuntimeOnActivationRequested(object? sender, ShellActivationRequest request) =>
+        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            ActivationRequested?.Invoke(this, request));
 
     private void RuntimeOnUpdated(object? sender, AssistantRuntimeUpdate update)
     {
@@ -402,6 +433,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         _resultPresentationCancellation?.Cancel();
         _resultPresentationCancellation?.Dispose();
         _runtime.Updated -= RuntimeOnUpdated;
+        _runtime.ActivationRequested -= RuntimeOnActivationRequested;
         await _runtime.DisposeAsync();
     }
 }

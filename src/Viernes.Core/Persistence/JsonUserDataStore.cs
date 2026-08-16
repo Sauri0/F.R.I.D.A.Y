@@ -46,6 +46,28 @@ public sealed class JsonUserDataStore : IUserDataStore
         return data.Reminders.OrderBy(item => item.DueAt).ToArray();
     }
 
+    public async Task<bool> MarkReminderNotifiedAsync(
+        Guid reminderId,
+        DateTimeOffset notifiedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var stamped = false;
+        await MutateAsync(
+            data =>
+            {
+                var index = data.Reminders.FindIndex(item => item.Id == reminderId);
+                if (index < 0 || data.Reminders[index].NotifiedAt is not null)
+                {
+                    return;
+                }
+
+                data.Reminders[index] = data.Reminders[index] with { NotifiedAt = notifiedAt };
+                stamped = true;
+            },
+            cancellationToken).ConfigureAwait(false);
+        return stamped;
+    }
+
     public async Task<AgendaItem> AddAgendaItemAsync(
         string title,
         DateTimeOffset startsAt,

@@ -32,6 +32,25 @@ public sealed class InMemoryUserDataStore : IUserDataStore
         }
     }
 
+    public Task<bool> MarkReminderNotifiedAsync(
+        Guid reminderId,
+        DateTimeOffset notifiedAt,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var index = _reminders.FindIndex(item => item.Id == reminderId);
+            if (index < 0 || _reminders[index].NotifiedAt is not null)
+            {
+                return Task.FromResult(false);
+            }
+
+            _reminders[index] = _reminders[index] with { NotifiedAt = notifiedAt };
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<AgendaItem> AddAgendaItemAsync(
         string title,
         DateTimeOffset startsAt,

@@ -37,17 +37,20 @@ public partial class App : System.Windows.Application
         var runtime = new AssistantRuntime();
         _viewModel = new MainViewModel(runtime);
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
+        _viewModel.ActivationRequested += ViewModelOnActivationRequested;
         _window = new MainWindow(_viewModel, new WindowPlacementStore());
 
         _trayIcon = new TrayIconService(
             ToggleWindowVisibility,
             ToggleMute,
             ToggleWakeWord,
+            ToggleListenWhileHidden,
             ToggleAutoStart,
             RequestExit);
 
         var autoStartStatus = _autoStartService.GetStatus();
         _trayIcon.SetAutoStart(autoStartStatus.IsConfiguredForCurrentExecutable);
+        _trayIcon.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
         _window.Show();
         _window.Activate();
     }
@@ -98,6 +101,46 @@ public partial class App : System.Windows.Application
         }
     }
 
+    private void ToggleListenWhileHidden()
+    {
+        if (_viewModel?.ToggleListenWhileHiddenCommand.CanExecute(null) == true)
+        {
+            _viewModel.ToggleListenWhileHiddenCommand.Execute(null);
+        }
+    }
+
+    /// <summary>
+    /// Viernes pide presencia: se muestra sin robar el foco del teclado, para no interrumpir lo que
+    /// el usuario esté escribiendo en otra ventana.
+    /// </summary>
+    private void ViewModelOnActivationRequested(object? sender, ShellActivationRequest request)
+    {
+        if (_window is null)
+        {
+            return;
+        }
+
+        if (!_window.IsVisible)
+        {
+            _window.Show();
+            _ = _viewModel?.SetShellVisibilityAsync(true, CancellationToken.None);
+            _trayIcon?.SetWindowVisible(true);
+        }
+
+        if (_window.WindowState == WindowState.Minimized)
+        {
+            _window.WindowState = WindowState.Normal;
+        }
+
+        _window.Topmost = true;
+        _window.ShowWithoutStealingFocus();
+
+        if (request.Reason == ShellActivationReason.Reminder)
+        {
+            _trayIcon?.ShowBalloon(request.Title, request.Detail);
+        }
+    }
+
     private void ToggleAutoStart()
     {
         var status = _autoStartService.GetStatus();
@@ -127,6 +170,7 @@ public partial class App : System.Windows.Application
         if (_viewModel is not null)
         {
             _viewModel.PropertyChanged -= ViewModelOnPropertyChanged;
+            _viewModel.ActivationRequested -= ViewModelOnActivationRequested;
             await _viewModel.DisposeAsync();
         }
 
@@ -147,6 +191,10 @@ public partial class App : System.Windows.Application
         else if (e.PropertyName == nameof(MainViewModel.IsWakeWordEnabled))
         {
             _trayIcon?.SetWakeWordEnabled(_viewModel.IsWakeWordEnabled);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.IsListeningWhileHidden))
+        {
+            _trayIcon?.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
         }
         else if (e.PropertyName == nameof(MainViewModel.StatusText))
         {

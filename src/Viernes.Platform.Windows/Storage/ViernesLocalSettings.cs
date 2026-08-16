@@ -20,6 +20,12 @@ public sealed record ViernesLocalSettings
 
     public IReadOnlyList<string> WakeWordPhrases { get; init; } = ["Viernes", "Hola Viernes"];
 
+    /// <summary>
+    /// Mantiene la activación por voz mientras el orbe está oculto, para que Viernes pueda aparecer
+    /// solo al ser llamado. Silenciar sigue siendo el corte duro que libera el micrófono.
+    /// </summary>
+    public bool ListenWhileHidden { get; init; } = true;
+
     public string RecognitionCulture { get; init; } = "es-AR";
 
     public string? PreferredVoiceName { get; init; }

@@ -4,6 +4,8 @@ using Viernes.Core;
 using Viernes.Core.Configuration;
 using Viernes.Core.Conversation;
 using Viernes.Core.Models;
+using Viernes.Core.Persistence;
+using Viernes.Core.Scheduling;
 using Viernes.Core.Tools;
 using Viernes.Core.Usage;
 using Viernes.Memory.Persistence;
@@ -21,6 +23,8 @@ namespace Viernes.App.Services;
 internal sealed class AssistantRuntime : IAssistantRuntime
 {
     private const int MaximumSpokenCharacters = 1_200;
+    private static readonly System.Globalization.CultureInfo ArgentineCulture =
+        System.Globalization.CultureInfo.GetCultureInfo("es-AR");
 
     private readonly ViernesOptions _options;
     private readonly HttpClient _httpClient;
@@ -28,6 +32,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private readonly UsageLedger _usageLedger;
     private readonly LocalCommandRouter _localCommands;
     private readonly ISpeechService _speechSynthesizer;
+    private readonly JsonUserDataStore _dataStore = new();
+    private readonly ReminderScheduler _reminderScheduler;
     private readonly LocalSettingsStore _settingsStore = new();
     private readonly WakeWordRecognitionCoordinator _wakeCoordinator = new();
     private readonly SemaphoreSlim _voiceTransitionGate = new(1, 1);
@@ -43,6 +49,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private string? _recognitionFallbackReason;
     private bool _isMuted;
     private bool _isWakeWordEnabled;
+    private bool _listenWhileHidden = true;
     private bool _isInitialized;
     private bool _isShellVisible = true;
     private bool _isDisposed;
@@ -57,8 +64,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _orchestrator = ViernesCoreFactory.CreateDefault(
             _httpClient,
             _options,
-            usageLedger: _usageLedger);
+            _dataStore,
+            _usageLedger);
         _localCommands = new LocalCommandRouter(_orchestrator, new JsonPersonalMemoryStore());
+        _reminderScheduler = new ReminderScheduler(_dataStore);
+        _reminderScheduler.ReminderDue += ReminderSchedulerOnReminderDue;
         _speechSynthesizer = new SpeechService(new SpeechServiceOptions
         {
             RecognitionCulture = "es-AR",
@@ -70,6 +80,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     }
 
     public event EventHandler<AssistantRuntimeUpdate>? Updated;
+
+    public event EventHandler<ShellActivationRequest>? ActivationRequested;
 
     public bool IsMuted
     {
@@ -90,6 +102,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     public bool IsWakeWordEnabled => _isWakeWordEnabled;
 
+    public bool IsListeningWhileHidden => _listenWhileHidden;
+
     public bool IsWakeWordDemo => _wakeWord?.IsDemoOnly ?? true;
 
     public string RecognitionProviderName => _recognitionProviderName;
@@ -106,6 +120,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _settings = loaded.Settings;
         _isMuted = _settings.MicrophoneMuted;
         _isWakeWordEnabled = ResolveWakeEnabled(_settings.VoiceActivation);
+        _listenWhileHidden = ResolveListenWhileHidden(_settings.ListenWhileHidden);
 
         var selection = CreateRecognitionSelection(_settings);
         _recognition = selection.Provider;
@@ -137,6 +152,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         _isInitialized = true;
+        _reminderScheduler.Start();
         var providerStatus = selection.Availability.IsAvailable
             ? $"{_recognitionProviderName} listo"
             : "entrada de voz no disponible";
@@ -477,10 +493,21 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 await _recognition.CancelPushToTalkAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
+            // Ocultar el orbe ya no apaga la escucha: para eso está mute, que sí libera el micrófono.
+            if (_listenWhileHidden)
+            {
+                await ResumeWakeWordAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             Publish(new AssistantRuntimeUpdate(
                 AssistantVisualState.Idle,
-                "Widget oculto · wake pausado por privacidad",
+                _listenWhileHidden && _isWakeWordEnabled && !IsMuted
+                    ? $"Oculto y atento · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                    : "Widget oculto · escucha detenida",
                 MicrophoneActive: IsAnyMicrophoneActive(),
                 WakeWordEnabled: _isWakeWordEnabled));
             return;
@@ -490,8 +517,35 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         Publish(new AssistantRuntimeUpdate(
             AssistantVisualState.Idle,
             _isWakeWordEnabled && !IsMuted
-                ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                ? $"Atento · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
                 : "Disponible · PTT activo",
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+    }
+
+    public async Task SetListenWhileHiddenAsync(bool enabled, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        _listenWhileHidden = enabled;
+        await PersistVoiceSettingsAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!_isShellVisible)
+        {
+            if (enabled)
+            {
+                await ResumeWakeWordAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            enabled
+                ? "Voy a seguir atento aunque me oculte"
+                : "Al ocultarme voy a dejar de escuchar",
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: _isWakeWordEnabled));
     }
@@ -618,6 +672,66 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
+    private void ReminderSchedulerOnReminderDue(object? sender, ReminderDueEventArgs eventArgs) =>
+        _ = AnnounceReminderAsync(eventArgs);
+
+    private async Task AnnounceReminderAsync(ReminderDueEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        var title = eventArgs.Reminder.Title;
+        var when = eventArgs.Reminder.DueAt.ToLocalTime().ToString("HH:mm", ArgentineCulture);
+        var detail = eventArgs.IsLate
+            ? $"Era para las {when}: {title}"
+            : $"Son las {when}: {title}";
+
+        // Un recordatorio interrumpe la presencia mínima, pero no ejecuta ninguna acción por su cuenta.
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Attention,
+            eventArgs.IsLate ? "Recordatorio atrasado" : "Recordatorio",
+            detail,
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+
+        RequestActivation(new ShellActivationRequest(
+            ShellActivationReason.Reminder,
+            "Recordatorio de Viernes",
+            detail));
+
+        try
+        {
+            await SpeakIfEnabledAsync(detail, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // La voz es un complemento del aviso visual; su falla no debe perder el recordatorio.
+        }
+    }
+
+    private void RequestActivation(ShellActivationRequest request)
+    {
+        var handlers = ActivationRequested;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (EventHandler<ShellActivationRequest> handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, request);
+            }
+            catch (Exception)
+            {
+                // Un shell que no puede mostrarse no debe romper el flujo de voz ni de recordatorios.
+            }
+        }
+    }
+
     private async Task HandleWakeWordDetectedAsync(WakeWordDetectedEventArgs eventArgs)
     {
         if (Interlocked.CompareExchange(ref _wakeHandoffActive, 1, 0) != 0 ||
@@ -631,6 +745,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _wakeHandoffCancellation?.Dispose();
             _wakeHandoffCancellation = new CancellationTokenSource();
             _orchestrator.SetListening(true);
+
+            // Llamarlo por su nombre alcanza para que aparezca, aunque estuviera oculto en la bandeja.
+            RequestActivation(new ShellActivationRequest(
+                ShellActivationReason.WakeWord,
+                "Viernes",
+                $"Te escuché decir “{eventArgs.Phrase}”."));
+
             Publish(new AssistantRuntimeUpdate(
                 AssistantVisualState.Listening,
                 $"Activada por “{eventArgs.Phrase}” · escuchando…",
@@ -691,7 +812,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _wakeHandoffCancellation?.Dispose();
             _wakeHandoffCancellation = null;
             Interlocked.Exchange(ref _wakeHandoffActive, 0);
-            if (!_isShellVisible || IsMuted || !_isWakeWordEnabled)
+            if (IsMuted || !_isWakeWordEnabled || (!_isShellVisible && !_listenWhileHidden))
             {
                 await PauseWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
             }
@@ -712,7 +833,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private async Task ResumeWakeWordAsync(CancellationToken cancellationToken)
     {
-        if (_isDisposed || !_isInitialized || !_isShellVisible || IsMuted || !_isWakeWordEnabled || _wakeWord is null ||
+        if (_isDisposed || !_isInitialized || IsMuted || !_isWakeWordEnabled || _wakeWord is null ||
+            (!_isShellVisible && !_listenWhileHidden) ||
             Volatile.Read(ref _requestActive) != 0 || _recognition?.IsMicrophoneActive == true)
         {
             return;
@@ -733,6 +855,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 ? VoiceActivationMode.LocalWakeWord
                 : VoiceActivationMode.PushToTalk,
             WakeWordPhrases = _wakeWord?.Phrases.ToArray() ?? _settings.WakeWordPhrases,
+            ListenWhileHidden = _listenWhileHidden,
             PreferredRecognitionProvider = _recognition?.Info.Kind ?? _settings.PreferredRecognitionProvider
         };
         await _settingsStore.SaveAsync(_settings, cancellationToken).ConfigureAwait(false);
@@ -788,6 +911,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         return configuredMode == VoiceActivationMode.LocalWakeWord;
     }
+
+    private static bool ResolveListenWhileHidden(bool configuredValue) =>
+        Environment.GetEnvironmentVariable("VIERNES_LISTEN_WHILE_HIDDEN")?.Trim().ToLowerInvariant() switch
+        {
+            "0" or "false" or "off" => false,
+            "1" or "true" or "on" => true,
+            _ => configuredValue
+        };
 
     private static IReadOnlyList<string> ResolveWakePhrases(IReadOnlyList<string> configuredPhrases)
     {
@@ -937,6 +1068,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _wakeHandoffCancellation?.Cancel();
         _wakeHandoffCancellation?.Dispose();
         _orchestrator.StateChanged -= OrchestratorOnStateChanged;
+        _reminderScheduler.ReminderDue -= ReminderSchedulerOnReminderDue;
+        await _reminderScheduler.DisposeAsync().ConfigureAwait(false);
 
         if (_wakeWord is not null)
         {

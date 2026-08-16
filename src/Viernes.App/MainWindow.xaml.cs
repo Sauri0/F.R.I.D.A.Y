@@ -1,7 +1,9 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using Viernes.App.Services;
 using Viernes.App.ViewModels;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
@@ -10,6 +12,12 @@ namespace Viernes.App;
 
 public partial class MainWindow : Window
 {
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpShowWindow = 0x0040;
+    private static readonly nint HwndTopmost = -1;
+
     private readonly MainViewModel _viewModel;
     private readonly WindowPlacementStore _placementStore;
     private bool _pushToTalkActive;
@@ -163,6 +171,21 @@ public partial class MainWindow : Window
         App.Current.NotifyWindowVisibilityChanged(false);
     }
 
+    /// <summary>
+    /// Trae el orbe al frente sin activar la ventana. Viernes puede aparecer mientras el usuario
+    /// escribe en otra aplicación sin robarle el teclado; sigue siendo presencia, no interrupción.
+    /// </summary>
+    internal void ShowWithoutStealingFocus()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == nint.Zero)
+        {
+            return;
+        }
+
+        SetWindowPos(handle, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
+    }
+
     internal void SaveOrbPlacement()
     {
         var anchorLeft = Left + (_expandsLeft ? Math.Max(0, _appliedWidgetWidth - 78) : 0);
@@ -292,4 +315,15 @@ public partial class MainWindow : Window
             System.Diagnostics.Debug.WriteLine($"Push-to-talk stop failed: {exception.GetType().Name}");
         }
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(
+        nint hWnd,
+        nint hWndInsertAfter,
+        int x,
+        int y,
+        int cx,
+        int cy,
+        uint flags);
 }
