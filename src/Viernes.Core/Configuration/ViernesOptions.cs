@@ -38,16 +38,20 @@ public sealed class ViernesOptions
     public const string MaxRequestsEnvironmentVariable = "VIERNES_OPENROUTER_MAX_REQUESTS_PER_DAY";
     public const string MaxDeepTasksEnvironmentVariable = "VIERNES_MAX_DEEP_TASKS_PER_DAY";
     public const string RateCardEnvironmentVariable = "VIERNES_OPENROUTER_RATES_JSON";
+    public const string PresetEnvironmentVariable = "VIERNES_OPENROUTER_PRESET";
+    public const string AllowedModelsEnvironmentVariable = "VIERNES_OPENROUTER_ALLOWED_MODELS";
+    public const string ExcludedModelsEnvironmentVariable = "VIERNES_OPENROUTER_EXCLUDED_MODELS";
+    public const string MaxPromptPriceEnvironmentVariable = "VIERNES_OPENROUTER_MAX_PROMPT_PRICE";
+    public const string MaxCompletionPriceEnvironmentVariable = "VIERNES_OPENROUTER_MAX_COMPLETION_PRICE";
 
-    public const string DefaultModel = "openai/gpt-5.6-luna";
-    public const string DefaultAgentModel = "openai/gpt-5.6-terra";
+    /// <summary>
+    /// El router automático es el valor por defecto: es un slug real, soporta tool calling y se
+    /// mantiene actualizado solo. Fijar un modelo concreto sigue siendo posible por variable.
+    /// </summary>
+    public const string DefaultModel = AutoRouterOptions.AutoModelSlug;
+    public const string DefaultAgentModel = AutoRouterOptions.AutoModelSlug;
     public const string DefaultPlanningModel = DefaultAgentModel;
-    public const string DefaultReasoningModel = "~anthropic/claude-sonnet-latest";
-
-    private static readonly string[] DefaultFallbackModelsValue =
-    [
-        "~google/gemini-flash-latest"
-    ];
+    public const string DefaultReasoningModel = AutoRouterOptions.AutoModelSlug;
 
     private readonly string? _apiKey;
     private readonly IReadOnlyList<string> _fallbackModels;
@@ -72,10 +76,14 @@ public sealed class ViernesOptions
         bool preferLocalSummary = true,
         int? maxRequestsPerDay = null,
         IEnumerable<RoleBudgetLimits>? roleBudgetLimits = null,
-        UsageRateCard? usageRateCard = null)
+        UsageRateCard? usageRateCard = null,
+        AutoRouterOptions? autoRouter = null,
+        string? preset = null)
     {
         _apiKey = NormalizeSecret(apiKey);
         Model = NormalizeModel(model) ?? DefaultModel;
+        Preset = NormalizePreset(preset);
+        AutoRouter = autoRouter ?? new AutoRouterOptions();
         _fallbackModels = NormalizeFallbacks(fallbackModels, Model);
         OpenRouterEndpoint = ValidateEndpoint(openRouterEndpoint ??
             new Uri("https://openrouter.ai/api/v1/chat/completions", UriKind.Absolute));
@@ -118,6 +126,23 @@ public sealed class ViernesOptions
     }
 
     public string Model { get; }
+
+    /// <summary>
+    /// Preset de OpenRouter, sin el prefijo <c>@preset/</c>. Cuando está configurado gobierna modelo,
+    /// routing y parámetros desde el servidor: cambiarlo no requiere recompilar ni reiniciar nada acá.
+    /// </summary>
+    public string? Preset { get; }
+
+    public AutoRouterOptions AutoRouter { get; }
+
+    /// <summary>Identifica la conversación ante el router para que no salte de modelo entre turnos.</summary>
+    public string SessionId { get; } = $"viernes-{Guid.NewGuid():N}"[..24];
+
+    /// <summary>Slug efectivo enviado a OpenRouter: el preset gana sobre el modelo configurado.</summary>
+    public string ResolveRequestModel(string model) =>
+        Preset is null ? model : $"@preset/{Preset}";
+
+    public bool UsesAutoRouter => Preset is null && AutoRouterOptions.IsAutoRouted(Model);
 
     public IReadOnlyList<string> FallbackModels => _fallbackModels;
 
@@ -221,7 +246,42 @@ public sealed class ViernesOptions
                 readVariable(MaxRequestsEnvironmentVariable),
                 MaxRequestsEnvironmentVariable),
             roleBudgetLimits: roleLimits,
-            usageRateCard: UsageRateCard.ParseJson(readVariable(RateCardEnvironmentVariable)));
+            usageRateCard: UsageRateCard.ParseJson(readVariable(RateCardEnvironmentVariable)),
+            autoRouter: ReadAutoRouterOptions(readVariable),
+            preset: readVariable(PresetEnvironmentVariable));
+    }
+
+    /// <summary>Variable de banda de costo por rol, por ejemplo <c>VIERNES_OPENROUTER_FAST_COST_TIER</c>.</summary>
+    public static string GetRoleCostTierEnvironmentVariable(ModelRole role) =>
+        $"VIERNES_OPENROUTER_{RoleEnvironmentToken(role)}_COST_TIER";
+
+    private static AutoRouterOptions ReadAutoRouterOptions(Func<string, string?> readVariable)
+    {
+        var tiers = new List<KeyValuePair<ModelRole, ModelCostTier>>();
+        foreach (var role in RoutableRoles)
+        {
+            var variableName = GetRoleCostTierEnvironmentVariable(role);
+            var raw = readVariable(variableName);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            if (!AutoRouterOptions.TryParseCostTier(raw, out var tier))
+            {
+                throw new InvalidOperationException(
+                    $"{variableName} debe ser low, medium, high, xhigh o max.");
+            }
+
+            tiers.Add(new KeyValuePair<ModelRole, ModelCostTier>(role, tier));
+        }
+
+        return new AutoRouterOptions(
+            SplitModels(readVariable(AllowedModelsEnvironmentVariable)),
+            SplitModels(readVariable(ExcludedModelsEnvironmentVariable)),
+            tiers,
+            ParseBudget(readVariable(MaxPromptPriceEnvironmentVariable), MaxPromptPriceEnvironmentVariable),
+            ParseBudget(readVariable(MaxCompletionPriceEnvironmentVariable), MaxCompletionPriceEnvironmentVariable));
     }
 
     public static string GetRoleDailyBudgetEnvironmentVariable(ModelRole role) =>
@@ -235,7 +295,8 @@ public sealed class ViernesOptions
 
     /// <summary>Never includes the credential, making accidental structured logging safer.</summary>
     public override string ToString() =>
-        $"ViernesOptions {{ Model = {Model}, FallbackModels = {string.Join(",", _fallbackModels)}, " +
+        $"ViernesOptions {{ Model = {Model}, Preset = {Preset ?? "unset"}, " +
+        $"UsesAutoRouter = {UsesAutoRouter}, FallbackModels = {string.Join(",", _fallbackModels)}, " +
         $"PlanningModel = {PlanningModel}, HasApiKey = {HasApiKey}, " +
         $"AgentModel = {AgentModel}, ReasoningModel = {ReasoningModel}, " +
         $"PremiumConfigured = {PremiumModel is not null}, " +
@@ -254,8 +315,32 @@ public sealed class ViernesOptions
     private static string? FirstConfigured(string? preferred, string? legacy) =>
         NormalizeModel(preferred) ?? NormalizeModel(legacy);
 
+    private static string? NormalizePreset(string? value)
+    {
+        var normalized = value?.Trim().TrimStart('@');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return null;
+        }
+
+        if (normalized.StartsWith("preset/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized["preset/".Length..];
+        }
+
+        return normalized.Length is > 0 and <= 100 && !normalized.Any(char.IsControl)
+            ? normalized
+            : throw new ArgumentException(
+                $"{PresetEnvironmentVariable} debe ser un nombre de preset corto y sin caracteres de control.",
+                nameof(value));
+    }
+
+    /// <summary>
+    /// El router automático ya resuelve alternativas del lado del servidor, así que una cadena de
+    /// fallback hardcodeada sólo agregaría slugs que pueden dejar de existir.
+    /// </summary>
     private static IReadOnlyList<string> NormalizeFallbacks(IEnumerable<string>? models, string primaryModel) =>
-        Array.AsReadOnly((models ?? DefaultFallbackModelsValue)
+        Array.AsReadOnly((models ?? [])
             .Select(NormalizeModel)
             .Where(model => model is not null && !string.Equals(model, primaryModel, StringComparison.OrdinalIgnoreCase))
             .Select(model => model!)
@@ -352,6 +437,14 @@ public sealed class ViernesOptions
 
         throw new InvalidOperationException($"{variableName} must be true or false.");
     }
+
+    private static readonly ModelRole[] RoutableRoles =
+    [
+        ModelRole.Fast,
+        ModelRole.Agent,
+        ModelRole.Reasoning,
+        ModelRole.Premium
+    ];
 
     private static IReadOnlyList<RoleBudgetLimits> ReadRoleBudgetLimits(Func<string, string?> readVariable)
     {

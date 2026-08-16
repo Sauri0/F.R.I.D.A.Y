@@ -13,10 +13,10 @@ public sealed class ViernesOptionsTests
 
         Assert.False(options.HasApiKey);
         Assert.True(options.IsLocalMode);
-        Assert.Equal("openai/gpt-5.6-luna", ViernesOptions.DefaultModel);
-        Assert.Equal("openai/gpt-5.6-terra", ViernesOptions.DefaultAgentModel);
-        Assert.Equal("openai/gpt-5.6-terra", ViernesOptions.DefaultPlanningModel);
-        Assert.Equal("~anthropic/claude-sonnet-latest", ViernesOptions.DefaultReasoningModel);
+        Assert.Equal("openrouter/auto", ViernesOptions.DefaultModel);
+        Assert.Equal("openrouter/auto", ViernesOptions.DefaultAgentModel);
+        Assert.Equal("openrouter/auto", ViernesOptions.DefaultPlanningModel);
+        Assert.Equal("openrouter/auto", ViernesOptions.DefaultReasoningModel);
         Assert.Equal(ViernesOptions.DefaultModel, options.Model);
         Assert.Equal(ViernesOptions.DefaultPlanningModel, options.PlanningModel);
         Assert.Equal(ViernesOptions.DefaultAgentModel, options.AgentModel);
@@ -26,7 +26,11 @@ public sealed class ViernesOptionsTests
         Assert.Equal(options.PlanningModel, options.ResolveModel(ModelRole.Planning));
         Assert.Equal(options.AgentModel, options.ResolveModel(ModelRole.Agent));
         Assert.Equal(options.ReasoningModel, options.ResolveModel(ModelRole.Reasoning));
-        Assert.Equal(["~google/gemini-flash-latest"], options.FallbackModels);
+        Assert.True(options.UsesAutoRouter);
+        Assert.Null(options.Preset);
+
+        // Sin cadena de fallback hardcodeada: el router resuelve alternativas del lado del servidor.
+        Assert.Empty(options.FallbackModels);
         Assert.Null(options.DailyBudgetUsd);
         Assert.Null(options.MonthlyBudgetUsd);
         Assert.False(options.HasConfiguredSpendingBudget);

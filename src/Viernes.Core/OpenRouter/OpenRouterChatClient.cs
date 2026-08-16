@@ -45,6 +45,8 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
             cancellationToken).ConfigureAwait(false);
     }
 
+    private static readonly IReadOnlyList<string> NoFallbacks = Array.Empty<string>();
+
     public async Task<ChatCompletionResult> CompleteAsync(
         IReadOnlyList<ConversationMessage> messages,
         IReadOnlyList<ToolDefinition> tools,
@@ -94,8 +96,13 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
             return ChatCompletionResult.LocalMode();
         }
 
+        // Con preset o router automático, OpenRouter ya elige alternativas del lado del servidor:
+        // encadenar slugs locales sólo agregaría candidatos que pueden haber sido deprecados.
+        var effectiveFallbacks = _options.Preset is not null || _options.UsesAutoRouter
+            ? NoFallbacks
+            : fallbackModels;
         var candidates = new[] { selection.Model! }
-            .Concat(fallbackModels)
+            .Concat(effectiveFallbacks)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var attempted = new List<string>(candidates.Length);
@@ -105,7 +112,7 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
         foreach (var model in candidates)
         {
             attempted.Add(model);
-            using var request = CreateRequest(apiKey, model, messages, tools);
+            using var request = CreateRequest(apiKey, model, selection.Role, messages, tools);
 
             HttpResponseMessage response;
             try
@@ -165,15 +172,23 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
     private HttpRequestMessage CreateRequest(
         string apiKey,
         string model,
+        ModelRole role,
         IReadOnlyList<ConversationMessage> messages,
         IReadOnlyList<ToolDefinition> tools)
     {
+        var requestModel = _options.ResolveRequestModel(model);
+        var plugins = BuildAutoRouterPlugins(requestModel, role);
         var payload = new
         {
-            model,
+            model = requestModel,
             messages = messages.Select(MapMessage).ToArray(),
             tools = tools.Count == 0 ? null : tools.Select(MapTool).ToArray(),
-            tool_choice = tools.Count == 0 ? null : "auto"
+            tool_choice = tools.Count == 0 ? null : "auto",
+            // El router prefiere el modelo ya elegido para esta conversación mientras siga entre los
+            // mejores candidatos, así un diálogo no salta de voz entre turnos.
+            session_id = plugins is null ? null : _options.SessionId,
+            plugins,
+            provider = BuildProviderPreferences()
         };
 
         var request = new HttpRequestMessage(HttpMethod.Post, _options.OpenRouterEndpoint)
@@ -183,6 +198,49 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         request.Headers.TryAddWithoutValidation("X-Title", _options.ApplicationName);
         return request;
+    }
+
+    /// <summary>
+    /// Configura el Auto Router sólo cuando el slug lo delega. Un preset ya lleva su propio routing
+    /// del lado del servidor, así que no se pisa desde acá.
+    /// </summary>
+    private object[]? BuildAutoRouterPlugins(string requestModel, ModelRole role)
+    {
+        if (!AutoRouterOptions.IsAutoRouted(requestModel))
+        {
+            return null;
+        }
+
+        var router = _options.AutoRouter;
+        return
+        [
+            new
+            {
+                id = AutoRouterOptions.ResolvePluginId(requestModel),
+                cost_tier = AutoRouterOptions.ToWireValue(router.ResolveCostTier(role)),
+                allowed_models = router.AllowedModels.Count == 0 ? null : router.AllowedModels.ToArray(),
+                excluded_models = router.ExcludedModels.Count == 0 ? null : router.ExcludedModels.ToArray()
+            }
+        ];
+    }
+
+    /// <summary>Techo de precio por millón de tokens; los endpoints por encima quedan descartados.</summary>
+    private object? BuildProviderPreferences()
+    {
+        var router = _options.AutoRouter;
+        if (!router.HasPriceCeiling)
+        {
+            return null;
+        }
+
+        return new
+        {
+            max_price = new
+            {
+                prompt = router.MaxPromptPriceUsdPerMillion,
+                completion = router.MaxCompletionPriceUsdPerMillion
+            }
+        };
     }
 
     private static object MapMessage(ConversationMessage message) => message.Role switch

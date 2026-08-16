@@ -20,12 +20,17 @@ public sealed class ModelPortfolioTests
         var embeddings = options.SelectModel(new ModelSelectionRequest(ModelRole.Embeddings));
         var summary = options.SelectModel(new ModelSelectionRequest(ModelRole.LocalSummary));
 
-        Assert.Equal((ModelSelectionStatus.Ready, "openai/gpt-5.6-luna"),
+        // Los tres lanes conversacionales delegan la elección en el router; lo que los distingue es
+        // la banda de costo, no un slug fijo que puede quedar deprecado.
+        Assert.Equal((ModelSelectionStatus.Ready, AutoRouterOptions.AutoModelSlug),
             (fast.Status, fast.Model));
-        Assert.Equal((ModelSelectionStatus.Ready, "openai/gpt-5.6-terra"),
+        Assert.Equal((ModelSelectionStatus.Ready, AutoRouterOptions.AutoModelSlug),
             (agent.Status, agent.Model));
-        Assert.Equal((ModelSelectionStatus.Ready, "~anthropic/claude-sonnet-latest"),
+        Assert.Equal((ModelSelectionStatus.Ready, AutoRouterOptions.AutoModelSlug),
             (reasoning.Status, reasoning.Model));
+        Assert.Equal(ModelCostTier.Low, options.AutoRouter.ResolveCostTier(ModelRole.Fast));
+        Assert.Equal(ModelCostTier.Medium, options.AutoRouter.ResolveCostTier(ModelRole.Agent));
+        Assert.Equal(ModelCostTier.High, options.AutoRouter.ResolveCostTier(ModelRole.Reasoning));
         Assert.Equal(ModelSelectionStatus.Unavailable, premium.Status);
         Assert.Null(premium.Model);
         Assert.Equal(ModelSelectionStatus.LocalPreferred, embeddings.Status);
