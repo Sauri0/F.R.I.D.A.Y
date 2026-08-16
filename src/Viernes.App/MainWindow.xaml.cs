@@ -26,7 +26,6 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel;
     private readonly WindowPlacementStore _placementStore;
     private bool _pushToTalkActive;
-    private DateTimeOffset _pushToTalkStartedAt;
     private CancellationTokenSource? _pushToTalkCancellation;
     private double _appliedWidgetWidth = 90;
     private double _appliedWidgetHeight = 90;
@@ -287,44 +286,19 @@ public partial class MainWindow : Window
         _pushToTalkCancellation?.Cancel();
         _pushToTalkCancellation?.Dispose();
         _pushToTalkCancellation = null;
-        OrbButton.ReleaseMouseCapture();
         _ = _viewModel.CancelVoiceAsync(CancellationToken.None);
     }
 
-    private void OrbButton_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        _pushToTalkStartedAt = DateTimeOffset.UtcNow;
-        OrbButton.CaptureMouse();
-        _ = BeginPushToTalkAsync();
-    }
-
+    /// <summary>
+    /// Tocar el orbe abre la entrada de texto y nada más. Antes mantenerlo presionado abría el
+    /// micrófono, lo que convertía un gesto de uso corriente en una toma de audio no buscada.
+    /// Para hablar está el nombre; el micrófono se abre sólo cuando se lo llama.
+    /// </summary>
     private void OrbButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_pushToTalkActive)
-        {
-            return;
-        }
-
         _viewModel.OpenTextInput();
         PromptTextBox.Focus();
         Keyboard.Focus(PromptTextBox);
-    }
-
-    private async void OrbButton_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        OrbButton.ReleaseMouseCapture();
-        if (DateTimeOffset.UtcNow - _pushToTalkStartedAt < TimeSpan.FromMilliseconds(330))
-        {
-            CancelActiveVoice();
-            _viewModel.OpenTextInput();
-            PromptTextBox.Focus();
-            Keyboard.Focus(PromptTextBox);
-            return;
-        }
-
-        await EndPushToTalkAsync();
     }
 
     private async void Window_PreviewKeyDown(object sender, KeyEventArgs e)

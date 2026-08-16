@@ -40,7 +40,7 @@
               VerticalAlignment="Center"
               Background="Transparent"
               MouseLeftButtonDown="DragSurface_MouseLeftButtonDown"
-              ToolTip="Toque: escribir · mantener: hablar · arrastrar desde el aura: mover">
+              ToolTip="Tocar: escribir · arrastrar desde el aura: mover · decí «Viernes» para hablar">
             <!--
                 La gota. Sin anillos: el fluido mismo dice en qué estado está. Se inserta desde
                 código para evitar la compilación en dos pasadas que WPF dispara cuando el XAML
@@ -84,9 +84,7 @@
                     Cursor="Hand"
                     Focusable="True"
                     Click="OrbButton_Click"
-                    PreviewMouseLeftButtonDown="OrbButton_PreviewMouseLeftButtonDown"
-                    PreviewMouseLeftButtonUp="OrbButton_PreviewMouseLeftButtonUp"
-                    AutomationProperties.Name="Viernes: toque para escribir o mantenga para hablar">
+                    AutomationProperties.Name="Viernes: tocar para escribir">
                 <!--
                     El botón ya no dibuja: es sólo la superficie de contacto sobre la gota. Al
                     presionar hunde el fluido, que es lo que hace un líquido cuando lo tocás.
