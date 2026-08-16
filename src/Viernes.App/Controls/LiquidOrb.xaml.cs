@@ -50,7 +50,6 @@ internal partial class LiquidOrb : UserControl
     private Storyboard? _liquid;
     private Storyboard? _sheen;
     private Storyboard? _tension;
-    private Storyboard? _micRim;
 
     public LiquidOrb()
     {
@@ -71,42 +70,20 @@ internal partial class LiquidOrb : UserControl
         set => SetValue(StateProperty, value);
     }
 
+    /// <summary>
+    /// El micrófono abierto no dibuja nada aparte: el estado <c>Listening</c> ya tiñe la gota
+    /// entera de verde, que es la señal integrada en el cuerpo y no un adorno encima.
+    /// </summary>
     public static readonly DependencyProperty IsMicrophoneActiveProperty = DependencyProperty.Register(
         nameof(IsMicrophoneActive),
         typeof(bool),
         typeof(LiquidOrb),
-        new PropertyMetadata(false, OnMicrophoneActiveChanged));
+        new PropertyMetadata(false));
 
-    /// <summary>
-    /// Único indicador de que el micrófono está tomando audio, ahora que no hay ícono suelto.
-    /// </summary>
     internal bool IsMicrophoneActive
     {
         get => (bool)GetValue(IsMicrophoneActiveProperty);
         set => SetValue(IsMicrophoneActiveProperty, value);
-    }
-
-    private static void OnMicrophoneActiveChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
-        ((LiquidOrb)d).ApplyMicrophoneState((bool)e.NewValue);
-
-    private void ApplyMicrophoneState(bool isActive)
-    {
-        if (_micRim is null)
-        {
-            return;
-        }
-
-        if (isActive)
-        {
-            MicRim.BeginAnimation(OpacityProperty, null);
-            _micRim.Begin(this, isControllable: true);
-            return;
-        }
-
-        StopControllable(_micRim);
-        MicRim.BeginAnimation(
-            OpacityProperty,
-            new DoubleAnimation(0, new Duration(TimeSpan.FromMilliseconds(260))));
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -119,22 +96,10 @@ internal partial class LiquidOrb : UserControl
         _liquid = BuildLiquidStoryboard();
         _sheen = BuildSheenStoryboard();
         _tension = BuildTensionStoryboard();
-        _micRim = BuildMicRimStoryboard();
 
         _liquid.Begin(this, isControllable: true);
         _sheen.Begin(this, isControllable: true);
         ApplyState(State);
-        ApplyMicrophoneState(IsMicrophoneActive);
-    }
-
-    /// <summary>Late despacio: un aro fijo se lee como adorno, uno que respira se lee como aviso.</summary>
-    private static Storyboard BuildMicRimStoryboard()
-    {
-        var storyboard = new Storyboard { RepeatBehavior = RepeatBehavior.Forever };
-        storyboard.Children.Add(Timeline("MicRim", OpacityProperty, 0.42, 0.95, 1.6));
-        storyboard.Children.Add(Scale("MicRimScale", ScaleTransform.ScaleXProperty, 0.985, 1.03, 1.6));
-        storyboard.Children.Add(Scale("MicRimScale", ScaleTransform.ScaleYProperty, 0.985, 1.03, 1.6));
-        return storyboard;
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -142,8 +107,7 @@ internal partial class LiquidOrb : UserControl
         StopControllable(_liquid);
         StopControllable(_sheen);
         StopControllable(_tension);
-        StopControllable(_micRim);
-        _liquid = _sheen = _tension = _micRim = null;
+        _liquid = _sheen = _tension = null;
     }
 
     private void StopControllable(Storyboard? storyboard)

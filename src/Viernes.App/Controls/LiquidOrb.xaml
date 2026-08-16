@@ -149,28 +149,6 @@
             </Ellipse.Fill>
         </Ellipse>
 
-        <!--
-            Señal de micrófono abierto. Reemplaza al ícono suelto: un aro verde vivo pegado al
-            contorno de la gota. Sigue siendo el único indicador de que el micrófono está tomando
-            audio, así que late para que no se confunda con decoración.
-        -->
-        <Ellipse x:Name="MicRim"
-                 Width="61"
-                 Height="61"
-                 HorizontalAlignment="Center"
-                 VerticalAlignment="Center"
-                 Stroke="#FF72F0C0"
-                 StrokeThickness="1.6"
-                 Opacity="0"
-                 IsHitTestVisible="False"
-                 RenderTransformOrigin="0.5,0.5">
-            <Ellipse.RenderTransform>
-                <ScaleTransform x:Name="MicRimScale" ScaleX="1" ScaleY="1" />
-            </Ellipse.RenderTransform>
-            <Ellipse.Effect>
-                <DropShadowEffect Color="#FF72F0C0" BlurRadius="9" ShadowDepth="0" Opacity="0.85" />
-            </Ellipse.Effect>
-        </Ellipse>
     </Grid>
     </Viewbox>
 </UserControl>
