@@ -347,9 +347,22 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         timeout.CancelAfter(effectiveOptions.MaximumDuration + _options.CaptureStopTimeout);
         try
         {
-            var completed = await Task.WhenAny(session.AutoStop.Task, session.Result.Task)
+            // Si el dispositivo no entrega audio, el VAD nunca ve nada y ningún timeout basado en
+            // audio dispara: quedaría «Escuchando» hasta agotar la duración máxima, en silencio y
+            // sin explicación. Esto lo convierte en un error claro en un segundo y medio.
+            var silentDevice = WatchForSilentDeviceAsync(session, timeout.Token);
+            var completed = await Task.WhenAny(session.AutoStop.Task, session.Result.Task, silentDevice)
                 .WaitAsync(timeout.Token)
                 .ConfigureAwait(false);
+
+            if (ReferenceEquals(completed, silentDevice))
+            {
+                await CancelPushToTalkAsync(CancellationToken.None).ConfigureAwait(false);
+                return SpeechRecognitionResult.Failure(
+                    SpeechErrorCode.DeviceError,
+                    "El micrófono no entregó audio: puede haber quedado tomado por otra aplicación.");
+            }
+
             if (ReferenceEquals(completed, session.Result.Task))
             {
                 return await session.Result.Task.ConfigureAwait(false);
@@ -871,6 +884,12 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         private int _disposed;
         private SingleUtteranceRecognitionOptions? _singleUtteranceOptions;
         private long _singleUtteranceBytes;
+
+        /// <summary>
+        /// Bytes recibidos desde que arrancó la captura. Si esto queda en cero, el dispositivo no
+        /// está entregando audio: el VAD nunca ve nada y ningún timeout basado en audio dispara.
+        /// </summary>
+        public long SingleUtteranceBytes => Interlocked.Read(ref _singleUtteranceBytes);
         private bool _voiceDetected;
         private TimeSpan _trailingSilence;
 
@@ -1047,6 +1066,26 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             {
                 AutoStop.TrySetResult(SingleUtteranceStopReason.MaximumDuration);
             }
+        }
+    }
+
+    /// <summary>
+    /// Completa sólo si pasado el plazo no llegó ni un byte. Si llegó audio, nunca completa y deja
+    /// que decidan el VAD o los timeouts normales.
+    /// </summary>
+    private static async Task WatchForSilentDeviceAsync(CaptureSession session, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), cancellationToken).ConfigureAwait(false);
+            if (session.SingleUtteranceBytes > 0)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, CancellationToken.None).ConfigureAwait(false);
         }
     }
 

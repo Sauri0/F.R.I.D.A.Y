@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using System.Text;
 using Viernes.Core.Configuration;
@@ -15,6 +16,60 @@ namespace Viernes.App.Diagnostics;
 /// <remarks>Se invoca con <c>Viernes.exe --check-voice</c> y termina el proceso al finalizar.</remarks>
 internal static class VoiceDiagnostics
 {
+    /// <summary>
+    /// Captura una frase de verdad y reporta tiempos. El wake puede disparar bien y aun así no
+    /// entender nada: si el modelo tarda en cargar o el VAD corta mal, el síntoma es idéntico.
+    /// </summary>
+    public static async Task<string> ListenAsync()
+    {
+        var report = new StringBuilder();
+        var modelPath = WhisperSpeechRecognitionOptions.GetDefaultModelPath();
+        report.AppendLine("== CAPTURA DE UNA FRASE ==");
+        report.AppendLine($"Modelo   : {Path.GetFileName(modelPath)}");
+        report.AppendLine($"Existe   : {File.Exists(modelPath)}");
+        if (File.Exists(modelPath))
+        {
+            report.AppendLine($"Tamaño   : {new FileInfo(modelPath).Length / 1024 / 1024} MB");
+        }
+
+        var selection = new SpeechRecognitionProviderSelector().Select(new SpeechRecognitionSelectionOptions
+        {
+            PreferWhisperLocal = true,
+            Whisper = new WhisperSpeechRecognitionOptions { ModelPath = modelPath, Language = "es" },
+            Sapi = new SpeechServiceOptions { RecognitionCulture = "es-AR", SynthesisCulture = "es-AR" }
+        });
+
+        await using var provider = selection.Provider;
+        report.AppendLine($"Proveedor: {provider.Info.DisplayName}");
+
+        var errors = new List<string>();
+        provider.ServiceError += (_, e) => errors.Add($"{e.ErrorCode}: {e.Message}");
+        provider.TranscriptionUpdated += (_, e) => report.AppendLine($"  parcial: «{e.Text}» (final={e.IsFinal})");
+
+        report.AppendLine();
+        report.AppendLine(">>> HABLÁ AHORA. Tenés 8 segundos para empezar. <<<");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var result = await provider.RecognizeSingleUtteranceAsync(new SingleUtteranceRecognitionOptions());
+        clock.Stop();
+
+        report.AppendLine();
+        report.AppendLine($"Resultado    : {(result.Succeeded ? "OK" : "FALLÓ")}");
+        report.AppendLine($"Texto        : «{result.Text}»");
+        report.AppendLine($"Tiempo total : {clock.ElapsedMilliseconds} ms");
+        if (!result.Succeeded)
+        {
+            report.AppendLine($"Código       : {result.ErrorCode}");
+        }
+
+        foreach (var error in errors)
+        {
+            report.AppendLine($"  error: {error}");
+        }
+
+        return report.ToString();
+    }
+
     public static async Task<string> RunAsync()
     {
         var report = new StringBuilder();

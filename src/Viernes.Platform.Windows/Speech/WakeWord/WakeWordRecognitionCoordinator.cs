@@ -42,6 +42,10 @@ public sealed class WakeWordRecognitionCoordinator
         {
             try
             {
+                // SAPI informa que soltó el micrófono antes de que el driver termine de liberarlo.
+                // Sin esta pausa, la captura abre el dispositivo y no recibe una sola muestra.
+                await Task.Delay(TimeSpan.FromMilliseconds(220), cancellationToken).ConfigureAwait(false);
+
                 recognition = await recognitionProvider
                     .RecognizeSingleUtteranceAsync(options, cancellationToken)
                     .ConfigureAwait(false);

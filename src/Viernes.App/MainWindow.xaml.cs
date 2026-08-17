@@ -118,7 +118,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var workArea = SystemParameters.WorkArea;
+        var workArea = CurrentWorkArea;
         var previousWidth = _appliedWidgetWidth;
         var isBecomingExpanded = previousWidth <= 120 && targetWidth > 120;
         var isBecomingMinimal = previousWidth > 120 && targetWidth <= 120;
@@ -156,7 +156,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var workArea = SystemParameters.WorkArea;
+        var workArea = CurrentWorkArea;
         Top -= (targetHeight - _appliedWidgetHeight) / 2;
         _appliedWidgetHeight = targetHeight;
         Height = targetHeight;
@@ -235,16 +235,52 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// La gota se desprende de la bandeja, se estira en el trayecto y rebota al aterrizar. El
-    /// estiramiento es lo que la hace leer como líquido y no como una ventana que aparece.
+    /// Área de trabajo del monitor donde está el orbe, no la del principal.
+    /// <see cref="SystemParameters.WorkArea"/> siempre devuelve la del primario, y usarla para
+    /// acotar la posición es lo que arrastraba el orbe de vuelta a la pantalla 1.
+    /// </summary>
+    private Rect CurrentWorkArea
+    {
+        get
+        {
+            try
+            {
+                var handle = new WindowInteropHelper(this).Handle;
+                var screen = handle == nint.Zero
+                    ? System.Windows.Forms.Screen.PrimaryScreen
+                    : System.Windows.Forms.Screen.FromHandle(handle);
+                if (screen is null)
+                {
+                    return SystemParameters.WorkArea;
+                }
+
+                // WinForms informa píxeles físicos; WPF trabaja en unidades independientes del DPI.
+                var dpi = VisualTreeHelper.GetDpi(this);
+                var area = screen.WorkingArea;
+                return new Rect(
+                    area.Left / dpi.DpiScaleX,
+                    area.Top / dpi.DpiScaleY,
+                    area.Width / dpi.DpiScaleX,
+                    area.Height / dpi.DpiScaleY);
+            }
+            catch (Exception)
+            {
+                return SystemParameters.WorkArea;
+            }
+        }
+    }
+
+    /// <summary>
+    /// La gota se desprende del borde inferior derecho del monitor donde ya vive —no del monitor
+    /// principal— y aterriza en su lugar. Llamarlo no lo muda de pantalla: si lo dejaste en la
+    /// segunda, ahí se queda.
     /// </summary>
     internal void PlayArrivalFromTray()
     {
-        var workArea = SystemParameters.WorkArea;
+        var workArea = CurrentWorkArea;
         var targetLeft = Left;
         var targetTop = Top;
 
-        // El área de notificación vive en la esquina inferior derecha del área de trabajo.
         var startLeft = Math.Clamp(workArea.Right - 52, workArea.Left, workArea.Right - 8);
         var startTop = Math.Clamp(workArea.Bottom - 34, workArea.Top, workArea.Bottom - 8);
         if (Math.Abs(startLeft - targetLeft) < 2 && Math.Abs(startTop - targetTop) < 2)
