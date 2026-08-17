@@ -12,6 +12,7 @@ using Viernes.Core.Models;
 using Viernes.Core.Persistence;
 using Viernes.Core.Scheduling;
 using Viernes.Core.Tools;
+using Viernes.Core.Tools.BuiltIn;
 using Viernes.Core.Usage;
 using Viernes.Core.Voice;
 using Viernes.Memory.Models;
@@ -104,7 +105,6 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private readonly WakeWordRecognitionCoordinator _wakeCoordinator = new();
     private readonly SemaphoreSlim _voiceTransitionGate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
-    private Acknowledgements _acknowledgements = null!;
     private readonly object _confirmationGate = new();
 
     private readonly WindowsPcActionExecutor _pcActions;
@@ -154,7 +154,6 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _httpClient,
             _options,
             SpeechSynthesisOptions.FromEnvironment());
-        _acknowledgements = new Acknowledgements(_neuralVoice);
         _speechSynthesizer = new SpeechService(new SpeechServiceOptions
         {
             RecognitionCulture = "es-AR",
@@ -176,7 +175,39 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             actionMemory: null,
             extraTools,
             _environment,
-            personalContext: DescribePersonalMemoryAsync);
+            personalContext: DescribePersonalMemoryAsync,
+            rest: RestAsync);
+
+    /// <summary>
+    /// Aparta el micrófono cuando el modelo entendió que se lo están pidiendo.
+    /// </summary>
+    /// <remarks>
+    /// Es la contraparte de <see cref="RestTool"/>: el núcleo entiende la intención y esta capa la
+    /// ejecuta, porque el micrófono y la palabra de activación viven acá. Antes lo único que podía
+    /// apartarla era una lista de frases comparada contra la transcripción, así que cualquier forma
+    /// de pedirlo que no estuviera escrita en el código se ignoraba.
+    /// </remarks>
+    private async Task RestAsync(RestDepth depth, CancellationToken cancellationToken)
+    {
+        CancelSpeechSafely();
+        _neuralPlayer.Stop();
+        await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+
+        if (depth == RestDepth.Callar)
+        {
+            return;
+        }
+
+        await EndConversationAsync("Se lo pidió el usuario", CancellationToken.None)
+            .ConfigureAwait(false);
+
+        if (depth == RestDepth.Apagar)
+        {
+            // Soltar el micrófono del todo. Se reactiva a mano desde la bandeja, que es la única
+            // forma de que «desactivate» signifique lo que dice.
+            IsMuted = true;
+        }
+    }
 
     /// <summary>
     /// Arma la línea de contexto con lo que se sabe del usuario.
@@ -377,9 +408,6 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             }
         }
 
-        // Se graban al arrancar, cuando nadie está esperando. Pedirlos en el primer turno sería
-        // pagar la espera que vinieron a evitar, justo la primera vez.
-        _acknowledgements.Warm();
 
         // Proactividad: mira el escritorio de fondo y sólo habla si algo lo amerita de verdad.
         _signals = new DesktopSignals(
@@ -933,60 +961,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
-    /// <summary>
-    /// Manda el turno y, si tarda, mete un acuse corto para que no haya silencio.
-    /// </summary>
-    /// <remarks>
-    /// El acuse se decide por carrera, no por regla: si la respuesta llega antes del umbral no suena
-    /// nada. Un «mhm» delante de una respuesta instantánea sobra y molesta; delante de una que tarda
-    /// cuatro segundos es la diferencia entre una charla y un formulario.
-    /// <para>
-    /// El umbral es de medio segundo porque por debajo de eso el silencio todavía se lee como el
-    /// tiempo natural de tomar aire, y no como que el aparato se colgó.
-    /// </para>
-    /// </remarks>
-    private async Task SendWithAcknowledgementAsync(string transcript, CancellationToken cancellationToken)
-    {
-        var sending = SendAsync(transcript, spoken: true, cancellationToken);
-        var finishedFirst = await Task.WhenAny(
-            sending,
-            Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken)).ConfigureAwait(false);
-
-        if (finishedFirst != sending && !IsMuted)
-        {
-            RuntimeTrace.Write("acuse", "la respuesta tardó más de 500 ms");
-            await PlayAcknowledgementAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await sending.ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Suena desde memoria y pasa por la misma cola que el resto de la voz: si el acuse y la
-    /// respuesta se solaparan, el remedio sería peor que la espera que vinieron a tapar.
-    /// </summary>
-    private async Task PlayAcknowledgementAsync(CancellationToken cancellationToken)
-    {
-        var audio = _acknowledgements.Next();
-        if (audio is null)
-        {
-            return;
-        }
-
-        await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await _neuralPlayer.PlayAsync(audio.Pcm, audio.SampleRate, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            // Un acuse que no suena no puede romper el turno que vino a acompañar.
-        }
-        finally
-        {
-            _speechGate.Release();
-        }
-    }
+    // Acá vivían los acuses: unos «mhm», «dale», «a ver» grabados al arrancar que sonaban cuando la
+    // respuesta tardaba más de medio segundo. La idea era tapar el silencio; el efecto era el
+    // contrario. Una persona que piensa hace un silencio distinto cada vez, y esto hacía siempre el
+    // mismo de una lista de cuatro. A la tercera vez ya no se oye una duda: se oye un aparato
+    // reproduciendo un archivo, y eso vuelve mecánico todo lo que viene después.
+    //
+    // El silencio no era el problema: el problema es lo que dura, y eso se arregla haciendo que
+    // conteste antes —streaming y voz por oración—, no poniéndole una alfombra encima.
 
     /// <summary>
     /// Espera a que no quede voz sonando ni encolada. Es una espera, no una reserva: sólo toma la
@@ -1640,7 +1622,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 _conversationTurns.Add(transcript);
 
-                await SendWithAcknowledgementAsync(transcript, cancellationToken).ConfigureAwait(false);
+                await SendAsync(transcript, spoken: true, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)

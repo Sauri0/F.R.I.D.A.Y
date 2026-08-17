@@ -29,7 +29,8 @@ public static class ViernesCoreFactory
         GoalBook? goals = null,
         Func<CancellationToken, Task<string?>>? personalContext = null,
         MissionBook? missions = null,
-        AutonomyPolicy? autonomy = null)
+        AutonomyPolicy? autonomy = null,
+        Func<RestDepth, CancellationToken, Task>? rest = null)
     {
         rules ??= new RuleBook();
         goals ??= new GoalBook();

@@ -677,6 +677,29 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         }
     }
 
+    /// <summary>
+    /// Vocabulario con el que se ceba el decodificador antes de transcribir.
+    /// </summary>
+    /// <remarks>
+    /// Whisper elige entre palabras que suenan parecido usando lo que viene antes como contexto. Sin
+    /// nada antes elige por frecuencia general del castellano, y ahí «carpeta» pierde contra
+    /// «garpeza». Está medido en el registro real de este equipo: «¿podés hacerme una carpeta en el
+    /// escritorio…?» llegó como <em>«Podéis hacer una carpeta en el escritorio y desearme pan
+    /// triste»</em>, y «no veo ninguna carpeta» como <em>«no veo ninguna garpeza»</em>. El modelo
+    /// recibía una orden que no quería decir nada, y no hacía nada — y desde afuera se veía como si
+    /// no supiera crear carpetas.
+    /// <para>
+    /// Es una frase y no una lista de palabras sueltas, porque el prompt entra como texto previo:
+    /// tiene que parecerse a lo que se va a decir. Y va en rioplatense por la misma razón —cebar con
+    /// «puedes» hace que escuche «puedes» donde dijiste «podés»—.
+    /// </para>
+    /// </remarks>
+    private const string VocabularyPrompt =
+        "Che, creame una carpeta en el escritorio y abrila. Abrí Spotify y poné una canción. " +
+        "Buscá el archivo en documentos, descargas o imágenes. Movelo, copialo, borralo, " +
+        "recuperalo. Cerrá esa aplicación, subí el volumen, pausá. Acordate de esto, recordame " +
+        "mañana. Mirá la pantalla. Callate, desactivate, dejá de escuchar, descansá. Dale, listo.";
+
     private async Task<SpeechRecognitionResult> TranscribeWaveCoreAsync(
         Stream waveStream,
         CancellationToken cancellationToken)
@@ -688,6 +711,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
         using var processor = GetFactory().CreateBuilder()
             .WithLanguage(_options.Language)
+            .WithPrompt(VocabularyPrompt)
             .WithProbabilities()
             .Build();
         var text = new StringBuilder();

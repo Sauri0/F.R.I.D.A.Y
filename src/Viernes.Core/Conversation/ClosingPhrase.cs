@@ -61,7 +61,13 @@ public static class ClosingPhrase
     private static readonly string[] Ambiguous =
     [
         "silencio", "pare", "basta", "suficiente", "terminamos", "termina",
-        "corta", "cortala", "apagate", "andate", "olvidate", "descansa", "dormi", "dormite"
+        "corta", "cortala", "apagate", "andate", "olvidate", "descansa", "dormi", "dormite",
+
+        // «desactivate» faltaba y el usuario lo usa. Se agrega, pero agregar palabras de a una no
+        // es la solución: la lista siempre va a ir atrás del idioma. Lo que cubre el resto es la
+        // herramienta descansar, donde el modelo entiende la intención en vez de reconocer la
+        // palabra. Esto queda sólo para que lo literal corte al instante, sin ida y vuelta.
+        "desactivate", "desactivarte", "apagarte", "apaga", "desconectate"
     ];
 
     /// <summary>Cuántas palabras puede tener una frase para que lo ambiguo cuente como despedida.</summary>
