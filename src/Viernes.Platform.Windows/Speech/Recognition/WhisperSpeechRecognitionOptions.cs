@@ -31,8 +31,33 @@ public sealed record WhisperSpeechRecognitionOptions
         return Path.Combine(localApplicationData, "Viernes", "Models", "Whisper");
     }
 
-    public static string GetDefaultModelPath() =>
-        Path.Combine(GetDefaultModelDirectory(), "ggml-base.bin");
+    /// <summary>
+    /// Elige el mejor modelo instalado, de más preciso a menos. Turbo es ~5x más rápido que
+    /// large-v3 conservando casi toda la precisión; base queda como piso porque siempre estuvo.
+    /// </summary>
+    public static string GetDefaultModelPath()
+    {
+        var directory = GetDefaultModelDirectory();
+        string[] preference =
+        [
+            "ggml-large-v3-turbo.bin",
+            "ggml-large-v3-turbo-q8_0.bin",
+            "ggml-large-v3-turbo-q5_0.bin",
+            "ggml-small.bin",
+            "ggml-base.bin"
+        ];
+
+        foreach (var candidate in preference)
+        {
+            var path = Path.Combine(directory, candidate);
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+
+        return Path.Combine(directory, "ggml-base.bin");
+    }
 
     internal void Validate()
     {

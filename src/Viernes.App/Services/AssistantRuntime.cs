@@ -180,7 +180,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             Phrases = ResolveWakePhrases(_settings.WakeWordPhrases),
             RecognitionCulture = _settings.RecognitionCulture,
-            MinimumConfidence = 0.78f
+            MinimumConfidence = ResolveWakeConfidence()
         });
         SubscribeWakeWord(_wakeWord);
 
@@ -728,9 +728,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 pending = index + 1 < chunks.Count
                     ? _neuralVoice.SynthesizeAsync(chunks[index + 1], cancellationToken)
-                    : Task.FromResult<byte[]?>(null);
+                    : Task.FromResult<SynthesizedSpeech?>(null);
 
-                if (!await _neuralPlayer.PlayAsync(audio, cancellationToken).ConfigureAwait(false))
+                if (!await _neuralPlayer
+                        .PlayAsync(audio.Pcm, audio.SampleRate, cancellationToken)
+                        .ConfigureAwait(false))
                 {
                     return index > 0;
                 }
@@ -1160,6 +1162,25 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         return configuredMode == VoiceActivationMode.LocalWakeWord;
+    }
+
+    /// <summary>
+    /// Windows no tiene reconocedor rioplatense: el wake corre sobre el de español de España, y con
+    /// ese acento la confianza que devuelve SAPI queda sistemáticamente por debajo de 0,78. Bajarlo
+    /// es lo que hace que reconozca; subirlo, lo que corta falsos positivos. Se ajusta sin recompilar
+    /// porque el punto justo depende del micrófono y de la voz.
+    /// </summary>
+    private static float ResolveWakeConfidence()
+    {
+        const float fallback = 0.55f;
+        var configured = Environment.GetEnvironmentVariable("VIERNES_WAKE_CONFIDENCE");
+        return float.TryParse(
+            configured,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsed) && parsed is > 0 and <= 1
+            ? parsed
+            : fallback;
     }
 
     private static bool ResolveListenWhileHidden(bool configuredValue) =>

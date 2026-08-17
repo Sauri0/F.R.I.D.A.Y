@@ -15,11 +15,19 @@ public sealed class SpeechSynthesisOptions
     public const string VoiceEnvironmentVariable = "VIERNES_TTS_VOICE";
     public const string InstructionsEnvironmentVariable = "VIERNES_TTS_INSTRUCTIONS";
 
-    public const string DefaultModel = "openai/gpt-4o-mini-tts";
-    public const string DefaultVoice = "alloy";
+    /// <summary>
+    /// Medido contra el endpoint real: ~1,0 s de ida y vuelta, contra 3,2 s de Gemini TTS y 9,7 s
+    /// de Kokoro. Y tiene voz rioplatense de verdad, no español neutro.
+    /// </summary>
+    public const string DefaultModel = "microsoft/mai-voice-2-flash";
+    public const string DefaultVoice = "es-AR-ElenaNeural";
 
-    /// <summary>Formato y frecuencia que devuelve el endpoint cuando se pide PCM crudo.</summary>
-    public const int PcmSampleRate = 24_000;
+    /// <summary>
+    /// Frecuencia de reserva. La real la informa el proveedor en el <c>Content-Type</c> y hay que
+    /// usar ésa: no todos devuelven lo mismo —fish-audio manda 44,1 kHz y este 24 kHz—, y reproducir
+    /// PCM a la frecuencia equivocada suena a otra voz o directamente a nada.
+    /// </summary>
+    public const int FallbackSampleRate = 24_000;
     public const int PcmBitsPerSample = 16;
     public const int PcmChannels = 1;
 

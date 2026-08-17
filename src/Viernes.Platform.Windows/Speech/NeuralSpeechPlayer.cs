@@ -8,18 +8,17 @@ namespace Viernes.Platform.Windows.Speech;
 /// </summary>
 public sealed class NeuralSpeechPlayer : IAsyncDisposable
 {
-    // Formato que devuelve el endpoint de voz al pedir PCM crudo: 24 kHz, 16 bits, mono.
-    // Se repite acá en vez de referenciar Core para no invertir la separación entre capas.
-    private static readonly WaveFormat PlaybackFormat = new(24_000, 16, 1);
-
     private readonly SemaphoreSlim _gate = new(1, 1);
     private WaveOutEvent? _output;
     private bool _isDisposed;
 
     public bool IsSpeaking { get; private set; }
 
-    /// <summary>Reproduce hasta el final o hasta que se cancele. Devuelve false si no pudo sonar.</summary>
-    public async Task<bool> PlayAsync(byte[] pcm, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Reproduce hasta el final o hasta que se cancele. Devuelve false si no pudo sonar.
+    /// La frecuencia viene del proveedor: suponerla hace que la voz suene a otra persona.
+    /// </summary>
+    public async Task<bool> PlayAsync(byte[] pcm, int sampleRate, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (pcm.Length == 0)
@@ -27,12 +26,14 @@ public sealed class NeuralSpeechPlayer : IAsyncDisposable
             return false;
         }
 
+        var format = new WaveFormat(sampleRate, 16, 1);
+
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             StopInternal();
 
-            using var stream = new RawSourceWaveStream(new MemoryStream(pcm, writable: false), PlaybackFormat);
+            using var stream = new RawSourceWaveStream(new MemoryStream(pcm, writable: false), format);
             var output = new WaveOutEvent();
             _output = output;
             output.Init(stream);

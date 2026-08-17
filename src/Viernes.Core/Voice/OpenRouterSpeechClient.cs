@@ -7,6 +7,9 @@ using Viernes.Core.OpenRouter;
 
 namespace Viernes.Core.Voice;
 
+/// <summary>Audio PCM de 16 bits mono junto con la frecuencia que informó el proveedor.</summary>
+public sealed record SynthesizedSpeech(byte[] Pcm, int SampleRate);
+
 /// <summary>
 /// Voz neural a través de <c>/api/v1/audio/speech</c> de OpenRouter. Sustituye al sintetizador de
 /// Windows, que es síntesis concatenativa y suena como tal.
@@ -43,11 +46,14 @@ public sealed class OpenRouterSpeechClient
 
     public bool IsAvailable => _speech.IsEnabled && _options.HasApiKey;
 
+    /// <summary>Último motivo por el que la voz remota no pudo hablar. Para diagnóstico, sin secretos.</summary>
+    public string? LastFailure { get; private set; }
+
     /// <summary>
-    /// Devuelve PCM 16 bits mono a 24 kHz, o <c>null</c> cuando la voz remota no está disponible.
-    /// Nunca lanza por un fallo de red: el host cae al sintetizador local y sigue hablando.
+    /// Devuelve PCM de 16 bits mono con la frecuencia que informó el proveedor, o <c>null</c> si no
+    /// se pudo. Nunca lanza por un fallo de red: el host cae al sintetizador local y sigue hablando.
     /// </summary>
-    public async Task<byte[]?> SynthesizeAsync(string text, CancellationToken cancellationToken = default)
+    public async Task<SynthesizedSpeech?> SynthesizeAsync(string text, CancellationToken cancellationToken = default)
     {
         if (!IsAvailable || string.IsNullOrWhiteSpace(text))
         {
@@ -83,16 +89,26 @@ public sealed class OpenRouterSpeechClient
                 .ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
+                // Sin esto, un slug de modelo equivocado se ve igual que un corte de red: silencio.
+                LastFailure = $"HTTP {(int)response.StatusCode} al pedir «{_speech.Model}» con voz «{_speech.Voice}».";
                 return null;
             }
 
             if (response.Content.Headers.ContentLength > MaximumAudioBytes)
             {
+                LastFailure = "El audio devuelto supera el límite seguro.";
                 return null;
             }
 
             var audio = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-            return audio.Length is > 0 and <= MaximumAudioBytes ? audio : null;
+            if (audio.Length is <= 0 or > MaximumAudioBytes)
+            {
+                LastFailure = "El audio devuelto está vacío o es demasiado grande.";
+                return null;
+            }
+
+            LastFailure = null;
+            return new SynthesizedSpeech(audio, ReadSampleRate(response.Content.Headers.ContentType?.ToString()));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -101,12 +117,40 @@ public sealed class OpenRouterSpeechClient
         catch (Exception exception) when (exception is HttpRequestException or OpenRouterException or IOException)
         {
             // La voz es un complemento: si falla, el host habla con la voz local.
+            LastFailure = $"{exception.GetType().Name} al contactar el servicio de voz.";
             return null;
         }
     }
 
+    /// <summary>
+    /// El proveedor informa la frecuencia en el <c>Content-Type</c>, por ejemplo
+    /// <c>audio/pcm; rate=24000; channels=1</c>. Suponerla es lo que hace que la voz suene mal o no
+    /// suene: distintos modelos devuelven distintas frecuencias.
+    /// </summary>
+    internal static int ReadSampleRate(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+        {
+            return SpeechSynthesisOptions.FallbackSampleRate;
+        }
+
+        foreach (var part in contentType.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!part.StartsWith("rate=", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return int.TryParse(part["rate=".Length..], out var rate) && rate is >= 8_000 and <= 192_000
+                ? rate
+                : SpeechSynthesisOptions.FallbackSampleRate;
+        }
+
+        return SpeechSynthesisOptions.FallbackSampleRate;
+    }
+
     /// <summary>Deriva el endpoint de audio del de chat, sin exigir configurarlo por separado.</summary>
-    internal static Uri ResolveSpeechEndpoint(Uri chatEndpoint)
+    public static Uri ResolveSpeechEndpoint(Uri chatEndpoint)
     {
         var absolute = chatEndpoint.AbsoluteUri;
         const string chatSuffix = "chat/completions";

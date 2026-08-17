@@ -38,6 +38,13 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        if (e.Args.Contains("--check-voice"))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            _ = CheckVoiceAndExitAsync();
+            return;
+        }
+
         _singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isFirstInstance);
         if (!isFirstInstance)
         {
@@ -68,6 +75,26 @@ public partial class App : System.Windows.Application
         _trayIcon.SetOrbShape(_viewModel.OrbShape.ToString());
         _window.Show();
         _window.Activate();
+    }
+
+    private async Task CheckVoiceAndExitAsync()
+    {
+        try
+        {
+            var report = await Diagnostics.VoiceDiagnostics.RunAsync();
+            var path = Path.Combine(Path.GetTempPath(), "viernes-voice-check.txt");
+            await File.WriteAllTextAsync(path, report);
+            Console.WriteLine(report);
+            Console.WriteLine(path);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"El diagnóstico de voz falló: {exception}");
+        }
+        finally
+        {
+            Shutdown();
+        }
     }
 
     private async Task RenderOrbAndExitAsync(string outputDirectory)
