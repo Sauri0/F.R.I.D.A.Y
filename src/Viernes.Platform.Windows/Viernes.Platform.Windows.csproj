@@ -6,12 +6,26 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!--
+      WPF acá no es para dibujar interfaz: se usa su codificador PNG y su reescalado de alta calidad
+      para la captura de pantalla. La alternativa era System.Drawing.Common, una dependencia más para
+      hacer lo mismo que el framework ya trae.
+    -->
+    <UseWPF>true</UseWPF>
     <Description>Servicios de plataforma Windows para Viernes.</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- Core no referencia a la plataforma, así que esta dirección no crea ciclo. -->
     <ProjectReference Include="..\Viernes.Core\Viernes.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Habilitar WPF cambia el conjunto de using implícitos y deja afuera System.IO, que este proyecto
+      usa para los flujos de audio. Reponerlo acá es preferible a agregar un using en cada archivo.
+    -->
+    <Using Include="System.IO" />
   </ItemGroup>
 
   <ItemGroup>

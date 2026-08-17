@@ -13,7 +13,8 @@ public sealed class ViernesOptionsTests
 
         Assert.False(options.HasApiKey);
         Assert.True(options.IsLocalMode);
-        Assert.Equal("openrouter/auto", ViernesOptions.DefaultModel);
+        // El carril rápido va con modelo fijo por latencia; los pesados siguen con el router.
+        Assert.Equal("google/gemini-3.5-flash-lite", ViernesOptions.DefaultModel);
         Assert.Equal("openrouter/auto", ViernesOptions.DefaultAgentModel);
         Assert.Equal("openrouter/auto", ViernesOptions.DefaultPlanningModel);
         Assert.Equal("openrouter/auto", ViernesOptions.DefaultReasoningModel);
@@ -26,7 +27,9 @@ public sealed class ViernesOptionsTests
         Assert.Equal(options.PlanningModel, options.ResolveModel(ModelRole.Planning));
         Assert.Equal(options.AgentModel, options.ResolveModel(ModelRole.Agent));
         Assert.Equal(options.ReasoningModel, options.ResolveModel(ModelRole.Reasoning));
-        Assert.True(options.UsesAutoRouter);
+        // Falso a propósito: la propiedad habla del carril rápido, que ahora lleva modelo fijo.
+        // Los carriles de agente y razonamiento siguen delegando en el router, como se afirma arriba.
+        Assert.False(options.UsesAutoRouter);
         Assert.Null(options.Preset);
 
         // Sin cadena de fallback hardcodeada: el router resuelve alternativas del lado del servidor.

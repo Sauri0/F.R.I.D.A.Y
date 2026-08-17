@@ -20,9 +20,10 @@ public sealed class ModelPortfolioTests
         var embeddings = options.SelectModel(new ModelSelectionRequest(ModelRole.Embeddings));
         var summary = options.SelectModel(new ModelSelectionRequest(ModelRole.LocalSummary));
 
-        // Los tres lanes conversacionales delegan la elección en el router; lo que los distingue es
-        // la banda de costo, no un slug fijo que puede quedar deprecado.
-        Assert.Equal((ModelSelectionStatus.Ready, AutoRouterOptions.AutoModelSlug),
+        // El carril rápido lleva modelo fijo: es el que contesta cuando le hablás, y ahí la latencia
+        // pesa más que dejar que el router optimice costo. Los otros dos siguen delegando la
+        // elección, distinguidos por banda de costo y no por un slug que puede quedar deprecado.
+        Assert.Equal((ModelSelectionStatus.Ready, ViernesOptions.DefaultModel),
             (fast.Status, fast.Model));
         Assert.Equal((ModelSelectionStatus.Ready, AutoRouterOptions.AutoModelSlug),
             (agent.Status, agent.Model));

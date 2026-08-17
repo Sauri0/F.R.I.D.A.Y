@@ -42,6 +42,20 @@
             </Path>
 
             <!--
+                Sedimento: el tiempo se acumula abajo durante una tarea larga. Si mirás para otro
+                lado y volvés, el nivel es distinto — es la única señal honesta de cuánto pasó.
+                Va recortado por la silueta, como los reflejos, así nunca se sale del cuerpo.
+            -->
+            <Canvas x:Name="SedimentLayer" Width="70" Height="70">
+                <Rectangle x:Name="Sediment"
+                           Canvas.Left="0"
+                           Canvas.Top="70"
+                           Width="70"
+                           Height="0"
+                           Fill="#8C17607F" />
+            </Canvas>
+
+            <!--
                 Los reflejos van recortados por la silueta y fuera de cualquier transform de la masa:
                 la luz es del ambiente, no del objeto. Al deformarse el cuerpo, el recorte hace que
                 la luz resbale sobre el borde en vez de despegarse.

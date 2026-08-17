@@ -31,13 +31,22 @@ internal static class OrbSnapshot
     private static readonly (AssistantVisualState State, double Seconds, bool Microphone)[] Frames =
     [
         (AssistantVisualState.Idle, 0.4, false),
-        (AssistantVisualState.Idle, 1.7, false),
-        (AssistantVisualState.Idle, 3.1, false),
         (AssistantVisualState.Idle, 1.0, true),
         (AssistantVisualState.Listening, 1.2, true),
         (AssistantVisualState.Thinking, 1.2, false),
         (AssistantVisualState.Speaking, 1.2, false),
-        (AssistantVisualState.Attention, 1.2, false)
+        (AssistantVisualState.Attention, 1.2, false),
+        (AssistantVisualState.Error, 1.2, false),
+
+        // Los dos de capacidad reducida van juntos y al final: la prueba de que se distinguen de un
+        // error no es mirarlos solos, es verlos al lado del rojo.
+        (AssistantVisualState.Unconfigured, 1.2, false),
+        (AssistantVisualState.Offline, 1.2, false),
+
+        // Tarea larga: el sedimento se acumula abajo. Tres momentos, para verlo subir.
+        (AssistantVisualState.Thinking, 14, false),
+        (AssistantVisualState.Thinking, 30, false),
+        (AssistantVisualState.Thinking, 70, false)
     ];
 
     public static async Task<string> RunAsync(string outputDirectory, OrbShape shape = OrbShape.Gota)

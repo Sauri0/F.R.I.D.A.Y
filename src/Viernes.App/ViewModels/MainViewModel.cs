@@ -26,6 +26,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private string _confirmationTitle = "Confirmación necesaria";
     private string _confirmationDetail = string.Empty;
     private bool _isPresentingResult;
+    private BubbleListKind _listKind = BubbleListKind.Agenda;
     private CancellationTokenSource? _resultPresentationCancellation;
 
     public MainViewModel(IAssistantRuntime runtime)
@@ -71,6 +72,9 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         get => _statusText;
         private set => SetProperty(ref _statusText, value);
     }
+
+    /// <summary>Cómo se llama el asistente, para los textos que lo nombran.</summary>
+    public string AssistantName => _runtime.AssistantName;
 
     public string MessageText
     {
@@ -212,6 +216,9 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     public ObservableCollection<TurnStepViewModel> Steps { get; } = [];
 
+    /// <summary>Se dispara cuando cierra un paso real. El orbe lo convierte en un latido.</summary>
+    public event EventHandler? StepAdvanced;
+
     /// <summary>Filas de agenda, recordatorios o memoria. Vacío en cualquier otro caso.</summary>
     public ObservableCollection<BubbleListItem> ListItems { get; } = [];
 
@@ -234,14 +241,24 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsAssistantShellVisible => !IsMinimalShellVisible;
     public double WidgetWidth => IsMinimalShellVisible ? 108 : IsExpanded ? 368 : 360;
 
-    // 176 px es la altura de excepción para pasos y listas: sigue siendo temporal, nunca un panel.
+    /// <summary>
+    /// Dos formas para listas, no una: tira de 120 para la agenda, hoja de 176 para la memoria.
+    /// </summary>
+    /// <remarks>
+    /// Una agenda es una línea de tiempo y se lee de un vistazo; una memoria son registros con
+    /// identificador y eso pide fila completa. Darle 176 px a una agenda de dos eventos deja un
+    /// vacío que se lee como error. Ninguna de las dos scrollea: el scroll invita a quedarse, y
+    /// quedarse es el panel permanente entrando por la ventana.
+    /// </remarks>
     public double WidgetHeight => IsMinimalShellVisible
         ? 108
         : IsExpanded
             ? 168
-            : AreStepsVisible || AreListItemsVisible
+            : AreStepsVisible
                 ? 176
-                : 120;
+                : AreListItemsVisible
+                    ? _listKind == BubbleListKind.Memoria ? 176 : 120
+                    : 120;
 
     public string ConfirmationTitle
     {
@@ -256,7 +273,18 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsCloudConfigured => _runtime.IsCloudConfigured;
-    public string ModeLabel => IsCloudConfigured ? "OPENROUTER" : "LOCAL SEGURO";
+
+    /// <summary>Autorización de gasto viva. El orbe la muestra tiñendo el borde de cálido.</summary>
+    public bool HasSpendAuthorization => _runtime.HasSpendAuthorization;
+    /// <summary>
+    /// Nada en mayúsculas, y nada que suene a alarma.
+    /// </summary>
+    /// <remarks>
+    /// Decía «LOCAL SEGURO», que mezcla tres situaciones distintas y ninguna es un error. En
+    /// mayúsculas suena a que algo falló, cuando lo que hay que decir es lo contrario: falta
+    /// configurar y casi todo sigue funcionando.
+    /// </remarks>
+    public string ModeLabel => IsCloudConfigured ? "OpenRouter" : "Falta la clave";
     public string MuteGlyph => IsMuted ? "\uE74F" : "\uE767";
     public string MuteToolTip => IsMuted ? "Activar voz" : "Silenciar voz";
     public string PrivacyGlyph => IsMuted ? "\uE74F" : "\uE720";
@@ -309,6 +337,10 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         IsWakeWordEnabled = _runtime.IsWakeWordEnabled;
         IsListeningWhileHidden = _runtime.IsListeningWhileHidden;
         OrbShape = _runtime.OrbShape;
+
+        // El nombre recién se conoce acá: la ventana y la bandeja ya se dibujaron con el de fábrica
+        // y se enteran del elegido por este aviso.
+        OnPropertyChanged(nameof(AssistantName));
         OnPropertyChanged(nameof(IsCloudConfigured));
         OnPropertyChanged(nameof(ModeLabel));
     }
@@ -370,6 +402,20 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         await _runtime.SendAsync(text, cancellationToken);
     }
 
+    /// <summary>
+    /// Freno de emergencia. Llega del atajo global, no de un comando ni de la conversación.
+    /// </summary>
+    /// <remarks>
+    /// Deliberadamente delgado: sólo reenvía al runtime y refleja el silencio en la interfaz. Todo
+    /// lo que se interponga entre apretar el atajo y que Viernes pare es tiempo en el que sigue
+    /// haciendo lo que sea que estaba haciendo.
+    /// </remarks>
+    public void Panic()
+    {
+        _runtime.Panic();
+        IsMuted = true;
+    }
+
     private void ToggleMute()
     {
         IsMuted = !IsMuted;
@@ -406,15 +452,17 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void RuntimeOnUpdated(object? sender, AssistantRuntimeUpdate update)
     {
+        // El nivel llega decenas de veces por segundo desde el hilo de audio. Invoke bloquea a quien
+        // llama hasta que la interfaz termine: usarlo acá frenaba la captura al ritmo del dibujado.
+        // InvokeAsync lo deja seguir, que es lo único que este camino necesita.
+        if (update.AudioLevel is { } level)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(() => AudioLevel = level);
+            return;
+        }
+
         System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
-            // El nivel llega decenas de veces por segundo: mueve la forma y no toca nada más.
-            if (update.AudioLevel is { } level)
-            {
-                AudioLevel = level;
-                return;
-            }
-
             var previousState = State;
             State = update.State;
             StatusText = update.Status;
@@ -436,6 +484,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
             if (update.Steps is not null || update.ClearSteps)
             {
+                var previousCount = Steps.Count;
                 Steps.Clear();
                 if (update.Steps is not null)
                 {
@@ -445,11 +494,19 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                     }
                 }
 
+                // Un paso nuevo = un latido. Es la única señal honesta de progreso: nada continuo
+                // puede decir «avancé», sólo «sigo». Que aparezca un paso sí significa que algo pasó.
+                if (Steps.Count > previousCount)
+                {
+                    StepAdvanced?.Invoke(this, EventArgs.Empty);
+                }
+
                 NotifyContentProperties();
             }
 
             if (update.Items is not null || update.ClearItems)
             {
+                _listKind = update.ListKind;
                 ListItems.Clear();
                 if (update.Items is not null)
                 {

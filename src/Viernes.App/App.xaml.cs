@@ -17,6 +17,9 @@ public partial class App : System.Windows.Application
     private MainWindow? _window;
     private MainViewModel? _viewModel;
     private TrayIconService? _trayIcon;
+    private PanicSwitch? _panicSwitch;
+    private Controls.EdgeMark? _edgeMark;
+    private readonly MonitorSlots _monitorSlots = new();
 
     public new static App Current => (App)System.Windows.Application.Current;
 
@@ -76,6 +79,22 @@ public partial class App : System.Windows.Application
             ChooseOrbShape,
             RequestExit);
 
+        // El freno se engancha antes de nada más: si algo falla después, el corte ya existe.
+        _panicSwitch = new PanicSwitch(() => _viewModel?.Panic());
+        var panicReady = _panicSwitch.TryAttach(_window);
+        Diagnostics.RuntimeTrace.Write(
+            "freno",
+            panicReady ? $"{PanicSwitch.Shortcut} registrado" : "NO se pudo registrar el atajo");
+        if (!panicReady)
+        {
+            // Que otra aplicación tenga tomado el atajo no puede quedar en silencio: un freno que
+            // nadie sabe que no existe es peor que no tener freno.
+            _trayIcon.ShowBalloon(
+                "Viernes",
+                $"No pude registrar {PanicSwitch.Shortcut}: otra aplicación lo tiene tomado. " +
+                "El corte de emergencia por teclado no está disponible.");
+        }
+
         var autoStartStatus = _autoStartService.GetStatus();
         _trayIcon.SetAutoStart(autoStartStatus.IsConfiguredForCurrentExecutable);
         _trayIcon.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
@@ -129,6 +148,78 @@ public partial class App : System.Windows.Application
 
     internal void NotifyWindowVisibilityChanged(bool visible) => _trayIcon?.SetWindowVisible(visible);
 
+    /// <summary>
+    /// Muestra u oculta la marca según la única regla que la justifica: si el micrófono puede tomar
+    /// audio y el orbe no está a la vista, tiene que haber algo en pantalla.
+    /// </summary>
+    /// <summary>
+    /// Lleva el orbe al monitor donde está el cursor, a la posición que recordaba de ese monitor.
+    /// </summary>
+    /// <remarks>
+    /// Si ya está en ese monitor no toca nada: mover el orbe sin motivo es movimiento gratuito, y a
+    /// las ocho horas de uso el movimiento gratuito es el enemigo. Sólo se reubica cuando lo llamaste
+    /// desde otra pantalla, que es el caso donde hacerte buscarlo sería peor.
+    /// </remarks>
+    private void MoveToCursorMonitor()
+    {
+        if (_window is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var (targetKey, workArea) = MonitorSlots.MonitorUnderCursor();
+            var currentCentre = new System.Windows.Point(
+                _window.Left + (_window.Width / 2),
+                _window.Top + (_window.Height / 2));
+            var (currentKey, _) = MonitorSlots.MonitorAt(currentCentre);
+
+            if (string.Equals(currentKey, targetKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var size = new System.Windows.Size(_window.Width, _window.Height);
+            var slot = _monitorSlots.SlotFor(targetKey, workArea, size);
+            _window.Left = slot.X;
+            _window.Top = slot.Y;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Si la topología de pantallas cambió justo ahora, quedarse donde está es aceptable.
+        }
+    }
+
+    private void UpdateEdgeMark()
+    {
+        if (_window is null || _viewModel is null)
+        {
+            return;
+        }
+
+        var shouldShow = !_window.IsVisible &&
+            _viewModel.IsWakeWordEnabled &&
+            !_viewModel.IsMuted;
+
+        if (!shouldShow)
+        {
+            HideEdgeMark();
+            return;
+        }
+
+        _edgeMark ??= new Controls.EdgeMark(ToggleWindowVisibility);
+        var bounds = new Rect(_window.Left, _window.Top, _window.Width, _window.Height);
+        _edgeMark.SnapNear(bounds, SystemParameters.WorkArea);
+        _edgeMark.Show();
+        _edgeMark.StartBreathing();
+    }
+
+    private void HideEdgeMark()
+    {
+        _edgeMark?.Hide();
+    }
+
     private void ToggleWindowVisibility()
     {
         if (_window is null)
@@ -143,9 +234,11 @@ public partial class App : System.Windows.Application
             _ = _viewModel?.SetShellVisibilityAsync(false, CancellationToken.None);
             _window.Hide();
             _trayIcon?.SetWindowVisible(false);
+            UpdateEdgeMark();
             return;
         }
 
+        HideEdgeMark();
         _window.Show();
         if (_window.WindowState == WindowState.Minimized)
         {
@@ -213,6 +306,8 @@ public partial class App : System.Windows.Application
             _window.WindowState = WindowState.Normal;
         }
 
+        HideEdgeMark();
+        MoveToCursorMonitor();
         _window.Topmost = true;
         _window.ShowWithoutStealingFocus();
 
@@ -250,6 +345,10 @@ public partial class App : System.Windows.Application
     private async void RequestExit()
     {
         IsExitRequested = true;
+        _panicSwitch?.Dispose();
+        _panicSwitch = null;
+        _edgeMark?.Close();
+        _edgeMark = null;
         _window?.SaveOrbPlacement();
         _window?.Hide();
         _trayIcon?.Dispose();
@@ -275,10 +374,15 @@ public partial class App : System.Windows.Application
         if (e.PropertyName == nameof(MainViewModel.IsMuted))
         {
             _trayIcon?.SetMuted(_viewModel.IsMuted);
+
+            // Silenciar es el corte duro: sin micrófono no hay nada que anunciar, y ésa es la única
+            // forma de que no quede absolutamente nada en pantalla.
+            UpdateEdgeMark();
         }
         else if (e.PropertyName == nameof(MainViewModel.IsWakeWordEnabled))
         {
             _trayIcon?.SetWakeWordEnabled(_viewModel.IsWakeWordEnabled);
+            UpdateEdgeMark();
         }
         else if (e.PropertyName == nameof(MainViewModel.IsListeningWhileHidden))
         {
@@ -291,6 +395,14 @@ public partial class App : System.Windows.Application
         else if (e.PropertyName == nameof(MainViewModel.StatusText))
         {
             _trayIcon?.SetStatus(_viewModel.StatusText);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.AssistantName))
+        {
+            _trayIcon?.SetAssistantName(_viewModel.AssistantName);
+            if (_window is not null)
+            {
+                _window.Title = _viewModel.AssistantName;
+            }
         }
     }
 

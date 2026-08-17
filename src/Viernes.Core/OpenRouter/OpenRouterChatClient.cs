@@ -252,6 +252,17 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
     private static object MapMessage(ConversationMessage message) => message.Role switch
     {
         ConversationRole.System => new { role = "system", content = message.Content },
+        // Con imagen, el contenido deja de ser una cadena y pasa a ser una lista de partes: es el
+        // formato multimodal que espera la API, y el mismo que entienden los modelos con visión.
+        ConversationRole.User when message.ImageDataUrl is not null => new
+        {
+            role = "user",
+            content = new object[]
+            {
+                new { type = "text", text = message.Content ?? string.Empty },
+                new { type = "image_url", image_url = new { url = message.ImageDataUrl } }
+            }
+        },
         ConversationRole.User => new { role = "user", content = message.Content },
         ConversationRole.Assistant => new
         {

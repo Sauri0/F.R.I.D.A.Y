@@ -82,6 +82,7 @@ public sealed class AutoRouterTests
     {
         var (client, handler, _) = CreateClient(new ViernesOptions(
             apiKey: "unit-test-placeholder-token",
+            model: AutoRouterOptions.AutoModelSlug,
             autoRouter: new AutoRouterOptions(
                 allowedModels: ["anthropic/*", "openai/*"],
                 excludedModels: ["openai/o1-pro"])));
@@ -125,6 +126,7 @@ public sealed class AutoRouterTests
             httpClient,
             new ViernesOptions(
                 apiKey: "unit-test-placeholder-token",
+                model: AutoRouterOptions.AutoModelSlug,
                 fallbackModels: ["legacy/deprecated-model"]));
 
         await Assert.ThrowsAsync<OpenRouterException>(() =>
@@ -198,7 +200,12 @@ public sealed class AutoRouterTests
     private static (OpenRouterChatClient Client, StubHttpMessageHandler Handler, ViernesOptions Options)
         CreateClient(ViernesOptions? options = null)
     {
-        options ??= new ViernesOptions(apiKey: "unit-test-placeholder-token");
+        // El router se pide explícitamente en vez de heredarlo del valor por defecto: estas pruebas
+        // son sobre el comportamiento del router, y no tienen por qué romperse cuando el carril
+        // rápido elige otro modelo. Declarar la premisa es parte de lo que la prueba afirma.
+        options ??= new ViernesOptions(
+            apiKey: "unit-test-placeholder-token",
+            model: AutoRouterOptions.AutoModelSlug);
         var handler = new StubHttpMessageHandler();
         for (var index = 0; index < 4; index++)
         {

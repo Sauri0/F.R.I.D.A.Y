@@ -131,26 +131,26 @@ public sealed class ConversationOrchestratorTests
     }
 
     [Fact]
-    public async Task ExecuteLocalToolAsync_PreservesConfirmationAndHighRiskPolicy()
+    public async Task ExecuteLocalToolAsync_RunsAllowlistedActionsAndStillGuardsDestructiveOnes()
     {
         var chatClient = new QueueChatClient();
         var orchestrator = new ConversationOrchestrator(
             chatClient,
             new ToolExecutor([new PcActionTool()]));
 
-        var preview = await orchestrator.ExecuteLocalToolAsync(
+        var allowed = await orchestrator.ExecuteLocalToolAsync(
             PcActionTool.ToolName,
             JsonSerializer.SerializeToElement(new { action = "show_desktop" }));
-        var confirmedPreview = await orchestrator.ConfirmToolAsync(preview.ToolCallId);
         var destructive = await orchestrator.ExecuteLocalToolAsync(
             PcActionTool.ToolName,
             JsonSerializer.SerializeToElement(new { action = "delete_file", target = "test.txt" }),
             confirmationGranted: true);
 
-        Assert.Equal(ToolExecutionStatus.NeedsConfirmation, preview.Status);
-        Assert.Equal(ToolExecutionStatus.Succeeded, confirmedPreview.Status);
-        Assert.True(confirmedPreview.Data.HasValue);
-        Assert.True(confirmedPreview.Data.Value.GetProperty("simulated").GetBoolean());
+        // Lo permitido corre; lo destructivo no pasa ni con la confirmación ya dada. Esa asimetría
+        // es el punto: la preferencia afloja el permiso, nunca la lista blanca.
+        Assert.Equal(ToolExecutionStatus.Succeeded, allowed.Status);
+        Assert.True(allowed.Data.HasValue);
+        Assert.True(allowed.Data!.Value.GetProperty("simulated").GetBoolean());
         Assert.Equal(ToolExecutionStatus.NeedsConfirmation, destructive.Status);
         Assert.Null(destructive.Data);
         Assert.Empty(chatClient.Requests);

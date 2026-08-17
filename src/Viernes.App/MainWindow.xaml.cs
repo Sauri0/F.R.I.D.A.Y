@@ -40,6 +40,11 @@ public partial class MainWindow : Window
 
         ApplyOrbShape(viewModel.OrbShape);
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
+        // El latido sólo existe en la gota: la nube tiene su propio vocabulario y no lo comparte.
+        _viewModel.StepAdvanced += (_, _) => OrbHost.Children
+            .OfType<LiquidOrb>()
+            .FirstOrDefault()
+            ?.Beat();
     }
 
     /// <summary>
@@ -66,6 +71,9 @@ public partial class MainWindow : Window
         gota.SetBinding(
             LiquidOrb.AudioLevelProperty,
             new Binding(nameof(MainViewModel.AudioLevel)) { Source = _viewModel });
+        gota.SetBinding(
+            LiquidOrb.HasSpendAuthorizationProperty,
+            new Binding(nameof(MainViewModel.HasSpendAuthorization)) { Source = _viewModel });
         OrbHost.Children.Add(gota);
     }
 

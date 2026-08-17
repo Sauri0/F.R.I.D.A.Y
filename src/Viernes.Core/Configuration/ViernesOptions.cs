@@ -43,14 +43,37 @@ public sealed class ViernesOptions
     public const string ExcludedModelsEnvironmentVariable = "VIERNES_OPENROUTER_EXCLUDED_MODELS";
     public const string MaxPromptPriceEnvironmentVariable = "VIERNES_OPENROUTER_MAX_PROMPT_PRICE";
     public const string MaxCompletionPriceEnvironmentVariable = "VIERNES_OPENROUTER_MAX_COMPLETION_PRICE";
+    /// <summary>
+    /// Si las acciones de la lista blanca piden permiso antes de ejecutarse.
+    /// </summary>
+    /// <remarks>
+    /// Es una preferencia y no una constante porque el punto justo depende de cómo se use: en una
+    /// charla hablada, confirmar cada cosa convierte un pedido en dos pasos y arruina el ritmo;
+    /// dejarlo abierto hace que un texto leído de una página web pueda convertirse en una acción.
+    /// Estuvo cableado a un lado y al otro, y cambiarlo implicaba recompilar; ahora es una variable.
+    /// </remarks>
+    public const string ConfirmActionsEnvironmentVariable = "VIERNES_CONFIRM_ACTIONS";
+
     public const string WebSearchEnvironmentVariable = "VIERNES_WEB_SEARCH";
     public const string WebSearchMaxResultsEnvironmentVariable = "VIERNES_WEB_SEARCH_MAX_RESULTS";
 
     /// <summary>
-    /// El router automático es el valor por defecto: es un slug real, soporta tool calling y se
-    /// mantiene actualizado solo. Fijar un modelo concreto sigue siendo posible por variable.
+    /// El carril rápido —el que contesta cuando le hablás— va con modelo fijo, no con el router.
     /// </summary>
-    public const string DefaultModel = AutoRouterOptions.AutoModelSlug;
+    /// <remarks>
+    /// El router automático elige por costo y calidad, no por latencia, y eso en una conversación
+    /// hablada se paga entero en silencio. Medido contra este mismo prompt, con herramientas:
+    /// <list type="bullet">
+    ///   <item><c>openrouter/auto</c> → <c>deepseek-v4-flash</c>: 12.948 ms la respuesta completa</item>
+    ///   <item><c>google/gemini-3.7-flash</c>: ~3.000 ms</item>
+    ///   <item><c>google/gemini-3.5-flash-lite</c>: <b>~640 ms</b></item>
+    /// </list>
+    /// De los candidatos rápidos con soporte de herramientas, éste fue además el único que contestó
+    /// en rioplatense —«¿qué querés hacer?» y no «¿qué necesitas?»—, y llamó bien a la herramienta;
+    /// <c>gpt-4.1-nano</c>, por ejemplo, inventaba la acción. Los carriles pesados siguen con el
+    /// router, donde pensar mejor vale más que contestar rápido.
+    /// </remarks>
+    public const string DefaultModel = "google/gemini-3.5-flash-lite";
     public const string DefaultAgentModel = AutoRouterOptions.AutoModelSlug;
     public const string DefaultPlanningModel = DefaultAgentModel;
     public const string DefaultReasoningModel = AutoRouterOptions.AutoModelSlug;
@@ -82,8 +105,10 @@ public sealed class ViernesOptions
         AutoRouterOptions? autoRouter = null,
         string? preset = null,
         bool webSearchEnabled = false,
-        int webSearchMaxResults = 3)
+        int webSearchMaxResults = 3,
+        bool confirmActions = false)
     {
+        ConfirmActions = confirmActions;
         WebSearchEnabled = webSearchEnabled;
         WebSearchMaxResults = webSearchMaxResults is >= 1 and <= 10
             ? webSearchMaxResults
@@ -150,6 +175,12 @@ public sealed class ViernesOptions
     /// Busca en la web a través del plugin de OpenRouter. Viene apagado porque cada búsqueda tiene
     /// costo propio, aparte de los tokens del turno.
     /// </summary>
+    /// <summary>
+    /// Si las acciones permitidas piden confirmación. Apagado por defecto: con confirmación por voz
+    /// disponible se puede encender, pero en una charla hablada duplica cada pedido.
+    /// </summary>
+    public bool ConfirmActions { get; }
+
     public bool WebSearchEnabled { get; }
 
     public int WebSearchMaxResults { get; }
@@ -229,7 +260,18 @@ public sealed class ViernesOptions
 
     public ModelSelection SelectModel(ModelSelectionRequest request) => Portfolio.Select(request);
 
-    public static ViernesOptions FromEnvironment(Func<string, string?>? readVariable = null)
+    /// <summary>
+    /// Lee la configuración del entorno. El nombre del asistente entra aparte porque no vive ahí.
+    /// </summary>
+    /// <remarks>
+    /// El nombre lo elige quien instala y se guarda en las preferencias locales, no en el entorno:
+    /// es una decisión que se toma una vez y sobrevive a reiniciar la sesión de Windows. Llega como
+    /// parámetro en vez de leerse acá para que este proyecto no tenga que saber dónde guarda sus
+    /// preferencias el proyecto de Windows.
+    /// </remarks>
+    public static ViernesOptions FromEnvironment(
+        Func<string, string?>? readVariable = null,
+        string? assistantName = null)
     {
         readVariable ??= Environment.GetEnvironmentVariable;
         var fallbacks = SplitModels(
@@ -244,6 +286,7 @@ public sealed class ViernesOptions
                 readVariable(FastModelEnvironmentVariable),
                 readVariable(ModelEnvironmentVariable)),
             fallbacks.Length == 0 ? null : fallbacks,
+            applicationName: AssistantIdentity.Normalize(assistantName),
             planningModel: readVariable(PlanningModelEnvironmentVariable),
             dailyBudgetUsd: ParseBudget(readVariable(DailyBudgetEnvironmentVariable), DailyBudgetEnvironmentVariable),
             monthlyBudgetUsd: ParseBudget(readVariable(MonthlyBudgetEnvironmentVariable), MonthlyBudgetEnvironmentVariable),
@@ -268,13 +311,20 @@ public sealed class ViernesOptions
             usageRateCard: UsageRateCard.ParseJson(readVariable(RateCardEnvironmentVariable)),
             autoRouter: ReadAutoRouterOptions(readVariable),
             preset: readVariable(PresetEnvironmentVariable),
+            // Encendida por defecto: un asistente que no puede mirar la web contesta de memoria y
+            // con fecha de corte. Se apaga con VIERNES_WEB_SEARCH=false si el costo por búsqueda
+            // molesta más que la respuesta desactualizada.
             webSearchEnabled: ParseBoolean(
                 readVariable(WebSearchEnvironmentVariable),
                 WebSearchEnvironmentVariable,
-                defaultValue: false),
+                defaultValue: true),
             webSearchMaxResults: ParseOptionalInt(
                 readVariable(WebSearchMaxResultsEnvironmentVariable),
-                WebSearchMaxResultsEnvironmentVariable) ?? 3);
+                WebSearchMaxResultsEnvironmentVariable) ?? 3,
+            confirmActions: ParseBoolean(
+                readVariable(ConfirmActionsEnvironmentVariable),
+                ConfirmActionsEnvironmentVariable,
+                defaultValue: false));
     }
 
     /// <summary>Variable de banda de costo por rol, por ejemplo <c>VIERNES_OPENROUTER_FAST_COST_TIER</c>.</summary>

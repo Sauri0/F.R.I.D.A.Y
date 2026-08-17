@@ -92,21 +92,34 @@ public sealed class ToolExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_PreviewablePcAction_RequiresConsentAndOnlyReturnsSimulation()
+    public async Task ExecuteAsync_AllowlistedPcAction_FollowsTheConfirmationPreference()
     {
-        var executor = new ToolExecutor([new PcActionTool()]);
         var call = new ToolCall(
             "pc-call",
             PcActionTool.ToolName,
             JsonSerializer.SerializeToElement(new { action = "show_desktop" }));
 
-        var beforeConsent = await executor.ExecuteAsync(call);
-        var afterConsent = await executor.ExecuteAsync(call, confirmationGranted: true);
+        var silent = await new ToolExecutor([new PcActionTool(confirmActions: false)]).ExecuteAsync(call);
+        var asking = await new ToolExecutor([new PcActionTool(confirmActions: true)]).ExecuteAsync(call);
 
-        Assert.Equal(ToolExecutionStatus.NeedsConfirmation, beforeConsent.Status);
-        Assert.Equal(ToolExecutionStatus.Succeeded, afterConsent.Status);
-        Assert.True(afterConsent.Data.HasValue);
-        Assert.True(afterConsent.Data.Value.GetProperty("simulated").GetBoolean());
+        // La preferencia gobierna la barrera blanda, y sólo esa: la lista blanca no la toca nadie.
+        Assert.Equal(ToolExecutionStatus.Succeeded, silent.Status);
+        Assert.Equal(ToolExecutionStatus.NeedsConfirmation, asking.Status);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PcActionOutsideTheAllowlist_StillNeedsConsent()
+    {
+        var executor = new ToolExecutor([new PcActionTool()]);
+        var call = new ToolCall(
+            "pc-call",
+            PcActionTool.ToolName,
+            JsonSerializer.SerializeToElement(new { action = "run_command", target = "whoami" }));
+
+        var result = await executor.ExecuteAsync(call);
+
+        // Quitar la confirmación de lo permitido no puede abrirle la puerta a lo que no lo está.
+        Assert.Equal(ToolExecutionStatus.NeedsConfirmation, result.Status);
     }
 
     [Fact]

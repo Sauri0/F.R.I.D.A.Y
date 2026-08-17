@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+using Viernes.Core.Configuration;
 using Viernes.Platform.Windows.Speech.Recognition;
 
 namespace Viernes.Platform.Windows.Storage;
@@ -18,7 +20,33 @@ public sealed record ViernesLocalSettings
     /// <summary>Wake-word local es el modo normal; PTT sigue disponible como control privado.</summary>
     public VoiceActivationMode VoiceActivation { get; init; } = VoiceActivationMode.LocalWakeWord;
 
-    public IReadOnlyList<string> WakeWordPhrases { get; init; } = ["Viernes", "Hola Viernes"];
+    /// <summary>
+    /// Cómo se llama el asistente. Lo elige quien instala.
+    /// </summary>
+    public string AssistantName { get; init; } = AssistantIdentity.DefaultName;
+
+    /// <summary>
+    /// Frases de activación. <c>null</c> significa «las que salen del nombre».
+    /// </summary>
+    /// <remarks>
+    /// Guardar las frases sólo cuando alguien las escribió a mano es lo que hace que renombrar el
+    /// asistente funcione: si estuvieran siempre en disco, cambiar el nombre de «Viernes» a «Ana»
+    /// dejaría «Hola Viernes» escrito en el archivo y seguiría despertando con el nombre viejo
+    /// —o peor, no despertaría con ninguno de los dos.
+    /// <para>
+    /// La palabra suelta queda afuera a propósito; el porqué está en
+    /// <see cref="AssistantIdentity.WakePhrases"/>. Quien prefiera la palabra suelta puede reponerla
+    /// con <c>VIERNES_WAKE_PHRASES</c>.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string>? WakeWordPhrases { get; init; }
+
+    /// <summary>Las frases que efectivamente despiertan: las elegidas, o las derivadas del nombre.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> EffectiveWakePhrases =>
+        this.WakeWordPhrases is { Count: > 0 }
+            ? this.WakeWordPhrases
+            : new AssistantIdentity(this.AssistantName).WakePhrases;
 
     /// <summary>
     /// Mantiene la activación por voz mientras el orbe está oculto, para que Viernes pueda aparecer

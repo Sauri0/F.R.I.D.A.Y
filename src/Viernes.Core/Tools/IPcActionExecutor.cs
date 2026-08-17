@@ -1,7 +1,12 @@
 namespace Viernes.Core.Tools;
 
 /// <summary>Lo que efectivamente pasó al pedir una acción de PC.</summary>
-public sealed record PcActionOutcome(bool Executed, string Message);
+/// <remarks>
+/// <c>ImageDataUrl</c> viene sólo cuando la acción produce algo que hay que ver y no se puede
+/// contar: la captura de pantalla. Es un fotograma de paso —se manda al modelo y se descarta— y
+/// nunca se guarda en disco.
+/// </remarks>
+public sealed record PcActionOutcome(bool Executed, string Message, string? ImageDataUrl = null);
 
 /// <summary>
 /// Ejecuta acciones concretas del sistema. Vive fuera del núcleo a propósito: el núcleo decide

@@ -15,7 +15,8 @@ internal sealed record AssistantRuntimeUpdate(
     bool ClearSteps = false,
     double? AudioLevel = null,
     IReadOnlyList<BubbleListItem>? Items = null,
-    bool ClearItems = false);
+    bool ClearItems = false,
+    BubbleListKind ListKind = BubbleListKind.Agenda);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,
@@ -65,6 +66,9 @@ internal interface IAssistantRuntime : IAsyncDisposable
 
     string RecognitionProviderName { get; }
 
+    /// <summary>Cómo se llama el asistente. Lo eligió quien instaló y sale de las preferencias.</summary>
+    string AssistantName { get; }
+
     Task InitializeAsync(CancellationToken cancellationToken);
 
     Task<string> SendAsync(string text, CancellationToken cancellationToken);
@@ -87,6 +91,12 @@ internal interface IAssistantRuntime : IAsyncDisposable
     Task EndConversationAsync(string reason, CancellationToken cancellationToken);
 
     Task SetShellVisibilityAsync(bool visible, CancellationToken cancellationToken);
+
+    /// <summary>Hay autorización de gasto viva para hoy.</summary>
+    bool HasSpendAuthorization { get; }
+
+    /// <summary>Corta todo de inmediato, sin pasar por el modelo ni por la conversación.</summary>
+    void Panic();
 
     Task ConfirmPendingAsync(CancellationToken cancellationToken);
 

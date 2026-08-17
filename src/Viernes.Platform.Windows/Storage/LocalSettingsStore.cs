@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Viernes.Core.Configuration;
 using Viernes.Platform.Windows.Speech.Recognition;
 
 namespace Viernes.Platform.Windows.Storage;
@@ -144,6 +145,7 @@ public sealed class LocalSettingsStore : ILocalSettingsStore
             VoiceActivation = Enum.IsDefined(settings.VoiceActivation)
                 ? settings.VoiceActivation
                 : VoiceActivationMode.LocalWakeWord,
+            AssistantName = AssistantIdentity.Normalize(settings.AssistantName),
             WakeWordPhrases = NormalizeWakeWordPhrases(settings.WakeWordPhrases),
             RecognitionCulture = recognitionCulture,
             PreferredVoiceName = NormalizeOptionalText(settings.PreferredVoiceName, 128),
@@ -215,11 +217,18 @@ public sealed class LocalSettingsStore : ILocalSettingsStore
         }
     }
 
-    private static IReadOnlyList<string> NormalizeWakeWordPhrases(IReadOnlyList<string>? phrases)
+    /// <summary>
+    /// Deja pasar sólo las frases escritas a mano; ausencia y basura vuelven a <c>null</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>null</c> no es un fallo acá, es la respuesta normal: significa «derivalas del nombre».
+    /// Devolver una lista fija de fábrica sería justamente el error que rompe el renombrado.
+    /// </remarks>
+    private static IReadOnlyList<string>? NormalizeWakeWordPhrases(IReadOnlyList<string>? phrases)
     {
         if (phrases is null)
         {
-            return ["Viernes", "Hola Viernes"];
+            return null;
         }
 
         var normalized = phrases
@@ -229,7 +238,7 @@ public sealed class LocalSettingsStore : ILocalSettingsStore
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(8)
             .ToArray();
-        return normalized.Length == 0 ? ["Viernes", "Hola Viernes"] : normalized;
+        return normalized.Length == 0 ? null : normalized;
     }
 
     private static double? NormalizeCoordinate(double? value) =>

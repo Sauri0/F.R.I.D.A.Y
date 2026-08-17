@@ -28,7 +28,13 @@ public sealed record WhisperSpeechRecognitionOptions
             : DefaultInputDevice;
     }
 
-    public int BufferMilliseconds { get; init; } = 100;
+    /// <summary>
+    /// Treinta milisegundos, no cien. Cada buffer es un tic: con 100 ms la forma sólo podía moverse
+    /// diez veces por segundo — a saltos, no con la voz — y el fin de frase se decidía con esa misma
+    /// grosería. A 30 ms hay 33 muestras por segundo, que alcanzan para que la animación siga la voz
+    /// y para cortar apenas terminás de hablar.
+    /// </summary>
+    public int BufferMilliseconds { get; init; } = 30;
 
     public TimeSpan MinimumRecordingDuration { get; init; } = TimeSpan.FromMilliseconds(250);
 

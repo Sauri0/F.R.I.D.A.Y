@@ -18,6 +18,8 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
     private readonly WhisperSpeechRecognitionOptions _options;
     private readonly string _modelPath;
     private readonly object _sync = new();
+    private readonly object _factoryGate = new();
+    private WhisperFactory? _factory;
     private CaptureSession? _session;
     private SpeechRecognitionResult? _lastResult;
     private SpeechRecognitionProviderState _state;
@@ -335,6 +337,22 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
     {
         var effectiveOptions = options ?? new SingleUtteranceRecognitionOptions();
         effectiveOptions.Validate();
+
+        // Cargar el modelo mientras el usuario habla, no después de que terminó. Los segundos de la
+        // frase ya estaban ahí; usarlos para tener el modelo listo hace que la carga de la primera
+        // vez no se cobre como espera. Si falla, la transcripción lo vuelve a intentar y reporta.
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                GetFactory();
+            }
+            catch (Exception)
+            {
+                // El error real sale en la transcripción, donde se puede informar al usuario.
+            }
+        }, CancellationToken.None);
+
         var started = await StartPushToTalkAsync(cancellationToken).ConfigureAwait(false);
         if (!started.Succeeded)
         {
@@ -630,6 +648,33 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
         SetMicrophoneActivity(isActive: false);
         SetState(SpeechRecognitionProviderState.Idle);
+
+        lock (_factoryGate)
+        {
+            _factory?.Dispose();
+            _factory = null;
+        }
+    }
+
+    /// <summary>
+    /// El modelo se carga una sola vez y queda en memoria. Antes se construía una fábrica nueva en
+    /// cada transcripción, lo que significaba leer del disco y mapear los ~466 MB del modelo, usarlo
+    /// para dos segundos de audio y tirarlo — en cada turno de la conversación. Era la mayor parte
+    /// del silencio entre que terminabas de hablar y te contestaba.
+    /// </summary>
+    private WhisperFactory GetFactory()
+    {
+        var factory = Volatile.Read(ref _factory);
+        if (factory is not null)
+        {
+            return factory;
+        }
+
+        lock (_factoryGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _factory ??= WhisperFactory.FromPath(_modelPath);
+        }
     }
 
     private async Task<SpeechRecognitionResult> TranscribeWaveCoreAsync(
@@ -641,8 +686,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             waveStream.Position = 0;
         }
 
-        using var factory = WhisperFactory.FromPath(_modelPath);
-        using var processor = factory.CreateBuilder()
+        using var processor = GetFactory().CreateBuilder()
             .WithLanguage(_options.Language)
             .WithProbabilities()
             .Build();
@@ -904,7 +948,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         private TimeSpan _voiceEnergy;
         private TimeSpan _trailingSilence;
         private double _noiseFloor;
-        private TimeSpan _calibrationRemaining = TimeSpan.FromMilliseconds(300);
+        private short _lastSample;
 
         /// <summary>Puente hacia el evento público; la sesión no conoce al proveedor.</summary>
         public Action<double, bool>? LevelObserver { get; set; }
@@ -1047,48 +1091,70 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
             double squareSum = 0;
             var samples = bytesRecorded / sizeof(short);
+            var zeroCrossings = 0;
+            var previousSample = _lastSample;
             for (var offset = 0; offset + sizeof(short) <= bytesRecorded; offset += sizeof(short))
             {
                 var sample = BinaryPrimitives.ReadInt16LittleEndian(buffer.AsSpan(offset, sizeof(short)));
                 var normalized = sample / 32768d;
                 squareSum += normalized * normalized;
+
+                // Cruce por cero con banda muerta: sin ella, el ruido que ronda el cero cuenta miles
+                // de cruces falsos y el número deja de decir nada sobre el contenido.
+                if ((sample > 256 && previousSample < -256) || (sample < -256 && previousSample > 256))
+                {
+                    zeroCrossings++;
+                }
+
+                if (Math.Abs(sample) > 256)
+                {
+                    previousSample = sample;
+                }
             }
 
+            _lastSample = previousSample;
             var rootMeanSquare = Math.Sqrt(squareSum / samples);
-
-            // Se publica siempre, aunque no llegue al umbral: la interfaz tiene que poder mostrar
-            // que hay algo entrando por el micrófono incluso cuando todavía no es voz sostenida.
-            // Se normaliza contra el piso de ruido para que la forma reaccione igual con cualquier
-            // micrófono, en vez de depender de la ganancia que tenga configurada.
-            var displayLevel = _noiseFloor > 0
-                ? Math.Clamp(rootMeanSquare / (_noiseFloor * 40), 0, 1)
-                : Math.Clamp(rootMeanSquare * 25, 0, 1);
-            LevelObserver?.Invoke(displayLevel, _voiceDetected);
+            var zeroCrossingRate = samples > 0 ? (double)zeroCrossings / samples : 0;
 
             var bufferDuration = TimeSpan.FromSeconds((double)bytesRecorded / Capture.WaveFormat.AverageBytesPerSecond);
             _singleUtteranceBytes += bytesRecorded;
             var totalDuration = TimeSpan.FromSeconds(
                 (double)_singleUtteranceBytes / Capture.WaveFormat.AverageBytesPerSecond);
 
-            // Los primeros 300 ms se usan para medir el piso de ruido del ambiente. Un umbral fijo
-            // no puede servir para todos: medido en una máquina real, el piso era 0,0001 y la voz
-            // llegaba a 0,022, contra un umbral fijo de 0,018 que sólo cruzaba el 3 % del tiempo.
-            // Calibrar contra el silencio del propio cuarto es lo que lo vuelve independiente del
-            // micrófono, de su ganancia y de cuán ruidoso sea el lugar.
-            if (_calibrationRemaining > TimeSpan.Zero)
-            {
-                _noiseFloor = Math.Max(_noiseFloor, rootMeanSquare);
-                _calibrationRemaining -= bufferDuration;
-                return;
-            }
+            // El piso de ruido se sigue de forma continua, no se mide en una ventana inicial. Medirlo
+            // en los primeros 300 ms daba por sentado que arrancás en silencio; en una conversación
+            // arrancás hablando, así que el piso quedaba medido sobre tu propia voz y el umbral
+            // pasaba a ser ocho veces tu voz. A partir de ahí no te detectaba nunca más.
+            //
+            // Baja rápido y sube lentísimo: el piso es el nivel más bajo reciente, así que se pega a
+            // los silencios entre palabras y tarda en dejarse arrastrar por lo que suena.
+            var threshold = NoiseFloorTracker.ThresholdFor(_noiseFloor);
+            _noiseFloor = NoiseFloorTracker.Advance(_noiseFloor, rootMeanSquare, _voiceDetected);
 
-            // Ocho veces el piso de ruido, con un mínimo absoluto por si el ambiente es un estudio.
-            var threshold = Math.Max(_noiseFloor * 8, 0.0012);
+            // El nivel para la interfaz se publica siempre, aunque no llegue al umbral: hay que poder
+            // ver que entra algo por el micrófono antes de que sea voz sostenida. Se mide contra el
+            // umbral —que ya lleva el piso de ruido adentro— para que reaccione igual con cualquier
+            // micrófono. La raíz comprime el rango: entre un susurro y un grito hay dos órdenes de
+            // magnitud, y en lineal la forma se queda pegada al máximo apenas abrís la boca.
+            LevelObserver?.Invoke(
+                Math.Clamp(Math.Sqrt(rootMeanSquare / (threshold * 20)), 0, 1),
+                _voiceDetected);
+
+            // La energía sola no distingue una voz de un portazo: los dos son fuertes. Lo que separa
+            // a la voz es *cómo* está hecha. La tasa de cruces por cero mide eso casi gratis:
+            //
+            //   golpe, puerta, bajo de la música → casi sin cruces (energía en frecuencias graves)
+            //   voz                              → banda media, la fundamental está entre 85 y 300 Hz
+            //   siseo, teclado, estática         → cruces por todos lados (contenido de banda ancha)
+            //
+            // A 16 kHz, la banda de la voz cae aproximadamente entre 0,005 y 0,25. Fuera de ahí es
+            // ruido, por fuerte que suene, y no tiene por qué abrir una captura.
+            var soundsLikeVoice = zeroCrossingRate is >= 0.005 and <= 0.25;
 
             // Un golpe en el escritorio o una puerta superan el umbral por un instante. La voz no:
             // se sostiene. Exigir energía continua durante 240 ms es lo que distingue una de otra
             // sin traer un detector entrenado, y es lo que evita que el ruido abra una captura.
-            if (rootMeanSquare >= threshold)
+            if (rootMeanSquare >= threshold && soundsLikeVoice)
             {
                 _voiceEnergy += bufferDuration;
                 if (_voiceEnergy >= TimeSpan.FromMilliseconds(240))

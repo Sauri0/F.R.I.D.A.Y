@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
+using Viernes.Core.Configuration;
 using Forms = System.Windows.Forms;
 
 namespace Viernes.App.Services;
@@ -15,7 +16,15 @@ internal sealed class TrayIconService : IDisposable
     private readonly Forms.ToolStripMenuItem _autoStartItem;
     private readonly Forms.ToolStripMenuItem _gotaItem;
     private readonly Forms.ToolStripMenuItem _nubeItem;
+    private readonly Forms.ToolStripMenuItem _exitItem;
     private readonly Icon _icon;
+
+    /// <summary>
+    /// El nombre elegido. Arranca en el de fábrica porque la bandeja se crea antes de leer el disco.
+    /// </summary>
+    private string _assistantName = AssistantIdentity.DefaultName;
+
+    private string _status = "disponible";
 
     public TrayIconService(
         Action toggleVisibility,
@@ -53,13 +62,13 @@ internal sealed class TrayIconService : IDisposable
             _listenWhileHiddenItem,
             _autoStartItem,
             new Forms.ToolStripSeparator(),
-            new Forms.ToolStripMenuItem("Salir de Viernes", null, (_, _) => exit())
+            _exitItem = new Forms.ToolStripMenuItem($"Salir de {_assistantName}", null, (_, _) => exit())
         ]);
 
         _notifyIcon = new Forms.NotifyIcon
         {
             Icon = _icon,
-            Text = "Viernes · disponible",
+            Text = $"{_assistantName} · disponible",
             Visible = true,
             ContextMenuStrip = menu
         };
@@ -100,10 +109,24 @@ internal sealed class TrayIconService : IDisposable
 
     public void SetAutoStart(bool enabled) => _autoStartItem.Checked = enabled;
 
+    /// <summary>Aplica el nombre elegido a los textos que lo mencionan.</summary>
+    public void SetAssistantName(string name)
+    {
+        _assistantName = AssistantIdentity.Normalize(name);
+        _exitItem.Text = $"Salir de {_assistantName}";
+        SetStatus(_status);
+    }
+
     public void SetStatus(string status)
     {
-        var text = $"Viernes · {status}";
-        _notifyIcon.Text = text.Length <= 63 ? text : text[..63];
+        _status = status;
+
+        // Windows corta el tooltip de la bandeja en 63 caracteres, y con un nombre largo el recorte
+        // se comía el estado —que es la única parte que cambia—. Se recorta el nombre, no el estado.
+        var suffix = $" · {status}";
+        var room = Math.Max(0, 63 - suffix.Length);
+        var name = _assistantName.Length <= room ? _assistantName : _assistantName[..room];
+        _notifyIcon.Text = $"{name}{suffix}";
     }
 
     public void ShowBalloon(string title, string message)

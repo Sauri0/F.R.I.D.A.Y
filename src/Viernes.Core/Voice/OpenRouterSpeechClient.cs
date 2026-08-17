@@ -55,8 +55,16 @@ public sealed class OpenRouterSpeechClient
     /// </summary>
     public async Task<SynthesizedSpeech?> SynthesizeAsync(string text, CancellationToken cancellationToken = default)
     {
+        // Este retorno temprano no dejaba motivo, y el host lo trazaba como «falló · sin motivo».
+        // Decir «no hay API key» en vez de nada es la diferencia entre mirar el entorno y salir a
+        // buscar un bug de red que no existe.
         if (!IsAvailable || string.IsNullOrWhiteSpace(text))
         {
+            LastFailure = !_speech.IsEnabled
+                ? "La voz neural está desactivada por configuración."
+                : !_options.HasApiKey
+                    ? "El proceso no tiene OPENROUTER_API_KEY en su entorno."
+                    : "No había texto para sintetizar.";
             return null;
         }
 

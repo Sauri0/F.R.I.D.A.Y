@@ -11,10 +11,26 @@ namespace Viernes.App.Services;
 /// <summary>Una fila de la burbuja: cuándo, qué, y una etiqueta corta opcional.</summary>
 internal sealed record BubbleListItem(string When, string What, string? Tag = null);
 
+/// <summary>
+/// Qué clase de lista es, porque no todas piden la misma forma.
+/// </summary>
+/// <remarks>
+/// Una agenda es una línea de tiempo: horizontal se lee de un vistazo y no crece, así que le alcanza
+/// una tira baja. Una memoria son registros con identificador, y eso pide fila completa. Son datos
+/// distintos y por eso llevan forma distinta — dar 176 px a una agenda de dos eventos deja un vacío
+/// que se lee como error.
+/// </remarks>
+internal enum BubbleListKind
+{
+    Agenda,
+    Memoria
+}
+
 internal sealed record LocalCommandOutcome(
     string Text,
     ToolExecutionResult? ToolResult = null,
-    IReadOnlyList<BubbleListItem>? Items = null);
+    IReadOnlyList<BubbleListItem>? Items = null,
+    BubbleListKind ListKind = BubbleListKind.Agenda);
 
 /// <summary>
 /// Small, deterministic command surface that remains useful without any cloud model.
@@ -253,7 +269,7 @@ internal sealed class LocalCommandRouter
 
         var observationState = review.IsObservationPaused ? "hábitos pausados" : "hábitos temporales activos";
         var summary = $"{review.TotalCount} dato{(review.TotalCount == 1 ? "" : "s")} · {observationState} · /olvidar ID para borrar";
-        return new LocalCommandOutcome(summary, Items: items);
+        return new LocalCommandOutcome(summary, Items: items, ListKind: BubbleListKind.Memoria);
     }
 
     private async Task<PersonalMemoryItem?> ResolveMemoryItemAsync(

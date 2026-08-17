@@ -3,8 +3,11 @@ using Viernes.App.Controls;
 using Viernes.App.Diagnostics;
 using Viernes.App.ViewModels;
 using Viernes.Core;
+using Viernes.Core.Awareness;
 using Viernes.Core.Configuration;
 using Viernes.Core.Conversation;
+using Viernes.Core.Mcp;
+using Viernes.Platform.Windows.Awareness;
 using Viernes.Core.Models;
 using Viernes.Core.Persistence;
 using Viernes.Core.Scheduling;
@@ -39,11 +42,32 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private static readonly System.Globalization.CultureInfo ArgentineCulture =
         System.Globalization.CultureInfo.GetCultureInfo("es-AR");
 
-    private readonly ViernesOptions _options;
+    /// <summary>
+    /// No es <c>readonly</c> porque al iniciar se rehace con el nombre que eligió el usuario, que
+    /// vive en las preferencias y todavía no está leído cuando corre el constructor.
+    /// </summary>
+    private ViernesOptions _options;
+
+    /// <summary>Cómo se llama el asistente en esta instalación.</summary>
+    private AssistantIdentity _identity = AssistantIdentity.Default;
+
+    /// <summary>Herramientas MCP ya conectadas, a la espera de que se arme el orquestador final.</summary>
+    private IReadOnlyList<IAssistantTool>? _mcpTools;
+
     private readonly HttpClient _httpClient;
-    private readonly ConversationOrchestrator _orchestrator;
+    /// <summary>
+    /// No es <c>readonly</c> porque se reconstruye una sola vez, al iniciar, si hay servidores MCP.
+    /// </summary>
+    /// <remarks>
+    /// El ejecutor de herramientas es inmutable a propósito —es el único punto donde se decide si
+    /// algo se ejecuta, y hacerlo mutable sería abrir la puerta a que se le agreguen capacidades en
+    /// caliente—. Como conectar servidores MCP es asincrónico y lento, y el constructor no puede
+    /// esperar, la única forma honesta de sumarlas es rehacer el orquestador entero en el arranque,
+    /// antes de que exista una conversación. Después de eso vuelve a ser fijo.
+    /// </remarks>
+    private ConversationOrchestrator _orchestrator;
     private readonly UsageLedger _usageLedger;
-    private readonly LocalCommandRouter _localCommands;
+    private LocalCommandRouter _localCommands;
     private readonly ISpeechService _speechSynthesizer;
     private readonly OpenRouterSpeechClient _neuralVoice;
     private readonly NeuralSpeechPlayer _neuralPlayer = new();
@@ -54,6 +78,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// respuesta y no hace falta repetir el nombre. Se cierra únicamente cuando el usuario lo dice.
     /// </summary>
     private bool _conversationActive;
+    private System.Diagnostics.Stopwatch? _captureClock;
+    private int _voiceTraced;
+    private int _microphoneTraced;
     private CancellationTokenSource? _conversationCancellation;
     private int _conversationLoopRunning;
 
@@ -66,8 +93,32 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// </summary>
     private static readonly string[] ClosingPhrases =
     [
-        "listo", "gracias", "chau", "nada más", "nada mas", "dejá", "deja", "ya está", "ya esta",
-        "terminamos", "cortá", "corta", "basta", "salí", "sali", "adiós", "adios"
+        "listo", "gracias", "chau", "nada mas", "deja", "ya esta",
+        "salí", "sali", "adios", "hasta luego", "nos vemos", "fin"
+    ];
+
+    /// <summary>
+    /// Órdenes inequívocas de callarse. Se reconocen aunque vengan en medio de una frase larga.
+    /// </summary>
+    /// <remarks>
+    /// La lista de arriba exige frases cortas, porque «gracias por todo esto que hiciste» no puede
+    /// cortar una conversación. Pero esa misma exigencia dejaba pasar «no, no, no, dejá de oír» —seis
+    /// palabras— que es exactamente cómo suena alguien pidiendo que pare. Estas no son ambiguas:
+    /// nadie dice «dejá de escuchar» en el medio de un pedido queriendo que siga.
+    /// </remarks>
+    private static readonly string[] StopCommands =
+    [
+        "deja de escuchar", "deja de escucharme", "deja de oir", "deja de oirme",
+        "no escuches mas", "dejate de escuchar", "basta de escuchar",
+        "callate", "silencio", "para ya", "pare", "basta", "suficiente",
+        "terminamos", "termina", "corta", "cortala", "apagate", "andate",
+        "cerra la conversacion", "olvidate", "dejalo ahi",
+        // Mandarla a dormir es la forma más natural de despedirla y no estaba contemplada. Van sin
+        // acento porque Normalize los pliega: «descansá» y «andá» llegan acá ya como «descansa» y
+        // «anda», así que una sola entrada cubre las dos formas de escribirlo.
+        "descansa", "descansa un rato", "tomate un descanso", "anda a dormir",
+        "andate a dormir", "a dormir", "dormi", "dormite", "a descansar",
+        "quedate tranquila", "quedate quieta", "chau por ahora", "hasta despues"
     ];
     private readonly JsonUserDataStore _dataStore = new();
     private readonly JsonPersonalMemoryStore _memory = new();
@@ -75,8 +126,19 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private readonly LocalSettingsStore _settingsStore = new();
     private readonly WakeWordRecognitionCoordinator _wakeCoordinator = new();
     private readonly SemaphoreSlim _voiceTransitionGate = new(1, 1);
+    private readonly SemaphoreSlim _speechGate = new(1, 1);
+    private Acknowledgements _acknowledgements = null!;
     private readonly object _confirmationGate = new();
 
+    private readonly WindowsPcActionExecutor _pcActions;
+
+    /// <summary>
+    /// Vive tanto como el runtime a propósito: su valor está en el historial que acumula, y uno
+    /// nuevo por turno no sabría por dónde anduviste.
+    /// </summary>
+    private readonly WindowsEnvironmentObserver _environment = new();
+    private DesktopSignals? _signals;
+    private McpToolProvider? _mcpProvider;
     private ISpeechRecognitionProvider? _recognition;
     private IWakeWordService? _wakeWord;
     private ViernesLocalSettings _settings = new();
@@ -106,12 +168,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _options = ViernesOptions.FromEnvironment();
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(75) };
         _usageLedger = ViernesCoreFactory.CreateUsageLedger(_options);
-        _orchestrator = ViernesCoreFactory.CreateDefault(
-            _httpClient,
-            _options,
-            _dataStore,
-            _usageLedger,
-            new WindowsPcActionExecutor());
+        _pcActions = new WindowsPcActionExecutor();
+        _orchestrator = BuildOrchestrator(extraTools: null);
         _localCommands = new LocalCommandRouter(_orchestrator, _memory);
         _reminderScheduler = new ReminderScheduler(_dataStore);
         _reminderScheduler.ReminderDue += ReminderSchedulerOnReminderDue;
@@ -119,6 +177,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _httpClient,
             _options,
             SpeechSynthesisOptions.FromEnvironment());
+        _acknowledgements = new Acknowledgements(_neuralVoice);
         _speechSynthesizer = new SpeechService(new SpeechServiceOptions
         {
             RecognitionCulture = "es-AR",
@@ -128,6 +187,75 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         _orchestrator.StateChanged += OrchestratorOnStateChanged;
         _orchestrator.ProgressChanged += OrchestratorOnProgressChanged;
+    }
+
+    private ConversationOrchestrator BuildOrchestrator(IReadOnlyList<IAssistantTool>? extraTools) =>
+        ViernesCoreFactory.CreateDefault(
+            _httpClient,
+            _options,
+            _dataStore,
+            _usageLedger,
+            _pcActions,
+            actionMemory: null,
+            extraTools,
+            _environment);
+
+    /// <summary>
+    /// Levanta los servidores MCP declarados y rehace el orquestador para que sus herramientas
+    /// existan desde el primer pedido. Sin servidores declarados no hace absolutamente nada.
+    /// </summary>
+    private async Task ConnectMcpServersAsync(CancellationToken cancellationToken)
+    {
+        var servers = await McpToolProvider.LoadAsync(cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        if (servers.Count == 0)
+        {
+            return;
+        }
+
+        var provider = new McpToolProvider();
+        var tools = await provider
+            .ConnectAsync(servers, _options.ConfirmActions, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Un servidor que no levanta se informa y no impide arrancar: quedarse sin asistente porque
+        // falta un ejecutable de terceros sería peor que quedarse sin esa capacidad.
+        foreach (var failure in provider.Failures)
+        {
+            RuntimeTrace.Write("mcp.fallo", failure);
+        }
+
+        if (tools.Count == 0)
+        {
+            await provider.DisposeAsync().ConfigureAwait(false);
+            return;
+        }
+
+        _mcpProvider = provider;
+        _mcpTools = tools;
+
+        RuntimeTrace.Write(
+            "mcp.listo",
+            $"servidores={servers.Count(server => server.Enabled)} · herramientas={tools.Count}");
+    }
+
+    /// <summary>
+    /// Rehace el orquestador conservando las suscripciones, para que cambie el prompt y no el resto.
+    /// </summary>
+    /// <remarks>
+    /// Se llama una sola vez, al arrancar, cuando ya se sabe el nombre elegido y qué herramientas MCP
+    /// levantaron. Antes había dos lugares que rehacían el orquestador a mano y cada uno tenía que
+    /// acordarse de desenganchar y volver a enganchar los dos eventos; olvidarse de uno dejaba al
+    /// orbe congelado en el último estado que alcanzó a ver.
+    /// </remarks>
+    private void RebuildOrchestrator(IReadOnlyList<IAssistantTool>? extraTools)
+    {
+        _orchestrator.StateChanged -= OrchestratorOnStateChanged;
+        _orchestrator.ProgressChanged -= OrchestratorOnProgressChanged;
+        _orchestrator = BuildOrchestrator(extraTools);
+        _orchestrator.StateChanged += OrchestratorOnStateChanged;
+        _orchestrator.ProgressChanged += OrchestratorOnProgressChanged;
+        _localCommands = new LocalCommandRouter(_orchestrator, _memory);
     }
 
     public event EventHandler<AssistantRuntimeUpdate>? Updated;
@@ -150,6 +278,12 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     }
 
     public bool IsCloudConfigured => _options.HasApiKey;
+
+    /// <summary>
+    /// Hay autorización de gasto para hoy. Vive en memoria y muere con el proceso, a propósito:
+    /// esa fragilidad <em>es</em> la garantía, y persistirla sería quitar la única fricción real.
+    /// </summary>
+    public bool HasSpendAuthorization => _budgetOverrideDay == DateOnly.FromDateTime(DateTime.Now);
 
     public bool IsWakeWordEnabled => _isWakeWordEnabled;
 
@@ -178,6 +312,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     public string RecognitionProviderName => _recognitionProviderName;
 
+    /// <summary>Cómo se llama el asistente en esta instalación.</summary>
+    public string AssistantName => _identity.Name;
+
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -186,8 +323,19 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return;
         }
 
+        // Las preferencias primero, porque de ahí sale el nombre del asistente y el nombre entra en
+        // la primera línea del prompt del sistema. Si esto se leyera después de armar el orquestador,
+        // el asistente se presentaría con el nombre de fábrica durante toda la sesión.
         var loaded = await _settingsStore.LoadAsync(cancellationToken).ConfigureAwait(false);
         _settings = loaded.Settings;
+        _identity = new AssistantIdentity(_settings.AssistantName);
+        _options = ViernesOptions.FromEnvironment(assistantName: _identity.Name);
+
+        // Antes de que exista una conversación: acá el orquestador todavía se puede rehacer sin que
+        // nadie pierda historial ni quede a mitad de un turno.
+        await ConnectMcpServersAsync(cancellationToken).ConfigureAwait(false);
+        RebuildOrchestrator(_mcpTools);
+
         _isMuted = _settings.MicrophoneMuted;
         _isWakeWordEnabled = ResolveWakeEnabled(_settings.VoiceActivation);
         _listenWhileHidden = ResolveListenWhileHidden(_settings.ListenWhileHidden);
@@ -203,7 +351,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         _wakeWord = new SapiWakeWordService(new WakeWordServiceOptions
         {
-            Phrases = ResolveWakePhrases(_settings.WakeWordPhrases),
+            Phrases = ResolveWakePhrases(_settings.EffectiveWakePhrases),
             RecognitionCulture = _settings.RecognitionCulture,
             MinimumConfidence = ResolveWakeConfidence()
         });
@@ -223,6 +371,17 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 _isWakeWordEnabled = false;
             }
         }
+
+        // Se graban al arrancar, cuando nadie está esperando. Pedirlos en el primer turno sería
+        // pagar la espera que vinieron a evitar, justo la primera vez.
+        _acknowledgements.Warm();
+
+        // Proactividad: mira el escritorio de fondo y sólo habla si algo lo amerita de verdad.
+        _signals = new DesktopSignals(
+            new SalienceGate(),
+            _environment.IdleTime,
+            _environment.ForegroundTitle,
+            OnObservation);
 
         _isInitialized = true;
         _reminderScheduler.Start();
@@ -244,11 +403,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 ? $"wake demo activo · decí “{_wakeWord.Phrases[0]}”"
                 : "PTT disponible";
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            IsCloudConfigured ? AssistantVisualState.Idle : AssistantVisualState.Unconfigured,
             $"{providerStatus} · {wakeStatus}",
+            // Primero el hecho, después lo que igual funciona. Sin mayúsculas y sin sonar a falla:
+            // que falte la clave no es un error, es una instalación sin terminar.
             IsCloudConfigured
                 ? "Lista para ayudarte."
-                : "Modo local seguro; OpenRouter permanece desconectado.",
+                : "Falta la clave de OpenRouter. Andan recordatorios, agenda y memoria; " +
+                  "lo que necesita el modelo queda esperando.",
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: _isWakeWordEnabled));
     }
@@ -336,12 +498,15 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return result.Text;
         }
 
+        // Capacidad reducida y error no comparten dibujo: gris dice «menos», rojo dice «falló».
         var state = result.State == AssistantState.Error
             ? AssistantVisualState.Error
-            : AssistantVisualState.Idle;
+            : result.IsLocalMode
+                ? AssistantVisualState.Unconfigured
+                : AssistantVisualState.Idle;
         Publish(new AssistantRuntimeUpdate(
             state,
-            result.IsLocalMode ? "Modo local · no se enviaron datos" : "Listo",
+            result.IsLocalMode ? "Sigo con lo de acá · no salió nada del equipo" : "Listo",
             result.Text,
             ClearConfirmation: true));
 
@@ -384,7 +549,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 ClearConfirmation: true,
                 ClearSteps: true,
                 Items: outcome.Items,
-                ClearItems: outcome.Items is null));
+                ClearItems: outcome.Items is null,
+                ListKind: outcome.ListKind));
         }
 
         await SpeakIfEnabledAsync(outcome.Text, cancellationToken).ConfigureAwait(false);
@@ -561,7 +727,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         Publish(new AssistantRuntimeUpdate(
             AssistantVisualState.Idle,
             _isWakeWordEnabled
-                ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                 : "Wake desactivado · PTT disponible",
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: _isWakeWordEnabled));
@@ -591,7 +757,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             Publish(new AssistantRuntimeUpdate(
                 AssistantVisualState.Idle,
                 _listenWhileHidden && _isWakeWordEnabled && !IsMuted
-                    ? $"Oculto y atento · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                    ? $"Oculto y atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                     : "Widget oculto · escucha detenida",
                 MicrophoneActive: IsAnyMicrophoneActive(),
                 WakeWordEnabled: _isWakeWordEnabled));
@@ -602,7 +768,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         Publish(new AssistantRuntimeUpdate(
             AssistantVisualState.Idle,
             _isWakeWordEnabled && !IsMuted
-                ? $"Atento · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                ? $"Atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                 : "Disponible · PTT activo",
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: _isWakeWordEnabled));
@@ -697,6 +863,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
+    /// <summary>
+    /// Una sola voz por vez, siempre.
+    /// </summary>
+    /// <remarks>
+    /// Sin esta cola, dos respuestas que se generan casi juntas —la respuesta del turno y la pregunta
+    /// de confirmación, por ejemplo— se pisaban: en el registro quedaban dos <c>voz.inicio</c> sin
+    /// que ninguna hubiera terminado, y una de ellas seguía sonando <em>durante</em> la captura
+    /// siguiente. Con el micrófono abierto y Viernes hablando, el resultado es que se escucha a sí
+    /// misma y reacciona sola. Serializar acá es lo que vuelve imposible ese solapamiento.
+    /// </remarks>
     private async Task SpeakIfEnabledAsync(string text, CancellationToken cancellationToken)
     {
         if (IsMuted || string.IsNullOrWhiteSpace(text))
@@ -704,6 +880,84 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return;
         }
 
+        await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SpeakCoreAsync(text, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _speechGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Manda el turno y, si tarda, mete un acuse corto para que no haya silencio.
+    /// </summary>
+    /// <remarks>
+    /// El acuse se decide por carrera, no por regla: si la respuesta llega antes del umbral no suena
+    /// nada. Un «mhm» delante de una respuesta instantánea sobra y molesta; delante de una que tarda
+    /// cuatro segundos es la diferencia entre una charla y un formulario.
+    /// <para>
+    /// El umbral es de medio segundo porque por debajo de eso el silencio todavía se lee como el
+    /// tiempo natural de tomar aire, y no como que el aparato se colgó.
+    /// </para>
+    /// </remarks>
+    private async Task SendWithAcknowledgementAsync(string transcript, CancellationToken cancellationToken)
+    {
+        var sending = SendAsync(transcript, spoken: true, cancellationToken);
+        var finishedFirst = await Task.WhenAny(
+            sending,
+            Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken)).ConfigureAwait(false);
+
+        if (finishedFirst != sending && !IsMuted)
+        {
+            RuntimeTrace.Write("acuse", "la respuesta tardó más de 500 ms");
+            await PlayAcknowledgementAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await sending.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Suena desde memoria y pasa por la misma cola que el resto de la voz: si el acuse y la
+    /// respuesta se solaparan, el remedio sería peor que la espera que vinieron a tapar.
+    /// </summary>
+    private async Task PlayAcknowledgementAsync(CancellationToken cancellationToken)
+    {
+        var audio = _acknowledgements.Next();
+        if (audio is null)
+        {
+            return;
+        }
+
+        await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _neuralPlayer.PlayAsync(audio.Pcm, audio.SampleRate, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Un acuse que no suena no puede romper el turno que vino a acompañar.
+        }
+        finally
+        {
+            _speechGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Espera a que no quede voz sonando ni encolada. Es una espera, no una reserva: sólo toma la
+    /// cola para comprobar que está libre y la suelta enseguida.
+    /// </summary>
+    private async Task WaitUntilQuietAsync(CancellationToken cancellationToken)
+    {
+        await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _speechGate.Release();
+    }
+
+    private async Task SpeakCoreAsync(string text, CancellationToken cancellationToken)
+    {
         var spokenText = text.Length <= MaximumSpokenCharacters
             ? text
             : text[..MaximumSpokenCharacters] + "…";
@@ -739,6 +993,82 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             spoke || token.IsCancellationRequested
                 ? _conversationActive ? "En conversación · decime «listo» para cortar" : "Disponible"
                 : $"Sin voz: {neuralFailure ?? "no se pudo reproducir el audio"}"));
+    }
+
+    /// <summary>
+    /// Algo que Viernes notó y que el filtro consideró digno de contarte.
+    /// </summary>
+    /// <remarks>
+    /// No interrumpe una conversación en curso ni habla con el micrófono silenciado: si ya te tiene
+    /// atención, el aviso puede esperar al final; y si te silenciaste, es porque no querés que hable.
+    /// Cuando el orbe está oculto entra por el globo de la bandeja, que es la forma de avisar que no
+    /// te tapa lo que estás haciendo.
+    /// </remarks>
+    private void OnObservation(Observation observation)
+    {
+        if (_isDisposed || IsMuted || _conversationActive)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("proactivo", $"{observation.Key} · {observation.Message}");
+
+        RequestActivation(new ShellActivationRequest(
+            ShellActivationReason.Reminder,
+            "Viernes",
+            observation.Message));
+
+        _ = SpeakIfEnabledAsync(observation.Message, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Freno de emergencia: corta todo lo que Viernes esté haciendo, ya.
+    /// </summary>
+    /// <remarks>
+    /// No pasa por el modelo, ni por la política, ni por la conversación. Desde que mueve el cursor
+    /// y escribe con el teclado, pedirle que pare <em>hablando</em> dejó de ser suficiente: si está
+    /// tecleando en otra ventana, tu voz compite con su propia acción, y si algo salió mal lo último
+    /// que querés es negociar con el sistema que se descontroló. Silencia además el micrófono, que
+    /// es el corte duro: preferible pasarse de frenar que quedarse corto.
+    /// </remarks>
+    public void Panic()
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("panico", "corte de emergencia por atajo global");
+
+        _speechCancellation?.Cancel();
+        _neuralPlayer.Stop();
+        _conversationCancellation?.Cancel();
+        _wakeHandoffCancellation?.Cancel();
+        _conversationActive = false;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+                if (_recognition?.IsMicrophoneActive == true)
+                {
+                    await _recognition.CancelPushToTalkAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                // Frenar nunca puede fallar de forma ruidosa.
+            }
+        });
+
+        IsMuted = true;
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Idle,
+            "Frenado en seco · micrófono silenciado",
+            $"Corté todo con {PanicSwitch.Shortcut}. Reactivame desde la bandeja.",
+            MicrophoneActive: false,
+            WakeWordEnabled: false));
     }
 
     /// <summary>
@@ -917,7 +1247,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 isMuted
                     ? "Voz silenciada · micrófono apagado"
                     : _isWakeWordEnabled
-                        ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                        ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                         : "Voz activa · PTT disponible",
                 MicrophoneActive: IsAnyMicrophoneActive(),
                 WakeWordEnabled: _isWakeWordEnabled));
@@ -1091,6 +1421,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     break;
                 }
 
+                // No abrir el micrófono mientras quede una sola palabra por decir.
+                //
+                // La cola de voz impide que dos respuestas suenen juntas, pero no impedía que la
+                // captura arrancara encima de una que todavía estaba sonando: en el registro se veía
+                // «voz.inicio» y «captura.inicio» en el mismo milisegundo, y la voz terminando dos
+                // segundos después con el micrófono ya abierto. Ahí Viernes se oye a sí misma,
+                // transcribe su propia respuesta y contesta sola — eso es el «me escucha de la nada».
+                // Esperar la cola acá lo vuelve imposible, sin importar quién haya encolado la voz.
+                await WaitUntilQuietAsync(cancellationToken).ConfigureAwait(false);
+
                 Publish(new AssistantRuntimeUpdate(
                     AssistantVisualState.Listening,
                     "Te escucho · decime «listo» para cortar",
@@ -1098,6 +1438,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 RuntimeTrace.Write("captura.inicio");
                 var clock = System.Diagnostics.Stopwatch.StartNew();
+
+                // Sin estas marcas, «tarda en reconocer que hablé» y «tarda en contestar» dejan la
+                // misma huella en el trace: un único número al final. Partirlo en abrir el
+                // micrófono, oír voz y cortar es lo que distingue un problema del otro.
+                _captureClock = clock;
+                Interlocked.Exchange(ref _voiceTraced, 0);
+                Interlocked.Exchange(ref _microphoneTraced, 0);
                 // Ritmo de charla, no de dictado: corta 600 ms después de que dejás de hablar y
                 // no se queda veinte segundos mirándote si no decís nada. La duración máxima
                 // siempre tiene que superar a la ventana inicial o la validación tira.
@@ -1106,11 +1453,26 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                         // La ventana es larga a propósito: dentro de una conversación el corte lo
                         // decide que hayas hablado y terminado, no un cronómetro. Si vence sin voz,
                         // el bucle vuelve a abrir enseguida, así que la escucha no se interrumpe.
+                        // El techo importa más de lo que parece: cada segundo capturado es un segundo
+                        // que Whisper después tiene que transcribir. Con 30 s de tope, una captura que
+                        // no cortaba bien se volvía medio minuto de audio y casi otro tanto de espera.
+                        // Quince alcanzan de sobra para una frase, y el bucle reabre al instante.
+                        // Los dos silencios miden cosas distintas y por eso no valen lo mismo.
+                        // EndSilence es «¿terminaste de hablar?»: a 600 ms cualquier pausa para
+                        // buscar la palabra se leía como punto final y contestaba sobre media idea.
+                        // Segundo y medio deja pensar sin que la respuesta se sienta demorada; cada
+                        // milisegundo de acá se paga en la espera de todos los turnos. InitialSilence
+                        // es otra cosa —«no dijiste nada»— y ahí no hay nada que esperar: vence y el
+                        // bucle reabre enseguida.
                         new SingleUtteranceRecognitionOptions
                         {
-                            InitialSilenceTimeout = TimeSpan.FromSeconds(20),
-                            EndSilenceTimeout = TimeSpan.FromMilliseconds(600),
-                            MaximumDuration = TimeSpan.FromSeconds(30)
+                            InitialSilenceTimeout = TimeSpan.FromSeconds(10),
+                            EndSilenceTimeout = TimeSpan.FromMilliseconds(1000),
+                            // Doce y no veinte: el techo no es cuánto te dejo hablar, es cuánto
+                            // audio le doy después a Whisper. Una captura de veinte segundos costó
+                            // veintinueve transcribiéndola. Una frase de conversación no llega ni
+                            // cerca, y si llega, el bucle reabre y seguís.
+                            MaximumDuration = TimeSpan.FromSeconds(12)
                         },
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -1150,12 +1512,22 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 var transcript = capture.Text?.Trim();
                 if (string.IsNullOrWhiteSpace(transcript))
                 {
-                    // El silencio no cierra nada: sigue esperando, que es lo que se le pidió. Pero
-                    // tampoco se queda mudo: a los tres silencios seguidos pregunta, como haría
-                    // cualquiera al que dejaste hablando solo.
-                    if (++consecutiveSilences == 3)
+                    // El silencio no cierra de entrada: sigue esperando, que es lo que se le pidió.
+                    // Pero pregunta una sola vez, y si tampoco hay respuesta se despide en vez de
+                    // quedarse preguntando para siempre con el micrófono abierto.
+                    consecutiveSilences++;
+                    if (consecutiveSilences == 3)
                     {
                         await SpeakIfEnabledAsync("¿Seguís ahí?", cancellationToken).ConfigureAwait(false);
+                    }
+                    else if (consecutiveSilences >= 6)
+                    {
+                        await SpeakIfEnabledAsync("Cualquier cosa me avisás.", CancellationToken.None)
+                            .ConfigureAwait(false);
+                        await EndConversationAsync("Cerré por silencio", CancellationToken.None)
+                            .ConfigureAwait(false);
+                        await LearnFromConversationAsync().ConfigureAwait(false);
+                        return;
                     }
 
                     Publish(new AssistantRuntimeUpdate(
@@ -1167,9 +1539,27 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 consecutiveSilences = 0;
 
+                // Confirmar por voz. Sin esto, cualquier acción que pida permiso queda muerta en una
+                // conversación hablada: el botón vive en la burbuja, y la burbuja está oculta.
+                if (HasPendingConfirmation)
+                {
+                    if (IsAffirmative(transcript))
+                    {
+                        await ConfirmPendingAsync(cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (IsNegative(transcript))
+                    {
+                        DismissPending();
+                        await SpeakIfEnabledAsync("Listo, no lo hago.", cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                }
+
                 if (IsClosingPhrase(transcript))
                 {
-                    await SpeakIfEnabledAsync("Listo. Llamame cuando quieras.", CancellationToken.None)
+                    await SpeakIfEnabledAsync("Cualquier cosa me avisás.", CancellationToken.None)
                         .ConfigureAwait(false);
                     await EndConversationAsync("Conversación cerrada", CancellationToken.None).ConfigureAwait(false);
                     await LearnFromConversationAsync().ConfigureAwait(false);
@@ -1178,7 +1568,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 _conversationTurns.Add(transcript);
 
-                await SendAsync(transcript, spoken: true, cancellationToken).ConfigureAwait(false);
+                await SendWithAcknowledgementAsync(transcript, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1202,29 +1592,118 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
+    private bool HasPendingConfirmation
+    {
+        get
+        {
+            lock (_confirmationGate)
+            {
+                return _pendingConfirmation is not null;
+            }
+        }
+    }
+
+    private static readonly string[] Affirmatives =
+        ["si", "sí", "dale", "hacelo", "hazlo", "confirmo", "confirmá", "confirma", "obvio", "por favor", "ok", "okey", "correcto"];
+
+    private static readonly string[] Negatives =
+        ["no", "cancelá", "cancela", "cancelalo", "mejor no", "dejalo", "olvidalo", "nada"];
+
+    internal static bool IsAffirmative(string text) => MatchesShortPhrase(text, Affirmatives);
+
+    internal static bool IsNegative(string text) => MatchesShortPhrase(text, Negatives);
+
+    /// <summary>
+    /// Una confirmación es corta por naturaleza. Exigir brevedad evita que «no me acuerdo si dale»
+    /// dentro de una frase larga dispare una acción que el usuario no pidió.
+    /// </summary>
+    private static bool MatchesShortPhrase(string text, string[] phrases)
+    {
+        var normalized = Normalize(text);
+        if (normalized.Length == 0 || normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 3)
+        {
+            return false;
+        }
+
+        return phrases.Any(phrase =>
+            normalized.Equals(phrase, StringComparison.Ordinal) ||
+            normalized.StartsWith(phrase + " ", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Minúsculas, sin puntuación y <b>sin acentos</b>.
+    /// </summary>
+    /// <remarks>
+    /// Lo de los acentos no es cosmético: el usuario dijo «dejá de oír» y la frase no cerró nada
+    /// porque la lista tenía «oir» y el transcriptor escribió «oír». Whisper acentúa según le
+    /// parece —«recordame» o «recórdame», «deja» o «dejá»— así que comparar con acentos es comparar
+    /// contra una moneda al aire. Plegarlos elimina la clase entera de fallo.
+    /// </remarks>
+    private static string Normalize(string text)
+    {
+        var stripped = new string(text
+            .ToLowerInvariant()
+            .Where(character => !char.IsPunctuation(character))
+            .ToArray())
+            .Replace("viernes", string.Empty, StringComparison.Ordinal)
+            .Normalize(System.Text.NormalizationForm.FormD);
+
+        var builder = new System.Text.StringBuilder(stripped.Length);
+        foreach (var character in stripped)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character)
+                != System.Globalization.UnicodeCategory.NonSpacingMark)
+            {
+                builder.Append(character);
+            }
+        }
+
+        // Los «no, no, no» del habla real dejan espacios dobles al caer la puntuación.
+        return string.Join(
+            ' ',
+            builder.ToString()
+                .Normalize(System.Text.NormalizationForm.FormC)
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
     /// <summary>
     /// Sólo cierra si la frase es corta y es esencialmente la despedida: «gracias por todo esto que
     /// hiciste» no debería cortar una conversación.
     /// </summary>
     internal static bool IsClosingPhrase(string text)
     {
-        var normalized = new string(text
-            .ToLowerInvariant()
-            .Where(character => !char.IsPunctuation(character))
-            .ToArray())
-            .Replace("viernes", string.Empty, StringComparison.Ordinal)
-            .Trim();
-
-        if (normalized.Length == 0 || normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 3)
+        var normalized = Normalize(text);
+        if (normalized.Length == 0)
         {
             return false;
         }
 
-        return ClosingPhrases.Any(phrase =>
-            normalized.Equals(phrase, StringComparison.Ordinal) ||
-            normalized.StartsWith(phrase + " ", StringComparison.Ordinal) ||
-            normalized.EndsWith(" " + phrase, StringComparison.Ordinal));
+        // Una orden explícita corta en cualquier posición y a cualquier largo: «no, no, no, dejá de
+        // oír» tiene seis palabras y es tan clara como la de dos.
+        if (StopCommands.Any(command => ContainsWholePhrase(normalized, command)))
+        {
+            return true;
+        }
+
+        // Las despedidas ambiguas sí piden brevedad: «gracias» sola cierra, «gracias por todo esto
+        // que hiciste» no.
+        if (normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 4)
+        {
+            return false;
+        }
+
+        return ClosingPhrases.Any(phrase => ContainsWholePhrase(normalized, phrase));
     }
+
+    /// <summary>
+    /// Coincidencia por palabras completas: sin esto «para» encontraría a «parece» y «fin» a
+    /// «finalmente», y una charla se cortaría sola a mitad de una frase cualquiera.
+    /// </summary>
+    private static bool ContainsWholePhrase(string normalized, string phrase) =>
+        normalized.Equals(phrase, StringComparison.Ordinal) ||
+        normalized.StartsWith(phrase + " ", StringComparison.Ordinal) ||
+        normalized.EndsWith(" " + phrase, StringComparison.Ordinal) ||
+        normalized.Contains(" " + phrase + " ", StringComparison.Ordinal);
 
     /// <summary>
     /// Al cerrar una charla, destila a lo sumo dos hechos duraderos sobre el usuario y los guarda
@@ -1244,7 +1723,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _conversationTurns.Clear();
         }
 
-        if (turns.Count < 2 || !IsCloudConfigured)
+        // Un turno alcanza. Exigir dos daba por sentado que las charlas son largas, y no lo son: en
+        // el registro real casi todas cerraron con cero o un turno, así que la destilación no corrió
+        // nunca y el archivo de memoria personal jamás llegó a existir. Una charla de un solo pedido
+        // también dice algo sobre cómo trabaja el usuario.
+        if (turns.Count < 1 || !IsCloudConfigured)
         {
             RuntimeTrace.Write("memoria.omitida", $"turnos={turns.Count} nube={IsCloudConfigured}");
             return;
@@ -1314,7 +1797,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         RequestActivation(new ShellActivationRequest(
             ShellActivationReason.Reminder,
-            "Recordatorio de Viernes",
+            $"Recordatorio de {_identity.Name}",
             detail));
 
         try
@@ -1463,7 +1946,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             VoiceActivation = _isWakeWordEnabled
                 ? VoiceActivationMode.LocalWakeWord
                 : VoiceActivationMode.PushToTalk,
-            WakeWordPhrases = _wakeWord?.Phrases.ToArray() ?? _settings.WakeWordPhrases,
+            // Las frases NO se vuelven a escribir. Las que tiene el servicio de activación pueden
+            // venir derivadas del nombre o de VIERNES_WAKE_PHRASES, y persistir cualquiera de las dos
+            // las congelaría: renombrar el asistente dejaría «Hola Viernes» escrito en el archivo y
+            // seguiría despertando con el nombre viejo. Sólo se guardan si alguien las eligió a mano.
             ListenWhileHidden = _listenWhileHidden,
             OrbShape = OrbShape.ToString(),
             PreferredRecognitionProvider = _recognition?.Info.Kind ?? _settings.PreferredRecognitionProvider
@@ -1530,7 +2016,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// </summary>
     private static float ResolveWakeConfidence()
     {
-        const float fallback = 0.55f;
+        // Medido en este equipo, las detecciones reales de «Viernes» dieron entre 0,62 y 0,68. Con
+        // el umbral en 0,55 sobraba margen por debajo, y ahí entraban frases que no eran el nombre:
+        // se abría una conversación sin que nadie la hubiera llamado. Sesenta corta ese margen sin
+        // tocar el piso de lo que sí se detectó.
+        const float fallback = 0.60f;
         var configured = Environment.GetEnvironmentVariable("VIERNES_WAKE_CONFIDENCE");
         return float.TryParse(
             configured,
@@ -1582,11 +2072,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// Reenvía el nivel del micrófono a la interfaz sin pasar por el estado: llega decenas de veces
     /// por segundo y tiene que mover la forma, no reescribir la burbuja.
     /// </summary>
-    private void RecognitionOnAudioLevel(object? sender, AudioLevelEventArgs e) =>
+    private void RecognitionOnAudioLevel(object? sender, AudioLevelEventArgs e)
+    {
+        // Una sola línea por captura: esto corre decenas de veces por segundo y trazar cada llamada
+        // convertiría el registro en ruido y el diagnóstico en imposible.
+        if (e.IsVoice && Interlocked.Exchange(ref _voiceTraced, 1) == 0)
+        {
+            RuntimeTrace.Write("voz.detectada", $"a los {_captureClock?.ElapsedMilliseconds ?? -1} ms");
+        }
+
         Updated?.Invoke(this, new AssistantRuntimeUpdate(
             _lastVisualState,
             CurrentStateLabel(_lastVisualState),
             AudioLevel: e.Level));
+    }
 
     private void SubscribeRecognition(ISpeechRecognitionProvider recognition)
     {
@@ -1606,6 +2105,24 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private void RecognitionOnMicrophoneActivityChanged(object? sender, MicrophoneActivityChangedEventArgs e)
     {
+        if (e.IsActive && Interlocked.Exchange(ref _microphoneTraced, 1) == 0)
+        {
+            RuntimeTrace.Write("mic.abierto", $"a los {_captureClock?.ElapsedMilliseconds ?? -1} ms");
+        }
+
+        // Dentro de una conversación, que el micrófono se cierre significa «terminaste de hablar»,
+        // no «no pasa nada». Caer al reposo un instante antes de que empiece a pensar producía el
+        // parpadeo al estado de reposo entre escuchar y pensar: la forma decía que se había ido.
+        if (!e.IsActive && _conversationActive)
+        {
+            Publish(new AssistantRuntimeUpdate(
+                AssistantVisualState.Thinking,
+                "Pensando…",
+                MicrophoneActive: IsAnyMicrophoneActive(),
+                WakeWordEnabled: _isWakeWordEnabled));
+            return;
+        }
+
         var state = e.IsActive
             ? AssistantVisualState.Listening
             : _lastVisualState == AssistantVisualState.Listening
@@ -1642,7 +2159,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         Publish(new AssistantRuntimeUpdate(
             _lastVisualState,
             e.IsActive && _isWakeWordEnabled
-                ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? "Viernes"}”"
+                ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                 : _lastVisualState == AssistantVisualState.Idle
                     ? "Micrófono de activación apagado"
                     : CurrentStateLabel(_lastVisualState),
@@ -1733,6 +2250,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _orchestrator.ProgressChanged -= OrchestratorOnProgressChanged;
         _reminderScheduler.ReminderDue -= ReminderSchedulerOnReminderDue;
         await _reminderScheduler.DisposeAsync().ConfigureAwait(false);
+
+        _signals?.Dispose();
+        _environment.Dispose();
+
+        // Los servidores MCP son procesos hijos: si no se cierran, quedan vivos después de salir.
+        if (_mcpProvider is not null)
+        {
+            await _mcpProvider.DisposeAsync().ConfigureAwait(false);
+            _mcpProvider = null;
+        }
 
         if (_wakeWord is not null)
         {

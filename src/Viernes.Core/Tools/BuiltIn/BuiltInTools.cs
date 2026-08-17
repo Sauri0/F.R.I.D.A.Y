@@ -11,7 +11,11 @@ public static class BuiltInTools
     public static IReadOnlyList<IAssistantTool> Create(
         IUserDataStore dataStore,
         IPcActionExecutor? pcActions = null,
-        bool providerWebSearch = false)
+        bool providerWebSearch = false,
+        bool confirmActions = false,
+        Awareness.IEnvironmentObserver? environment = null,
+        Learning.RuleBook? rules = null,
+        Goals.GoalBook? goals = null)
     {
         ArgumentNullException.ThrowIfNull(dataStore);
         return Array.AsReadOnly<IAssistantTool>(
@@ -21,7 +25,12 @@ public static class BuiltInTools
             new AgendaCreateTool(dataStore),
             new AgendaListTool(dataStore),
             new WebSearchTool(providerWebSearch),
-            new PcActionTool(pcActions)
+            new PcActionTool(pcActions, confirmActions),
+            new SituationTool(environment),
+            new TeachTool(rules ?? new Learning.RuleBook()),
+            new GoalTool(goals ?? new Goals.GoalBook()),
+            new FileSystemTool(),
+            new ShellTool()
         ]);
     }
 }

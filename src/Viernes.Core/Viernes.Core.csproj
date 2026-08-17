@@ -10,4 +10,15 @@
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!--
+      Cliente MCP oficial de C#, mantenido junto con Microsoft. Es lo que convierte a Viernes de
+      «hace las diez cosas que alguien le programó» a «hace lo que traiga cada servidor que le
+      conectes». No aporta modelo: el modelo sigue siendo el de OpenRouter, y MCP sólo entrega
+      definiciones de herramientas y ejecuta las llamadas.
+      Se usa .Core y no el paquete completo porque acá sólo hace falta el lado cliente.
+    -->
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.2.0" />
+  </ItemGroup>
+
 </Project>
