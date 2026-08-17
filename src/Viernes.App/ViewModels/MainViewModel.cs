@@ -305,11 +305,25 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public Task SetShellVisibilityAsync(bool visible, CancellationToken cancellationToken) =>
         _runtime.SetShellVisibilityAsync(visible, cancellationToken);
 
+    /// <summary>
+    /// Tocar el orbe abre el panel y, además, la conversación: a partir de ahí no hay que repetir
+    /// el nombre. Tocarlo de nuevo la cierra, que es el gesto inverso.
+    /// </summary>
     public void OpenTextInput()
     {
         IsExpanded = true;
+
+        if (_runtime.IsConversationActive)
+        {
+            MessageText = "Listo.";
+            StatusText = "Conversación cerrada";
+            _ = _runtime.EndConversationAsync("Conversación cerrada", CancellationToken.None);
+            return;
+        }
+
         MessageText = "¿Qué necesitás?";
-        StatusText = "Escribí y presioná Enter";
+        StatusText = "Te escucho · escribí, o hablá y decime «listo» para cortar";
+        _ = _runtime.StartConversationAsync(CancellationToken.None);
     }
 
     private bool CanSend() => !string.IsNullOrWhiteSpace(InputText) && State is not AssistantVisualState.Thinking;

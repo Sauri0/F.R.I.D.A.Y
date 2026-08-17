@@ -47,6 +47,24 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private readonly OpenRouterSpeechClient _neuralVoice;
     private readonly NeuralSpeechPlayer _neuralPlayer = new();
     private CancellationTokenSource? _speechCancellation;
+
+    /// <summary>
+    /// Conversación abierta: mientras dure, el micrófono vuelve a abrirse solo después de cada
+    /// respuesta y no hace falta repetir el nombre. Se cierra únicamente cuando el usuario lo dice.
+    /// </summary>
+    private bool _conversationActive;
+    private CancellationTokenSource? _conversationCancellation;
+    private int _conversationLoopRunning;
+
+    /// <summary>
+    /// Frases de cierre. Es el inverso del wake word: la palabra que lo despide. Sin esto, un
+    /// asistente que no deja de escuchar es un micrófono abierto sin salida.
+    /// </summary>
+    private static readonly string[] ClosingPhrases =
+    [
+        "listo", "gracias", "chau", "nada más", "nada mas", "dejá", "deja", "ya está", "ya esta",
+        "terminamos", "cortá", "corta", "basta", "salí", "sali", "adiós", "adios"
+    ];
     private readonly JsonUserDataStore _dataStore = new();
     private readonly ReminderScheduler _reminderScheduler;
     private readonly LocalSettingsStore _settingsStore = new();
@@ -131,6 +149,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     public bool IsWakeWordEnabled => _isWakeWordEnabled;
 
     public bool IsListeningWhileHidden => _listenWhileHidden;
+
+    public bool IsConversationActive => _conversationActive;
 
     public OrbShape OrbShape { get; private set; } = OrbShape.Gota;
 
@@ -240,8 +260,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
             _speechCancellation?.Cancel();
-        _neuralPlayer.Stop();
-        await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
+            _neuralPlayer.Stop();
+            await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
             return await ProcessRequestAsync(text, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -683,18 +703,26 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         var token = _speechCancellation.Token;
 
         var spoke = await TrySpeakNeuralAsync(spokenText, token).ConfigureAwait(false);
+        var neuralFailure = spoke ? null : _neuralVoice.LastFailure;
+
         if (!spoke && !token.IsCancellationRequested)
         {
             // La voz de Windows queda como red: peor timbre, pero siempre disponible y sin red.
             var result = await _speechSynthesizer.SpeakAsync(spokenText, token).ConfigureAwait(false);
             spoke = result.Succeeded;
+            if (!spoke)
+            {
+                neuralFailure = result.ErrorMessage ?? neuralFailure;
+            }
         }
 
+        // Una voz que falla en silencio es indistinguible de una que decidió no hablar. Si algo se
+        // rompió, tiene que decirlo: sin eso, diagnosticar es adivinar.
         Publish(new AssistantRuntimeUpdate(
             spoke || token.IsCancellationRequested ? AssistantVisualState.Idle : AssistantVisualState.Error,
             spoke || token.IsCancellationRequested
-                ? "Disponible"
-                : "La respuesta quedó en pantalla; la voz no está disponible"));
+                ? _conversationActive ? "En conversación · decime «listo» para cortar" : "Disponible"
+                : $"Sin voz: {neuralFailure ?? "no se pudo reproducir el audio"}"));
     }
 
     /// <summary>
@@ -831,6 +859,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
             if (isMuted)
             {
+                // Mute sigue siendo el corte duro: también cierra la conversación abierta.
+                await EndConversationAsync("Voz silenciada · conversación cerrada", CancellationToken.None)
+                    .ConfigureAwait(false);
                 _wakeHandoffCancellation?.Cancel();
                 await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
                 _orchestrator.SetListening(false);
@@ -921,6 +952,172 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Abre una conversación: a partir de acá el micrófono vuelve solo después de cada respuesta.
+    /// La llama el wake word y también el toque en el orbe.
+    /// </summary>
+    public Task StartConversationAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        if (_conversationActive || IsMuted || _recognition is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        _conversationActive = true;
+        _conversationCancellation?.Dispose();
+        _conversationCancellation = new CancellationTokenSource();
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Listening,
+            "En conversación · decime «listo» para cortar",
+            "Te escucho.",
+            MicrophoneActive: true));
+
+        _ = RunConversationLoopAsync(_conversationCancellation.Token);
+        return Task.CompletedTask;
+    }
+
+    public async Task EndConversationAsync(string reason, CancellationToken cancellationToken)
+    {
+        if (!_conversationActive)
+        {
+            return;
+        }
+
+        _conversationActive = false;
+        _conversationCancellation?.Cancel();
+
+        if (_recognition?.IsMicrophoneActive == true)
+        {
+            await _recognition.CancelPushToTalkAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Idle,
+            reason,
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+
+        await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Escucha, responde y vuelve a escuchar. No se corta por silencio: sólo por una frase de
+    /// cierre, por mute o porque el dispositivo falle. Ese es el punto de tener conversación.
+    /// </summary>
+    private async Task RunConversationLoopAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.CompareExchange(ref _conversationLoopRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var consecutiveDeviceFailures = 0;
+
+        try
+        {
+            await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
+
+            while (_conversationActive && !cancellationToken.IsCancellationRequested && !IsMuted)
+            {
+                if (_recognition is null)
+                {
+                    break;
+                }
+
+                var capture = await _recognition
+                    .RecognizeSingleUtteranceAsync(
+                        new SingleUtteranceRecognitionOptions { InitialSilenceTimeout = TimeSpan.FromSeconds(20) },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                if (!capture.Succeeded)
+                {
+                    // Un fallo de dispositivo repetido sí corta: seguir sería fingir que escucha.
+                    if (capture.ErrorCode is SpeechErrorCode.DeviceError or SpeechErrorCode.Unavailable &&
+                        ++consecutiveDeviceFailures >= 2)
+                    {
+                        await EndConversationAsync(
+                            $"Corté la conversación: {SafeSpeechMessage(capture.ErrorCode)}",
+                            CancellationToken.None).ConfigureAwait(false);
+                        return;
+                    }
+
+                    continue;
+                }
+
+                consecutiveDeviceFailures = 0;
+                var transcript = capture.Text?.Trim();
+                if (string.IsNullOrWhiteSpace(transcript))
+                {
+                    // El silencio no cierra nada: sigue esperando, que es lo que se le pidió.
+                    Publish(new AssistantRuntimeUpdate(
+                        AssistantVisualState.Listening,
+                        "Sigo escuchando · decime «listo» para cortar",
+                        MicrophoneActive: true));
+                    continue;
+                }
+
+                if (IsClosingPhrase(transcript))
+                {
+                    await SpeakIfEnabledAsync("Listo. Llamame cuando quieras.", CancellationToken.None)
+                        .ConfigureAwait(false);
+                    await EndConversationAsync("Conversación cerrada", CancellationToken.None).ConfigureAwait(false);
+                    return;
+                }
+
+                await SendAsync(transcript, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Cerrar la conversación cancela el bucle; no es un error.
+        }
+        catch (Exception)
+        {
+            await EndConversationAsync("La conversación se interrumpió", CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _conversationLoopRunning, 0);
+            if (!_conversationActive)
+            {
+                await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sólo cierra si la frase es corta y es esencialmente la despedida: «gracias por todo esto que
+    /// hiciste» no debería cortar una conversación.
+    /// </summary>
+    internal static bool IsClosingPhrase(string text)
+    {
+        var normalized = new string(text
+            .ToLowerInvariant()
+            .Where(character => !char.IsPunctuation(character))
+            .ToArray())
+            .Replace("viernes", string.Empty, StringComparison.Ordinal)
+            .Trim();
+
+        if (normalized.Length == 0 || normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 3)
+        {
+            return false;
+        }
+
+        return ClosingPhrases.Any(phrase =>
+            normalized.Equals(phrase, StringComparison.Ordinal) ||
+            normalized.StartsWith(phrase + " ", StringComparison.Ordinal) ||
+            normalized.EndsWith(" " + phrase, StringComparison.Ordinal));
     }
 
     private void ReminderSchedulerOnReminderDue(object? sender, ReminderDueEventArgs eventArgs) =>
@@ -1048,6 +1245,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 MicrophoneActive: IsAnyMicrophoneActive(),
                 WakeWordEnabled: _isWakeWordEnabled));
             await SendAsync(transcript, CancellationToken.None).ConfigureAwait(false);
+
+            // Llamarlo por su nombre abre la conversación: a partir de acá no hay que repetirlo.
+            await StartConversationAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1342,6 +1542,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         _isDisposed = true;
+        _conversationActive = false;
+        _conversationCancellation?.Cancel();
+        _conversationCancellation?.Dispose();
         _wakeHandoffCancellation?.Cancel();
         _wakeHandoffCancellation?.Dispose();
         _orchestrator.StateChanged -= OrchestratorOnStateChanged;

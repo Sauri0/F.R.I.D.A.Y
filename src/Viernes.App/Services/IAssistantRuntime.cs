@@ -78,6 +78,13 @@ internal interface IAssistantRuntime : IAsyncDisposable
 
     Task SetListenWhileHiddenAsync(bool enabled, CancellationToken cancellationToken);
 
+    /// <summary>Si hay una conversación abierta, en la que el micrófono vuelve solo tras cada respuesta.</summary>
+    bool IsConversationActive { get; }
+
+    Task StartConversationAsync(CancellationToken cancellationToken);
+
+    Task EndConversationAsync(string reason, CancellationToken cancellationToken);
+
     Task SetShellVisibilityAsync(bool visible, CancellationToken cancellationToken);
 
     Task ConfirmPendingAsync(CancellationToken cancellationToken);
