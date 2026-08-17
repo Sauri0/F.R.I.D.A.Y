@@ -15,7 +15,8 @@ public static class BuiltInTools
         bool confirmActions = false,
         Awareness.IEnvironmentObserver? environment = null,
         Learning.RuleBook? rules = null,
-        Goals.GoalBook? goals = null)
+        Goals.GoalBook? goals = null,
+        Missions.MissionBook? missions = null)
     {
         ArgumentNullException.ThrowIfNull(dataStore);
         return Array.AsReadOnly<IAssistantTool>(
@@ -29,6 +30,8 @@ public static class BuiltInTools
             new SituationTool(environment),
             new TeachTool(rules ?? new Learning.RuleBook()),
             new GoalTool(goals ?? new Goals.GoalBook()),
+            new MissionTool(missions ?? new Missions.MissionBook()),
+            new ProjectTool(),
             new FileSystemTool(),
             new ShellTool()
         ]);

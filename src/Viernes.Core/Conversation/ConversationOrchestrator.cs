@@ -2,6 +2,7 @@ using Viernes.Core.Awareness;
 using Viernes.Core.Configuration;
 using Viernes.Core.Goals;
 using Viernes.Core.Learning;
+using Viernes.Core.Missions;
 using Viernes.Core.Models;
 using Viernes.Core.OpenRouter;
 using Viernes.Core.Tools;
@@ -67,6 +68,18 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         devolvió cada paso, y recién al final decí qué pasó. Si un paso falla, el siguiente no corre
         —abrir algo que no se llegó a crear abre otra cosa— así que leé el resultado antes de seguir.
 
+        Hay cosas que no terminan en este turno: seguir un proyecto, revisar algo todos los días,
+        esperar que pase algo. Eso va con la herramienta mision, y a partir de ahí es tuyo: anotás
+        cada avance, y cuando necesitás una decisión para poder seguir, la dejás como pregunta
+        pendiente. Esa pregunta te sobrevive: si el usuario cierra la charla y vuelve mañana, la
+        seguís teniendo. Retomala vos, no esperes que se acuerde él.
+
+        Cuando el usuario te contesta algo que destraba una misión frenada, registralo con
+        accion=responder antes de seguir con lo demás.
+
+        No inventes misiones para lo que resolvés ahora mismo, y no anuncies que vas a hacer algo
+        sin dejarlo anotado: prometer sin misión es prometer y olvidarse.
+
         Aprendé cuando te enseñan. Si el usuario dice «acordate que…», «aprendé que…», «de ahora en
         más…», «siempre que… hacé…», «no vuelvas a…», o te corrige una forma de trabajar, llamá a
         aprender con la instrucción redactada en general. No es un pedido más: es algo que tiene que
@@ -116,6 +129,9 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
     /// la aplicación.
     /// </remarks>
     private readonly Func<CancellationToken, Task<string?>>? _personalContext;
+
+    /// <summary>Los encargos que siguen vivos entre charlas, con sus preguntas sin contestar.</summary>
+    private readonly MissionBook? _missions;
     private readonly int _maxToolIterations;
     private readonly string _systemPrompt;
     private readonly SemaphoreSlim _turnGate = new(1, 1);
@@ -134,12 +150,14 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         IEnvironmentObserver? environment = null,
         RuleBook? rules = null,
         GoalBook? goals = null,
-        Func<CancellationToken, Task<string?>>? personalContext = null)
+        Func<CancellationToken, Task<string?>>? personalContext = null,
+        MissionBook? missions = null)
     {
         _environment = environment;
         _rules = rules;
         _goals = goals;
         _personalContext = personalContext;
+        _missions = missions;
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _toolExecutor = toolExecutor ?? throw new ArgumentNullException(nameof(toolExecutor));
         _actionMemory = actionMemory;
@@ -230,6 +248,13 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 ? null
                 : await SafePersonalAsync(cancellationToken).ConfigureAwait(false);
 
+            // Las misiones abiertas y, sobre todo, lo que le preguntó al usuario y sigue sin
+            // respuesta. Es la única parte del contexto que puede destrabarse con lo que el usuario
+            // diga en este mismo turno, así que va sí o sí.
+            var pending = _missions is null
+                ? null
+                : await _missions.DescribeOpenAsync(cancellationToken).ConfigureAwait(false);
+
             var results = new List<ToolExecutionResult>();
             for (var iteration = 0; iteration < _maxToolIterations; iteration++)
             {
@@ -262,6 +287,11 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 if (personal is not null)
                 {
                     extras.Add(ConversationMessage.System(personal));
+                }
+
+                if (pending is not null)
+                {
+                    extras.Add(ConversationMessage.System(pending));
                 }
 
                 // La fecha va en cada turno porque el modelo no la tiene. Sin esto, «recordame el

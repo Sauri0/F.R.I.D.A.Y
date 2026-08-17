@@ -3,6 +3,7 @@ using Viernes.Core.Awareness;
 using Viernes.Core.Conversation;
 using Viernes.Core.Goals;
 using Viernes.Core.Learning;
+using Viernes.Core.Missions;
 using Viernes.Core.OpenRouter;
 using Viernes.Core.Persistence;
 using Viernes.Core.Tools;
@@ -25,10 +26,15 @@ public static class ViernesCoreFactory
         IEnvironmentObserver? environment = null,
         RuleBook? rules = null,
         GoalBook? goals = null,
-        Func<CancellationToken, Task<string?>>? personalContext = null)
+        Func<CancellationToken, Task<string?>>? personalContext = null,
+        MissionBook? missions = null)
     {
         rules ??= new RuleBook();
         goals ??= new GoalBook();
+
+        // Las misiones vienen puestas por defecto, como el recetario: que un encargo sobreviva a
+        // cerrar la charla no debería ser algo que haya que acordarse de encender en cada host.
+        missions ??= new MissionBook();
         ArgumentNullException.ThrowIfNull(httpClient);
         options ??= ViernesOptions.FromEnvironment();
         dataStore ??= new JsonUserDataStore();
@@ -42,7 +48,8 @@ public static class ViernesCoreFactory
             options.ConfirmActions,
             environment,
             rules,
-            goals);
+            goals,
+            missions);
         var tools = new ToolExecutor(
             extraTools is { Count: > 0 } ? [.. builtIn, .. extraTools] : builtIn,
             new SafeToolPolicy());
@@ -63,7 +70,8 @@ public static class ViernesCoreFactory
             environment,
             rules,
             goals,
-            personalContext);
+            personalContext,
+            missions);
     }
 
     /// <summary>
