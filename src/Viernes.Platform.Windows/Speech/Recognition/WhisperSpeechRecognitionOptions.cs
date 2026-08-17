@@ -6,7 +6,27 @@ public sealed record WhisperSpeechRecognitionOptions
 
     public string Language { get; init; } = "es";
 
-    public int InputDeviceNumber { get; init; }
+    /// <summary>
+    /// Dispositivo de entrada. <c>-1</c> es <c>WAVE_MAPPER</c>: el predeterminado de Windows, que es
+    /// el mismo que usa SAPI para el wake word.
+    /// </summary>
+    /// <remarks>
+    /// Fijarlo en 0 era un error silencioso: el dispositivo 0 no es el predeterminado sino el
+    /// primero de la lista, y basta con tener instalado un micrófono virtual —Sonar, Voicemod,
+    /// NVIDIA Broadcast, OBS— para que quede primero y entregue silencio. El wake word oía y la
+    /// captura no, sobre la misma máquina.
+    /// </remarks>
+    public int InputDeviceNumber { get; init; } = ResolveDefaultInputDevice();
+
+    public const int DefaultInputDevice = -1;
+
+    private static int ResolveDefaultInputDevice()
+    {
+        var configured = Environment.GetEnvironmentVariable("VIERNES_INPUT_DEVICE");
+        return int.TryParse(configured, out var parsed) && parsed >= -1
+            ? parsed
+            : DefaultInputDevice;
+    }
 
     public int BufferMilliseconds { get; init; } = 100;
 
@@ -63,7 +83,7 @@ public sealed record WhisperSpeechRecognitionOptions
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ModelPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(Language);
-        if (InputDeviceNumber < 0 || BufferMilliseconds is < 20 or > 1000)
+        if (InputDeviceNumber < -1 || BufferMilliseconds is < 20 or > 1000)
         {
             throw new ArgumentOutOfRangeException(nameof(InputDeviceNumber));
         }

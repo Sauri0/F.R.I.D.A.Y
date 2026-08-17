@@ -108,7 +108,13 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
                 return Unavailable("El archivo configurado es demasiado pequeño para ser un modelo Whisper válido.");
             }
 
-            if (WaveInEvent.DeviceCount <= _options.InputDeviceNumber)
+            if (WaveInEvent.DeviceCount == 0)
+            {
+                return Unavailable("Windows no informó ningún micrófono.");
+            }
+
+            // -1 es WAVE_MAPPER y siempre es válido: se resuelve al predeterminado de Windows.
+            if (_options.InputDeviceNumber >= 0 && WaveInEvent.DeviceCount <= _options.InputDeviceNumber)
             {
                 return Unavailable("No se encontró el dispositivo de entrada configurado.");
             }

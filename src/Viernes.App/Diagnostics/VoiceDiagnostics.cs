@@ -24,6 +24,20 @@ internal static class VoiceDiagnostics
     {
         var report = new StringBuilder();
         var modelPath = WhisperSpeechRecognitionOptions.GetDefaultModelPath();
+
+        // Un micrófono virtual primero en la lista entrega silencio y parece un fallo de software.
+        report.AppendLine("== DISPOSITIVOS DE ENTRADA ==");
+        for (var device = 0; device < NAudio.Wave.WaveInEvent.DeviceCount; device++)
+        {
+            report.AppendLine($"  [{device}] {NAudio.Wave.WaveInEvent.GetCapabilities(device).ProductName}");
+        }
+
+        var configuredDevice = new WhisperSpeechRecognitionOptions().InputDeviceNumber;
+        report.AppendLine(configuredDevice < 0
+            ? "  en uso: -1 (predeterminado de Windows, el mismo que el wake word)"
+            : $"  en uso: {configuredDevice}");
+
+        report.AppendLine();
         report.AppendLine("== CAPTURA DE UNA FRASE ==");
         report.AppendLine($"Modelo   : {Path.GetFileName(modelPath)}");
         report.AppendLine($"Existe   : {File.Exists(modelPath)}");
