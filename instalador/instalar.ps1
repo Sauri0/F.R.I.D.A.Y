@@ -207,6 +207,20 @@ function Instalar-Aplicacion {
         $release = Invoke-RestMethod -Uri $RepositorioApi -Headers $cabeceras -UseBasicParsing
     }
     catch {
+        # Un 404 acá casi nunca es «no existe»: es un repositorio privado visto sin credenciales, y
+        # GitHub contesta lo mismo en los dos casos a propósito. Decir «no encontrado» mandaría a
+        # buscar un problema de red que no existe.
+        $codigo = $_.Exception.Response.StatusCode.value__
+        if ($codigo -eq 404) {
+            throw @'
+El repositorio no está accesible. Puede ser que sea privado y no tengas permiso.
+
+Si es tuyo, hacelo público o instalá desde el código:
+  git clone https://github.com/Sauri0/F.R.I.D.A.Y
+  dotnet publish src/Viernes.App -c Release -r win-x64 --self-contained
+'@
+        }
+
         throw "No pude consultar las versiones publicadas: $($_.Exception.Message)"
     }
 
