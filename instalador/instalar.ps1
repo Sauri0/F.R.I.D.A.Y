@@ -169,6 +169,17 @@ function Pedir-Clave {
         $env:OPENROUTER_API_KEY = $clave
         $clave = $null
         Listo 'Clave guardada en tu cuenta de Windows.'
+
+        # Un tope por defecto. Sin ninguno configurado, el guardián de presupuesto no tiene contra
+        # qué comparar y deja pasar todos los turnos: existe el aparato entero, medido y con interfaz,
+        # y no frena nunca. Dos dólares por día son unos dos mil turnos al precio actual —muy por
+        # encima del uso normal—, así que no molesta y sí evita la sorpresa de un bucle.
+        if (-not [Environment]::GetEnvironmentVariable('VIERNES_DAILY_BUDGET', 'User')) {
+            [Environment]::SetEnvironmentVariable('VIERNES_DAILY_BUDGET', '2', 'User')
+            $env:VIERNES_DAILY_BUDGET = '2'
+            Paso 'Tope de gasto: USD 2 por día. Se cambia con la variable VIERNES_DAILY_BUDGET.'
+        }
+
         return
     }
 }

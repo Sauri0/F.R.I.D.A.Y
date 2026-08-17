@@ -21,6 +21,37 @@ public sealed class SalienceGateTests
     private static Observation Trivial() =>
         new("trivial", "algo menor", Importance: 0.3, Urgency: 0.2, Confidence: 0.9, Actionability: 0.3);
 
+    /// <summary>Las dos señales que realmente produce el equipo, con sus valores reales.</summary>
+    /// <remarks>
+    /// Estaban sin cubrir, y por eso el filtro pudo quedar calibrado durante semanas de forma que
+    /// <em>ninguna de las dos podía pasar nunca</em>: memoria alta valía 0,34 y el piso era 0,25,
+    /// pero antes se le restaba un costo de 0,15 y quedaba en 0,19. Probar el filtro con
+    /// observaciones inventadas de 0,9 escondía exactamente eso.
+    /// </remarks>
+    private static Observation MemoriaAlta() =>
+        new("memoria-alta", "La memoria está casi llena.",
+            Importance: 0.7, Urgency: 0.6, Confidence: 0.9, Actionability: 0.9);
+
+    private static Observation VentanaPerdida() =>
+        new("ventana-perdida", "Se cerró donde venías trabajando.",
+            Importance: 0.8, Urgency: 0.7, Confidence: 0.6, Actionability: 0.7);
+
+    [Fact]
+    public void Choose_LasSenalesRealesPuedenHablarCuandoEstasLibre()
+    {
+        var gate = new SalienceGate();
+
+        Assert.NotNull(gate.Choose([MemoriaAlta()], userIsBusy: false));
+        Assert.NotNull(new SalienceGate().Choose([VentanaPerdida()], userIsBusy: false));
+    }
+
+    [Fact]
+    public void Choose_LasMismasSenalesSeCallanSiEstasTecleando()
+    {
+        Assert.Null(new SalienceGate().Choose([MemoriaAlta()], userIsBusy: true));
+        Assert.Null(new SalienceGate().Choose([VentanaPerdida()], userIsBusy: true));
+    }
+
     [Fact]
     public void Choose_TrivialObservation_StaysSilent()
     {
@@ -66,12 +97,14 @@ public sealed class SalienceGateTests
         // Un hecho intermedio: pasa con el usuario libre y no pasa con el usuario tecleando. Es lo
         // que hace que estar concentrado suba el costo de interrumpir en vez de ser un permiso.
         //
-        // El producto tiene que caer en la ventana estrecha donde el costo decide: por encima de
-        // 0,40 —umbral 0,25 más el costo de 0,15 estando libre— y hasta 0,70, que es lo máximo que
-        // el costo de 0,45 todavía alcanza a bloquear. Acá da 0,551.
+        // Tiene que caer en la ventana donde el costo decide: por encima de 0,22 —piso 0,12 más el
+        // costo de 0,10 estando libre— y por debajo de 0,42, que es lo máximo que el costo de 0,30
+        // todavía alcanza a bloquear. Se usan a propósito los valores de la señal real de memoria
+        // alta, que da 0,3402: si algún día la calibración vuelve a dejar afuera lo que el equipo
+        // realmente produce, esta prueba se entera.
         var middling = new Observation(
             "medio", "algo intermedio",
-            Importance: 0.9, Urgency: 0.85, Confidence: 0.9, Actionability: 0.8);
+            Importance: 0.7, Urgency: 0.6, Confidence: 0.9, Actionability: 0.9);
 
         Assert.NotNull(new SalienceGate().Choose([middling], userIsBusy: false));
         Assert.Null(new SalienceGate().Choose([middling], userIsBusy: true));

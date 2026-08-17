@@ -188,7 +188,12 @@ public sealed class OpenRouterChatClient : IRoleAwareChatCompletionClient
             // mejores candidatos, así un diálogo no salta de voz entre turnos.
             session_id = AutoRouterOptions.IsAutoRouted(requestModel) ? _options.SessionId : null,
             plugins,
-            provider = BuildProviderPreferences()
+            provider = BuildProviderPreferences(),
+
+            // Pedir la contabilidad explícitamente. Sin esto el costo exacto llega sólo cuando el
+            // proveedor tiene ganas de mandarlo, y el presupuesto queda comparando contra nulos
+            // —o sea, sin frenar nunca— justo en los modelos que no lo informan solos.
+            usage = new { include = true }
         };
 
         var request = new HttpRequestMessage(HttpMethod.Post, _options.OpenRouterEndpoint)

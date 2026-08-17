@@ -41,7 +41,26 @@ public sealed record Observation(
 public sealed class SalienceGate
 {
     /// <summary>Piso de valor para hablar. Por debajo, se calla y lo guarda.</summary>
-    private const double SpeakThreshold = 0.25;
+    /// <remarks>
+    /// Era 0,25 y con eso <em>nada podía hablar nunca</em>. Cuatro factores multiplicados entre 0,6
+    /// y 0,9 dan alrededor de 0,3: restarle el costo de interrumpir dejaba a la mejor señal que
+    /// existe —memoria casi llena— en 0,19, por debajo del piso. La aritmética del archivo y la de
+    /// las señales estaban calibradas contra escalas distintas, así que la proactividad estaba
+    /// apagada sin que nadie lo hubiera decidido.
+    /// <para>
+    /// Los tres números de acá están elegidos juntos, contra las señales que realmente existen:
+    /// con el usuario libre, memoria alta (0,34) y ventana perdida (0,24) pasan; con el usuario
+    /// tecleando, ninguna de las dos. Que interrumpir a alguien concentrado cueste más no es una
+    /// preferencia: es la única forma de que un asistente proactivo no se vuelva ruido.
+    /// </para>
+    /// </remarks>
+    private const double SpeakThreshold = 0.12;
+
+    /// <summary>Lo que cuesta interrumpir a alguien que está tecleando ahora mismo.</summary>
+    private const double BusyCost = 0.30;
+
+    /// <summary>Lo que cuesta interrumpir a alguien que volvió del café.</summary>
+    private const double IdleCost = 0.10;
 
     private readonly TimeSpan _minimumSpacing;
     private readonly TimeProvider _time;
@@ -75,7 +94,7 @@ public sealed class SalienceGate
                 return null;
             }
 
-            var cost = userIsBusy ? 0.45 : 0.15;
+            var cost = userIsBusy ? BusyCost : IdleCost;
             Observation? best = null;
             var bestValue = SpeakThreshold;
 

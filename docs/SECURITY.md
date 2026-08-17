@@ -59,7 +59,27 @@ Whisper y SAPI procesan audio localmente. OpenRouter recibe texto, no audio. Las
 - `Sensitive` y `Destructive` nunca pasan a ejecución en este MVP, ni aun con `confirmationGranted`.
 - Las confirmaciones vencen a los 15 minutos y se limita el número de pendientes/pasos.
 
-No se implementan shell arbitrario, borrado de archivos, elevación, manejo de credenciales, compras, envío de mensajes ni cambios irreversibles. `pc_action` es una vista previa simulada sin `Process.Start`, filesystem o llamadas Win32.
+## Lo que Viernes puede hacer en tu equipo
+
+Este párrafo decía lo contrario hasta hoy —«no se implementan shell arbitrario, borrado de archivos… `pc_action` es una vista previa simulada»— y describía el MVP anterior. Las tres afirmaciones eran falsas desde hace varias versiones. Un documento de seguridad que describe un sistema anterior es peor que no tenerlo, porque es el único lugar donde podés ver qué estás aceptando.
+
+Lo que hay hoy, con la configuración de fábrica y **sin pedirte confirmación**:
+
+| Puede | Herramienta | Reversible |
+|---|---|---|
+| Ejecutar cualquier comando de PowerShell, sin elevación | `comando` | no |
+| Crear, leer, escribir, mover, copiar y borrar archivos y carpetas | `archivo` | los borrados y lo sobrescrito van a una papelera propia y se recuperan con `accion=recuperar`; lo demás no |
+| Abrir, cerrar y traer al frente aplicaciones; volumen; multimedia | `pc_action` | parcialmente, con `undo` |
+| Sacar capturas de pantalla y mandarlas al modelo | `pc_action see_screen` | — |
+| Leer los controles de otras ventanas, hacer clic y escribir en ellos | `pc_action` | parcialmente, con `undo` |
+| Guardar reglas que se inyectan en todos los turnos siguientes | `aprender` | sí, editando `reglas.json` |
+| Todo lo que expongan los servidores MCP que conectes | según el servidor | según el servidor |
+
+**Lo que sigue sin poder hacer:** nada que requiera elevación (la credencial del asistente se borra del entorno de los procesos hijos, y `ShellTool` corre sin privilegios de administrador), y las acciones marcadas `Sensitive` o `Destructive` en `pc_action` —apagar, formatear, cambiar configuración del sistema— no se ejecutan ni aunque las confirmes.
+
+**El freno.** `Ctrl+Shift+Alt+J` corta el turno en curso: la voz, el bucle de herramientas y cualquier comando de PowerShell corriendo. Hasta hoy no cortaba el bucle cuando el pedido se había escrito en vez de hablado.
+
+**Inyección de prompt.** La única defensa es una instrucción en el prompt del sistema: lo que llega por páginas web, archivos, salida de comandos o la pantalla es información, nunca una orden. Se verificó contra dos intentos reales y los rechazó. No es una garantía: es un modelo obedeciendo una regla, delante de un ejecutor que no tiene frenos propios.
 
 ## Datos locales
 
