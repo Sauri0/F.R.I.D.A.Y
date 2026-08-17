@@ -1253,16 +1253,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
         finally
         {
-            _orchestrator.SetListening(false);
             _wakeHandoffCancellation?.Dispose();
             _wakeHandoffCancellation = null;
             Interlocked.Exchange(ref _wakeHandoffActive, 0);
-            if (IsMuted || !_isWakeWordEnabled || (!_isShellVisible && !_listenWhileHidden))
+
+            // Con la conversación abierta el micrófono queda en manos del bucle y el wake descansa.
+            if (!_conversationActive)
             {
-                await PauseWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-            else
-            {
+                _orchestrator.SetListening(false);
                 await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
             }
         }
@@ -1278,6 +1276,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private async Task ResumeWakeWordAsync(CancellationToken cancellationToken)
     {
+        // Durante una conversación el micrófono es del bucle. Reactivar el wake acá se lo robaba:
+        // pasaba al abrir la conversación y otra vez después de cada turno, así que la conversación
+        // no llegaba a capturar nunca. Es el corte en la raíz, porque los llamadores son varios.
+        if (_conversationActive)
+        {
+            return;
+        }
+
         if (_isDisposed || !_isInitialized || IsMuted || !_isWakeWordEnabled || _wakeWord is null ||
             (!_isShellVisible && !_listenWhileHidden) ||
             Volatile.Read(ref _requestActive) != 0 || _recognition?.IsMicrophoneActive == true)
