@@ -16,11 +16,16 @@ public sealed class SpeechSynthesisOptions
     public const string InstructionsEnvironmentVariable = "VIERNES_TTS_INSTRUCTIONS";
 
     /// <summary>
-    /// Medido contra el endpoint real: ~1,0 s de ida y vuelta, contra 3,2 s de Gemini TTS y 9,7 s
-    /// de Kokoro. Y tiene voz rioplatense de verdad, no español neutro.
+    /// Voz elegida por el dueño escuchando cuatro candidatas decir la misma frase. Es la más humana
+    /// de las probadas; a cambio tarda ~1,4 s en una frase corta contra 558 ms de mai-voice-2, y por
+    /// eso el corte por oraciones importa tanto: el primer tramo es corto y sale antes.
     /// </summary>
-    public const string DefaultModel = "microsoft/mai-voice-2-flash";
-    public const string DefaultVoice = "es-AR-ElenaNeural";
+    public const string DefaultModel = "x-ai/grok-voice-tts-1.0";
+    public const string DefaultVoice = "Ara";
+
+    /// <summary>Alternativa medida como la más rápida, si alguna vez pesa más la latencia.</summary>
+    public const string FastestModel = "microsoft/mai-voice-2";
+    public const string FastestVoice = "es-AR-ElenaNeural";
 
     /// <summary>
     /// Frecuencia de reserva. La real la informa el proveedor en el <c>Content-Type</c> y hay que

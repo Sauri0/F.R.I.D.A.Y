@@ -57,6 +57,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private CancellationTokenSource? _conversationCancellation;
     private int _conversationLoopRunning;
 
+    /// <summary>Lo que dijo el usuario en la charla, para destilar al cerrarla. No se persiste.</summary>
+    private readonly List<string> _conversationTurns = [];
+
     /// <summary>
     /// Frases de cierre. Es el inverso del wake word: la palabra que lo despide. Sin esto, un
     /// asistente que no deja de escuchar es un micrófono abierto sin salida.
@@ -67,6 +70,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         "terminamos", "cortá", "corta", "basta", "salí", "sali", "adiós", "adios"
     ];
     private readonly JsonUserDataStore _dataStore = new();
+    private readonly JsonPersonalMemoryStore _memory = new();
     private readonly ReminderScheduler _reminderScheduler;
     private readonly LocalSettingsStore _settingsStore = new();
     private readonly WakeWordRecognitionCoordinator _wakeCoordinator = new();
@@ -108,7 +112,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _dataStore,
             _usageLedger,
             new WindowsPcActionExecutor());
-        _localCommands = new LocalCommandRouter(_orchestrator, new JsonPersonalMemoryStore());
+        _localCommands = new LocalCommandRouter(_orchestrator, _memory);
         _reminderScheduler = new ReminderScheduler(_dataStore);
         _reminderScheduler.ReminderDue += ReminderSchedulerOnReminderDue;
         _neuralVoice = new OpenRouterSpeechClient(
@@ -738,6 +742,23 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     }
 
     /// <summary>
+    /// Deja de hablar de inmediato. Lo llama el bucle de conversación al detectar que el usuario
+    /// arrancó a hablar: poder interrumpirla es lo que separa una conversación de un locutor.
+    /// </summary>
+    public void BargeIn()
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("voz.interrumpida");
+        _speechCancellation?.Cancel();
+        _neuralPlayer.Stop();
+        _ = _speechSynthesizer.StopSpeakingAsync(CancellationToken.None);
+    }
+
+    /// <summary>
     /// Habla por oraciones: sintetiza la siguiente mientras suena la actual, así el primer sonido
     /// llega en cuanto está lista la primera frase en vez de esperar la respuesta entera.
     /// </summary>
@@ -796,7 +817,6 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// </summary>
     internal static IReadOnlyList<string> SplitIntoSpokenChunks(string text)
     {
-        const int minimum = 70;
         const int maximum = 260;
 
         var chunks = new List<string>();
@@ -804,6 +824,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         foreach (var sentence in SplitSentences(text))
         {
+            // El primer tramo se corta apenas hay una frase: el silencio que se siente es el que va
+            // desde que dejás de hablar hasta el primer sonido, no el que hay entre frases.
+            var minimum = chunks.Count == 0 ? 1 : 70;
+
             if (current.Length > 0 && current.Length + sentence.Length > maximum)
             {
                 chunks.Add(current.ToString().Trim());
@@ -1145,8 +1169,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     await SpeakIfEnabledAsync("Listo. Llamame cuando quieras.", CancellationToken.None)
                         .ConfigureAwait(false);
                     await EndConversationAsync("Conversación cerrada", CancellationToken.None).ConfigureAwait(false);
+                    await LearnFromConversationAsync().ConfigureAwait(false);
                     return;
                 }
+
+                _conversationTurns.Add(transcript);
 
                 await SendAsync(transcript, spoken: true, cancellationToken).ConfigureAwait(false);
             }
@@ -1194,6 +1221,68 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             normalized.Equals(phrase, StringComparison.Ordinal) ||
             normalized.StartsWith(phrase + " ", StringComparison.Ordinal) ||
             normalized.EndsWith(" " + phrase, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Al cerrar una charla, destila a lo sumo dos hechos duraderos sobre el usuario y los guarda
+    /// como <em>observaciones temporales</em>: vencen solas y nunca se vuelven permanentes sin que
+    /// las apruebes. Es lo que hace que Viernes aprenda con vos sin aprender a tus espaldas.
+    /// </summary>
+    /// <remarks>
+    /// No guarda la conversación: guarda hechos cortos y revisables. La política de contenido del
+    /// store rechaza credenciales y cualquier cosa con forma de transcripción.
+    /// </remarks>
+    private async Task LearnFromConversationAsync()
+    {
+        List<string> turns;
+        lock (_confirmationGate)
+        {
+            turns = [.. _conversationTurns];
+            _conversationTurns.Clear();
+        }
+
+        if (turns.Count < 2 || !IsCloudConfigured)
+        {
+            RuntimeTrace.Write("memoria.omitida", $"turnos={turns.Count} nube={IsCloudConfigured}");
+            return;
+        }
+
+        try
+        {
+            var prompt =
+                "De lo que dijo el usuario, extraé como máximo DOS hechos duraderos sobre él: " +
+                "preferencias, rutinas, nombres de personas cercanas, cómo le gusta trabajar. " +
+                "Uno por línea, en tercera persona, menos de 90 caracteres cada uno, sin comillas. " +
+                "Ignorá pedidos puntuales, fechas de eventos y cualquier cosa efímera. " +
+                "Si no hay nada duradero, respondé exactamente: NADA.\n\n" +
+                string.Join("\n", turns.TakeLast(12));
+
+            var distilled = await _orchestrator.ProcessAsync(prompt, CancellationToken.None).ConfigureAwait(false);
+            if (distilled.IsLocalMode || string.IsNullOrWhiteSpace(distilled.Text))
+            {
+                return;
+            }
+
+            foreach (var line in distilled.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Take(2))
+            {
+                var fact = line.TrimStart('-', '*', '•', ' ').Trim();
+                if (fact.Length is < 8 or > 90 || fact.Contains("NADA", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                // El store rechaza credenciales y contenido con forma de conversación, y la
+                // observación vence sola: nunca se vuelve permanente sin que la apruebes.
+                var captured = await _memory
+                    .ObserveAsync(fact, confidence: 0.6, cancellationToken: CancellationToken.None)
+                    .ConfigureAwait(false);
+                RuntimeTrace.Write("memoria.observada", $"{captured.Status} · {fact}");
+            }
+        }
+        catch (Exception exception)
+        {
+            RuntimeTrace.Write("memoria.falló", exception.GetType().Name);
+        }
     }
 
     private void ReminderSchedulerOnReminderDue(object? sender, ReminderDueEventArgs eventArgs) =>
@@ -1474,8 +1563,21 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         return phrases.Length > 0 ? phrases : configuredPhrases;
     }
 
+    /// <summary>
+    /// Cortar la voz apenas el usuario empieza a hablar. Sin esto hay que esperar a que termine la
+    /// frase para poder decir algo, que es exactamente lo que no hace una persona.
+    /// </summary>
+    private void RecognitionOnSpeechStarted(object? sender, SpeechTranscriptionEventArgs e)
+    {
+        if (_conversationActive && !string.IsNullOrWhiteSpace(e.Text))
+        {
+            BargeIn();
+        }
+    }
+
     private void SubscribeRecognition(ISpeechRecognitionProvider recognition)
     {
+        recognition.TranscriptionUpdated += RecognitionOnSpeechStarted;
         recognition.MicrophoneActivityChanged += RecognitionOnMicrophoneActivityChanged;
         recognition.TranscriptionUpdated += RecognitionOnTranscriptionUpdated;
         recognition.ServiceError += RecognitionOnError;
@@ -1628,6 +1730,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         if (_recognition is not null)
         {
+            _recognition.TranscriptionUpdated -= RecognitionOnSpeechStarted;
             _recognition.MicrophoneActivityChanged -= RecognitionOnMicrophoneActivityChanged;
             _recognition.TranscriptionUpdated -= RecognitionOnTranscriptionUpdated;
             _recognition.ServiceError -= RecognitionOnError;
