@@ -14,6 +14,7 @@ using Viernes.Core.Scheduling;
 using Viernes.Core.Tools;
 using Viernes.Core.Usage;
 using Viernes.Core.Voice;
+using Viernes.Memory.Models;
 using Viernes.Memory.Persistence;
 using Viernes.Platform.Windows.Actions;
 using Viernes.Platform.Windows.Speech;
@@ -82,44 +83,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private int _voiceTraced;
     private int _microphoneTraced;
     private CancellationTokenSource? _conversationCancellation;
+
+    /// <summary>Lo que el freno corta: el turno en curso, venga de la voz o del teclado.</summary>
+    private CancellationTokenSource? _turnCancellation;
+
     private int _conversationLoopRunning;
 
     /// <summary>Lo que dijo el usuario en la charla, para destilar al cerrarla. No se persiste.</summary>
     private readonly List<string> _conversationTurns = [];
 
-    /// <summary>
-    /// Frases de cierre. Es el inverso del wake word: la palabra que lo despide. Sin esto, un
-    /// asistente que no deja de escuchar es un micrófono abierto sin salida.
-    /// </summary>
-    private static readonly string[] ClosingPhrases =
-    [
-        "listo", "gracias", "chau", "nada mas", "deja", "ya esta",
-        "salí", "sali", "adios", "hasta luego", "nos vemos", "fin"
-    ];
+    // Las listas de frases de cierre viven en Viernes.Core.Conversation.ClosingPhrase: es lógica de
+    // texto pura, y acá adentro no había forma de probarla —el proyecto de pruebas no puede
+    // referenciar la aplicación—, así que su test terminaba reimplementando la regla y midiendo su
+    // propia expectativa.
 
-    /// <summary>
-    /// Órdenes inequívocas de callarse. Se reconocen aunque vengan en medio de una frase larga.
-    /// </summary>
-    /// <remarks>
-    /// La lista de arriba exige frases cortas, porque «gracias por todo esto que hiciste» no puede
-    /// cortar una conversación. Pero esa misma exigencia dejaba pasar «no, no, no, dejá de oír» —seis
-    /// palabras— que es exactamente cómo suena alguien pidiendo que pare. Estas no son ambiguas:
-    /// nadie dice «dejá de escuchar» en el medio de un pedido queriendo que siga.
-    /// </remarks>
-    private static readonly string[] StopCommands =
-    [
-        "deja de escuchar", "deja de escucharme", "deja de oir", "deja de oirme",
-        "no escuches mas", "dejate de escuchar", "basta de escuchar",
-        "callate", "silencio", "para ya", "pare", "basta", "suficiente",
-        "terminamos", "termina", "corta", "cortala", "apagate", "andate",
-        "cerra la conversacion", "olvidate", "dejalo ahi",
-        // Mandarla a dormir es la forma más natural de despedirla y no estaba contemplada. Van sin
-        // acento porque Normalize los pliega: «descansá» y «andá» llegan acá ya como «descansa» y
-        // «anda», así que una sola entrada cubre las dos formas de escribirlo.
-        "descansa", "descansa un rato", "tomate un descanso", "anda a dormir",
-        "andate a dormir", "a dormir", "dormi", "dormite", "a descansar",
-        "quedate tranquila", "quedate quieta", "chau por ahora", "hasta despues"
-    ];
     private readonly JsonUserDataStore _dataStore = new();
     private readonly JsonPersonalMemoryStore _memory = new();
     private readonly ReminderScheduler _reminderScheduler;
@@ -198,7 +175,35 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _pcActions,
             actionMemory: null,
             extraTools,
-            _environment);
+            _environment,
+            personalContext: DescribePersonalMemoryAsync);
+
+    /// <summary>
+    /// Arma la línea de contexto con lo que se sabe del usuario.
+    /// </summary>
+    /// <remarks>
+    /// Sólo lo explícito —lo que el usuario pidió recordar—, nunca las observaciones ni las
+    /// sugerencias sin aprobar: inyectar una suposición con el mismo peso que un dato dicho a
+    /// propósito es cómo un asistente empieza a afirmar cosas que nadie le dijo.
+    /// </remarks>
+    private async Task<string?> DescribePersonalMemoryAsync(CancellationToken cancellationToken)
+    {
+        var items = await _memory
+            .ListAsync(PersonalMemoryKind.Explicit, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (items.Count == 0)
+        {
+            return null;
+        }
+
+        var lines = items
+            .OfType<ExplicitMemory>()
+            .Take(20)
+            .Select(item => $"- {item.Content}");
+
+        return "Lo que sabés del usuario porque te lo pidió él:\n" + string.Join('\n', lines);
+    }
 
     /// <summary>
     /// Levanta los servidores MCP declarados y rehace el orquestador para que sus herramientas
@@ -431,18 +436,55 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return busy;
         }
 
+        // El turno corre bajo su propio token, encadenado al de quien llamó. Es lo que le da al freno
+        // algo que cortar: los pedidos escritos llegan acá con CancellationToken.None —el comando de
+        // la interfaz no tiene otro que dar—, así que sin esto el atajo apagaba la voz mientras el
+        // bucle de herramientas seguía tecleando en la ventana de al lado, y en pantalla decía
+        // «Corté todo».
+        using var turn = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var previous = Interlocked.Exchange(ref _turnCancellation, turn);
+        previous?.Dispose();
+
         try
         {
-            await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
-            _speechCancellation?.Cancel();
+            await PauseWakeWordAsync(turn.Token).ConfigureAwait(false);
+            CancelSpeechSafely();
             _neuralPlayer.Stop();
-            await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
-            return await ProcessRequestAsync(text, spoken, cancellationToken).ConfigureAwait(false);
+            await _speechSynthesizer.StopSpeakingAsync(turn.Token).ConfigureAwait(false);
+            return await ProcessRequestAsync(text, spoken, turn.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (turn.IsCancellationRequested)
+        {
+            // Cortar a propósito no es un error, y el mensaje tiene que decir lo que pasó de verdad.
+            return "Corté lo que estaba haciendo.";
         }
         finally
         {
+            Interlocked.CompareExchange(ref _turnCancellation, null, turn);
             Interlocked.Exchange(ref _requestActive, 0);
             await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Cancela la voz sin poder fallar.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SpeakCoreAsync"/> hace <c>Dispose()</c> del origen anterior y asigna el nuevo en
+    /// dos pasos; un <c>Cancel()</c> que pegue justo en el medio tira <see cref="ObjectDisposedException"/>.
+    /// Cuando eso pasaba dentro de <see cref="Panic"/>, la excepción subía hasta el hook del atajo,
+    /// que se la tragaba entera: no se paraba el reproductor, no se cancelaba la conversación, no se
+    /// silenciaba —y el rastro ya decía que había frenado, porque se escribe antes.
+    /// </remarks>
+    private void CancelSpeechSafely()
+    {
+        try
+        {
+            _speechCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Ya estaba cancelado y desechado: no hay nada que cortar.
         }
     }
 
@@ -1038,13 +1080,32 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return;
         }
 
-        RuntimeTrace.Write("panico", "corte de emergencia por atajo global");
-
-        _speechCancellation?.Cancel();
+        // Primero se corta, después se cuenta. Al revés, cualquier excepción en el corte dejaba un
+        // rastro que decía «frenó» sobre un sistema que seguía andando.
+        CancelSpeechSafely();
         _neuralPlayer.Stop();
-        _conversationCancellation?.Cancel();
-        _wakeHandoffCancellation?.Cancel();
+
+        // El turno es lo único que puede estar tecleando en otra ventana o corriendo un comando.
+        // Es lo que el atajo existe para cortar, y lo que hasta ahora no cortaba.
+        try
+        {
+            _turnCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        try
+        {
+            _conversationCancellation?.Cancel();
+            _wakeHandoffCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
         _conversationActive = false;
+        RuntimeTrace.Write("panico", "corte de emergencia por atajo global");
 
         _ = Task.Run(async () =>
         {
@@ -1131,9 +1192,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
             return true;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancelación de verdad: alguien la interrumpió a propósito. No hay nada que repetir por
+            // la voz de respaldo, porque el silencio es lo que se pidió.
+            return true;
+        }
         catch (OperationCanceledException)
         {
-            return true;
+            // El plazo del HttpClient vence como OperationCanceledException, y el cliente de voz sólo
+            // atrapa errores de red. Devolver true acá era lo que hacía que quedarse sin internet
+            // sonara exactamente igual que hablar: sin audio, sin voz de respaldo, y con un rastro
+            // que decía «sonó». Ahora se trata como lo que es —un fallo— y cae a SAPI.
+            RuntimeTrace.Write("voz.neural.timeout", "venció el plazo; paso a la voz del sistema");
+            return false;
         }
         catch (Exception)
         {
@@ -1639,71 +1711,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// parece —«recordame» o «recórdame», «deja» o «dejá»— así que comparar con acentos es comparar
     /// contra una moneda al aire. Plegarlos elimina la clase entera de fallo.
     /// </remarks>
-    private static string Normalize(string text)
-    {
-        var stripped = new string(text
-            .ToLowerInvariant()
-            .Where(character => !char.IsPunctuation(character))
-            .ToArray())
-            .Replace("viernes", string.Empty, StringComparison.Ordinal)
-            .Normalize(System.Text.NormalizationForm.FormD);
-
-        var builder = new System.Text.StringBuilder(stripped.Length);
-        foreach (var character in stripped)
-        {
-            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character)
-                != System.Globalization.UnicodeCategory.NonSpacingMark)
-            {
-                builder.Append(character);
-            }
-        }
-
-        // Los «no, no, no» del habla real dejan espacios dobles al caer la puntuación.
-        return string.Join(
-            ' ',
-            builder.ToString()
-                .Normalize(System.Text.NormalizationForm.FormC)
-                .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
-    }
+    private static string Normalize(string text) => ClosingPhrase.Normalize(text);
 
     /// <summary>
     /// Sólo cierra si la frase es corta y es esencialmente la despedida: «gracias por todo esto que
     /// hiciste» no debería cortar una conversación.
     /// </summary>
-    internal static bool IsClosingPhrase(string text)
-    {
-        var normalized = Normalize(text);
-        if (normalized.Length == 0)
-        {
-            return false;
-        }
-
-        // Una orden explícita corta en cualquier posición y a cualquier largo: «no, no, no, dejá de
-        // oír» tiene seis palabras y es tan clara como la de dos.
-        if (StopCommands.Any(command => ContainsWholePhrase(normalized, command)))
-        {
-            return true;
-        }
-
-        // Las despedidas ambiguas sí piden brevedad: «gracias» sola cierra, «gracias por todo esto
-        // que hiciste» no.
-        if (normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 4)
-        {
-            return false;
-        }
-
-        return ClosingPhrases.Any(phrase => ContainsWholePhrase(normalized, phrase));
-    }
-
-    /// <summary>
-    /// Coincidencia por palabras completas: sin esto «para» encontraría a «parece» y «fin» a
-    /// «finalmente», y una charla se cortaría sola a mitad de una frase cualquiera.
-    /// </summary>
-    private static bool ContainsWholePhrase(string normalized, string phrase) =>
-        normalized.Equals(phrase, StringComparison.Ordinal) ||
-        normalized.StartsWith(phrase + " ", StringComparison.Ordinal) ||
-        normalized.EndsWith(" " + phrase, StringComparison.Ordinal) ||
-        normalized.Contains(" " + phrase + " ", StringComparison.Ordinal);
+    internal static bool IsClosingPhrase(string text) => ClosingPhrase.IsClosing(text);
 
     /// <summary>
     /// Al cerrar una charla, destila a lo sumo dos hechos duraderos sobre el usuario y los guarda

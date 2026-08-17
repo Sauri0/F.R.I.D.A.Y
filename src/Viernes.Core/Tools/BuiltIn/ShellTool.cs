@@ -98,9 +98,20 @@ public sealed class ShellTool : IAssistantTool
             {
                 await process.WaitForExitAsync(deadline.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
+                // Se mata el hijo en los dos casos, no sólo al vencer el plazo. Antes, cuando la
+                // cancelación venía de afuera —el freno de emergencia—, esta guardia no se cumplía,
+                // nadie llamaba a TryKill y la excepción se relanzaba: el `using` desechaba el objeto
+                // Process, no el proceso. Quedaba un powershell.exe vivo, huérfano y sin ventana,
+                // corriendo justamente lo que se acababa de pedir frenar.
                 TryKill(process);
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
                 return ToolExecutionResult.Failure(
                     context.ToolCallId,
                     ToolName,
@@ -145,25 +156,35 @@ public sealed class ShellTool : IAssistantTool
     /// </summary>
     private static string Combine(string output, string errors)
     {
+        // Los errores se reservan enteros y se recorta la salida. Antes se pegaban al final y el
+        // recorte se los comía justo cuando más hacían falta: un comando ruidoso que además falla
+        // llegaba al modelo como una pared de salida normal, sin rastro de que algo salió mal.
+        var problema = errors.Trim();
+        var reservado = problema.Length == 0 ? 0 : Math.Min(problema.Length + 12, MaximumOutput / 2);
+        var espacio = MaximumOutput - reservado;
+
+        var salida = output.Trim();
+        var recortada = salida.Length <= espacio
+            ? salida
+            : salida[..Math.Max(0, espacio)] + $"\n… (recortado, eran {salida.Length} caracteres)";
+
         var builder = new StringBuilder();
-        if (!string.IsNullOrWhiteSpace(output))
+        if (recortada.Length > 0)
         {
-            builder.Append(output.Trim());
+            builder.Append(recortada);
         }
 
-        if (!string.IsNullOrWhiteSpace(errors))
+        if (problema.Length > 0)
         {
             if (builder.Length > 0)
             {
                 builder.AppendLine().AppendLine();
             }
 
-            builder.Append("Errores: ").Append(errors.Trim());
+            builder.Append("Errores: ").Append(
+                problema.Length <= reservado ? problema : problema[..reservado]);
         }
 
-        var text = builder.ToString();
-        return text.Length <= MaximumOutput
-            ? text
-            : text[..MaximumOutput] + $"\n… (recortado, eran {text.Length} caracteres)";
+        return builder.ToString();
     }
 }
