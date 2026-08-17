@@ -57,6 +57,7 @@ public partial class App : System.Windows.Application
         }
 
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        Diagnostics.RuntimeTrace.Reset();
 
         var runtime = new AssistantRuntime();
         _viewModel = new MainViewModel(runtime);

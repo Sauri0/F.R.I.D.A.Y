@@ -1,5 +1,6 @@
 using System.Net.Http;
 using Viernes.App.Controls;
+using Viernes.App.Diagnostics;
 using Viernes.App.ViewModels;
 using Viernes.Core;
 using Viernes.Core.Configuration;
@@ -221,6 +222,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         _isInitialized = true;
         _reminderScheduler.Start();
+        RuntimeTrace.Write(
+            "inicio",
+            $"stt={_recognitionProviderName} · wake={(wakeStarted ? "escuchando" : "apagado")} · " +
+            $"muted={_isMuted} · nube={IsCloudConfigured}");
         var providerStatus = selection.Availability.IsAvailable
             ? $"{_recognitionProviderName} listo"
             : "entrada de voz no disponible";
@@ -702,14 +707,17 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var token = _speechCancellation.Token;
 
+        RuntimeTrace.Write("voz.inicio", $"{spokenText.Length} caracteres · neural={_neuralVoice.IsAvailable}");
         var spoke = await TrySpeakNeuralAsync(spokenText, token).ConfigureAwait(false);
         var neuralFailure = spoke ? null : _neuralVoice.LastFailure;
+        RuntimeTrace.Write("voz.neural", spoke ? "sonó" : $"falló · {neuralFailure ?? "sin motivo"}");
 
         if (!spoke && !token.IsCancellationRequested)
         {
             // La voz de Windows queda como red: peor timbre, pero siempre disponible y sin red.
             var result = await _speechSynthesizer.SpeakAsync(spokenText, token).ConfigureAwait(false);
             spoke = result.Succeeded;
+            RuntimeTrace.Write("voz.sapi", spoke ? "sonó" : $"falló · {result.ErrorCode} · {result.ErrorMessage}");
             if (!spoke)
             {
                 neuralFailure = result.ErrorMessage ?? neuralFailure;
@@ -963,8 +971,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_conversationActive || IsMuted || _recognition is null)
         {
+            RuntimeTrace.Write(
+                "conversacion.rechazada",
+                $"activa={_conversationActive} muted={IsMuted} reconocedor={_recognition is not null}");
             return Task.CompletedTask;
         }
+
+        RuntimeTrace.Write("conversacion.abierta");
 
         _conversationActive = true;
         _conversationCancellation?.Dispose();
@@ -1003,6 +1016,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return;
         }
 
+        RuntimeTrace.Write("conversacion.cerrada", reason);
         _conversationActive = false;
         _conversationCancellation?.Cancel();
 
@@ -1053,11 +1067,18 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     "Te escucho · decime «listo» para cortar",
                     MicrophoneActive: true));
 
+                RuntimeTrace.Write("captura.inicio");
+                var clock = System.Diagnostics.Stopwatch.StartNew();
                 var capture = await _recognition
                     .RecognizeSingleUtteranceAsync(
                         new SingleUtteranceRecognitionOptions { InitialSilenceTimeout = TimeSpan.FromSeconds(20) },
                         cancellationToken)
                     .ConfigureAwait(false);
+                clock.Stop();
+                RuntimeTrace.Write(
+                    "captura.fin",
+                    $"{clock.ElapsedMilliseconds} ms · ok={capture.Succeeded} · código={capture.ErrorCode} · " +
+                    $"texto={(string.IsNullOrWhiteSpace(capture.Text) ? "(vacío)" : $"«{capture.Text}»")}");
 
                 if (cancellationToken.IsCancellationRequested)
                 {
@@ -1213,11 +1234,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private async Task HandleWakeWordDetectedAsync(WakeWordDetectedEventArgs eventArgs)
     {
+        // Con una conversación abierta, decir el nombre es parte de la charla, no una activación.
+        if (_conversationActive)
+        {
+            RuntimeTrace.Write("wake.ignorado", "ya hay conversación abierta");
+            return;
+        }
+
         if (Interlocked.CompareExchange(ref _wakeHandoffActive, 1, 0) != 0 ||
             _isDisposed || IsMuted || !_isWakeWordEnabled || _recognition is null || _wakeWord is null)
         {
             return;
         }
+
+        RuntimeTrace.Write("wake.detected", $"frase «{eventArgs.Phrase}» confianza {eventArgs.Confidence:0.00}");
 
         try
         {
@@ -1266,12 +1296,23 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
+    /// <summary>
+    /// Detiene el wake sin condicionarlo a su estado. Antes sólo paraba si estaba en
+    /// <c>Listening</c>, y justo después de detectar una frase no lo está: quedaba corriendo,
+    /// se re-armaba solo y le ganaba el micrófono a la captura. Detener dos veces no cuesta nada;
+    /// no detener cuesta la conversación entera.
+    /// </summary>
     private async Task PauseWakeWordAsync(CancellationToken cancellationToken)
     {
-        if (_wakeWord is { State: WakeWordServiceState.Listening })
+        if (_wakeWord is null)
         {
-            await _wakeWord.StopAsync(cancellationToken).ConfigureAwait(false);
+            return;
         }
+
+        var result = await _wakeWord.StopAsync(cancellationToken).ConfigureAwait(false);
+        RuntimeTrace.Write(
+            "wake.pausado",
+            $"ok={result.Succeeded} · estado={_wakeWord.State} · micrófono={_wakeWord.IsMicrophoneActive}");
     }
 
     private async Task ResumeWakeWordAsync(CancellationToken cancellationToken)
@@ -1293,7 +1334,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         if (_wakeWord.State != WakeWordServiceState.Listening)
         {
-            await _wakeWord.StartAsync(cancellationToken).ConfigureAwait(false);
+            var result = await _wakeWord.StartAsync(cancellationToken).ConfigureAwait(false);
+            RuntimeTrace.Write("wake.reanudado", $"ok={result.Succeeded}");
         }
     }
 
