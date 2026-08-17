@@ -96,6 +96,95 @@ internal static class VoiceDiagnostics
         return report.ToString();
     }
 
+    /// <summary>
+    /// Mide el nivel real del micrófono para saber si el umbral de voz sirve en esta máquina.
+    /// Un umbral fijo por encima de lo que da tu micrófono se ve igual que «no me escucha».
+    /// </summary>
+    public static async Task<string> MeasureMicrophoneAsync()
+    {
+        var report = new StringBuilder();
+        report.AppendLine("== NIVEL REAL DEL MICRÓFONO ==");
+
+        var levels = new List<double>();
+        var format = new NAudio.Wave.WaveFormat(16_000, 16, 1);
+        using var capture = new NAudio.Wave.WaveInEvent
+        {
+            DeviceNumber = -1,
+            WaveFormat = format,
+            BufferMilliseconds = 50
+        };
+
+        capture.DataAvailable += (_, e) =>
+        {
+            double sum = 0;
+            var samples = e.BytesRecorded / 2;
+            for (var offset = 0; offset + 1 < e.BytesRecorded; offset += 2)
+            {
+                var sample = BitConverter.ToInt16(e.Buffer, offset) / 32768.0;
+                sum += sample * sample;
+            }
+
+            if (samples > 0)
+            {
+                levels.Add(Math.Sqrt(sum / samples));
+            }
+        };
+
+        report.AppendLine(">>> QUEDATE CALLADO 4 SEGUNDOS (mido el ruido de fondo) <<<");
+        capture.StartRecording();
+        await Task.Delay(TimeSpan.FromSeconds(4));
+        var silence = levels.ToArray();
+        levels.Clear();
+
+        report.AppendLine(">>> AHORA HABLÁ 6 SEGUNDOS, NORMAL <<<");
+        await Task.Delay(TimeSpan.FromSeconds(6));
+        capture.StopRecording();
+        var speech = levels.ToArray();
+
+        report.AppendLine();
+        report.AppendLine($"Umbral configurado : {new SingleUtteranceRecognitionOptions().VoiceEnergyThreshold:0.0000}");
+        report.AppendLine();
+        Describe(report, "Silencio", silence);
+        Describe(report, "Hablando", speech);
+
+        if (speech.Length > 0)
+        {
+            var threshold = new SingleUtteranceRecognitionOptions().VoiceEnergyThreshold;
+            var above = speech.Count(level => level >= threshold) * 100.0 / speech.Length;
+            report.AppendLine();
+            report.AppendLine($"Fracción de tu voz por encima del umbral: {above:0}%");
+            report.AppendLine(above < 40
+                ? "  → El umbral es DEMASIADO ALTO para este micrófono: por eso no te detecta."
+                : "  → El umbral sirve para este micrófono.");
+
+            var floor = silence.Length > 0 ? Percentile(silence, 0.95) : 0;
+            var voice = Percentile(speech, 0.50);
+            report.AppendLine();
+            report.AppendLine($"Sugerido (entre piso de ruido y voz): {(floor + ((voice - floor) * 0.25)):0.0000}");
+        }
+
+        return report.ToString();
+    }
+
+    private static void Describe(StringBuilder report, string label, double[] values)
+    {
+        if (values.Length == 0)
+        {
+            report.AppendLine($"{label,-9}: sin muestras");
+            return;
+        }
+
+        report.AppendLine(
+            $"{label,-9}: mín {values.Min():0.0000} · mediana {Percentile(values, 0.5):0.0000} · " +
+            $"p95 {Percentile(values, 0.95):0.0000} · máx {values.Max():0.0000}  ({values.Length} muestras)");
+    }
+
+    private static double Percentile(double[] values, double fraction)
+    {
+        var sorted = values.OrderBy(value => value).ToArray();
+        return sorted[Math.Clamp((int)(sorted.Length * fraction), 0, sorted.Length - 1)];
+    }
+
     public static async Task<string> RunAsync()
     {
         var report = new StringBuilder();

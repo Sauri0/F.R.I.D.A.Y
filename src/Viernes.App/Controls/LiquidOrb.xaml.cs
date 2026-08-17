@@ -188,7 +188,7 @@ internal partial class LiquidOrb : UserControl
         // hablarle más fuerte la hincha, y eso se lee de inmediato como «me está oyendo».
         // El seguimiento es asimétrico —sube rápido, baja lento— porque una caída instantánea
         // parpadea con cada sílaba en vez de acompañar la frase.
-        var target = State == AssistantVisualState.Listening ? Math.Clamp(AudioLevel * 7.0, 0, 1) : 0;
+        var target = State == AssistantVisualState.Listening ? Math.Clamp(AudioLevel, 0, 1) : 0;
         _levelSmoothed += (target - _levelSmoothed) * (target > _levelSmoothed ? 0.45 : 0.08);
         bias += _levelSmoothed * 3.2;
 

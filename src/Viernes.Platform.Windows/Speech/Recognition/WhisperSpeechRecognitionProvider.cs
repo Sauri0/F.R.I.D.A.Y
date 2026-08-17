@@ -903,6 +903,8 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         private bool _voiceDetected;
         private TimeSpan _voiceEnergy;
         private TimeSpan _trailingSilence;
+        private double _noiseFloor;
+        private TimeSpan _calibrationRemaining = TimeSpan.FromMilliseconds(300);
 
         /// <summary>Puente hacia el evento público; la sesión no conoce al proveedor.</summary>
         public Action<double, bool>? LevelObserver { get; set; }
@@ -1056,17 +1058,37 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
             // Se publica siempre, aunque no llegue al umbral: la interfaz tiene que poder mostrar
             // que hay algo entrando por el micrófono incluso cuando todavía no es voz sostenida.
-            LevelObserver?.Invoke(rootMeanSquare, _voiceDetected);
+            // Se normaliza contra el piso de ruido para que la forma reaccione igual con cualquier
+            // micrófono, en vez de depender de la ganancia que tenga configurada.
+            var displayLevel = _noiseFloor > 0
+                ? Math.Clamp(rootMeanSquare / (_noiseFloor * 40), 0, 1)
+                : Math.Clamp(rootMeanSquare * 25, 0, 1);
+            LevelObserver?.Invoke(displayLevel, _voiceDetected);
 
             var bufferDuration = TimeSpan.FromSeconds((double)bytesRecorded / Capture.WaveFormat.AverageBytesPerSecond);
             _singleUtteranceBytes += bytesRecorded;
             var totalDuration = TimeSpan.FromSeconds(
                 (double)_singleUtteranceBytes / Capture.WaveFormat.AverageBytesPerSecond);
 
+            // Los primeros 300 ms se usan para medir el piso de ruido del ambiente. Un umbral fijo
+            // no puede servir para todos: medido en una máquina real, el piso era 0,0001 y la voz
+            // llegaba a 0,022, contra un umbral fijo de 0,018 que sólo cruzaba el 3 % del tiempo.
+            // Calibrar contra el silencio del propio cuarto es lo que lo vuelve independiente del
+            // micrófono, de su ganancia y de cuán ruidoso sea el lugar.
+            if (_calibrationRemaining > TimeSpan.Zero)
+            {
+                _noiseFloor = Math.Max(_noiseFloor, rootMeanSquare);
+                _calibrationRemaining -= bufferDuration;
+                return;
+            }
+
+            // Ocho veces el piso de ruido, con un mínimo absoluto por si el ambiente es un estudio.
+            var threshold = Math.Max(_noiseFloor * 8, 0.0012);
+
             // Un golpe en el escritorio o una puerta superan el umbral por un instante. La voz no:
             // se sostiene. Exigir energía continua durante 240 ms es lo que distingue una de otra
             // sin traer un detector entrenado, y es lo que evita que el ruido abra una captura.
-            if (rootMeanSquare >= options.VoiceEnergyThreshold)
+            if (rootMeanSquare >= threshold)
             {
                 _voiceEnergy += bufferDuration;
                 if (_voiceEnergy >= TimeSpan.FromMilliseconds(240))

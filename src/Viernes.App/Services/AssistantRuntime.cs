@@ -1103,11 +1103,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 // siempre tiene que superar a la ventana inicial o la validación tira.
                 var capture = await _recognition
                     .RecognizeSingleUtteranceAsync(
+                        // La ventana es larga a propósito: dentro de una conversación el corte lo
+                        // decide que hayas hablado y terminado, no un cronómetro. Si vence sin voz,
+                        // el bucle vuelve a abrir enseguida, así que la escucha no se interrumpe.
                         new SingleUtteranceRecognitionOptions
                         {
-                            InitialSilenceTimeout = TimeSpan.FromSeconds(6),
+                            InitialSilenceTimeout = TimeSpan.FromSeconds(20),
                             EndSilenceTimeout = TimeSpan.FromMilliseconds(600),
-                            MaximumDuration = TimeSpan.FromSeconds(20)
+                            MaximumDuration = TimeSpan.FromSeconds(30)
                         },
                         cancellationToken)
                     .ConfigureAwait(false);

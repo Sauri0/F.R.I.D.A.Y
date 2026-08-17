@@ -40,12 +40,14 @@ public partial class App : System.Windows.Application
 
         if (e.Args.Contains("--check-voice") ||
             e.Args.Contains("--check-listen") ||
-            e.Args.Contains("--check-whisper"))
+            e.Args.Contains("--check-whisper") ||
+            e.Args.Contains("--check-mic"))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             _ = CheckVoiceAndExitAsync(
                 e.Args.Contains("--check-listen"),
-                e.Args.Contains("--check-whisper"));
+                e.Args.Contains("--check-whisper"),
+                e.Args.Contains("--check-mic"));
             return;
         }
 
@@ -82,15 +84,17 @@ public partial class App : System.Windows.Application
         _window.Activate();
     }
 
-    private async Task CheckVoiceAndExitAsync(bool listenOnly, bool whisperOnly = false)
+    private async Task CheckVoiceAndExitAsync(bool listenOnly, bool whisperOnly = false, bool micOnly = false)
     {
         try
         {
-            var report = whisperOnly
-                ? await Diagnostics.WhisperBenchmark.RunAsync()
-                : listenOnly
-                    ? await Diagnostics.VoiceDiagnostics.ListenAsync()
-                    : await Diagnostics.VoiceDiagnostics.RunAsync();
+            var report = micOnly
+                ? await Diagnostics.VoiceDiagnostics.MeasureMicrophoneAsync()
+                : whisperOnly
+                    ? await Diagnostics.WhisperBenchmark.RunAsync()
+                    : listenOnly
+                        ? await Diagnostics.VoiceDiagnostics.ListenAsync()
+                        : await Diagnostics.VoiceDiagnostics.RunAsync();
             var path = Path.Combine(Path.GetTempPath(), "viernes-voice-check.txt");
             await File.WriteAllTextAsync(path, report);
             Console.WriteLine(report);
