@@ -74,8 +74,8 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            var path = await Diagnostics.OrbSnapshot.RunAsync(outputDirectory);
-            Console.WriteLine(path);
+            Console.WriteLine(await Diagnostics.OrbSnapshot.RunAsync(outputDirectory, Controls.OrbShape.Gota));
+            Console.WriteLine(await Diagnostics.OrbSnapshot.RunAsync(outputDirectory, Controls.OrbShape.Nube));
         }
         catch (Exception exception)
         {

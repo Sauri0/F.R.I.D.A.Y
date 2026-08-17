@@ -40,7 +40,7 @@ internal static class OrbSnapshot
         (AssistantVisualState.Attention, 1.2, false)
     ];
 
-    public static async Task<string> RunAsync(string outputDirectory)
+    public static async Task<string> RunAsync(string outputDirectory, OrbShape shape = OrbShape.Gota)
     {
         Directory.CreateDirectory(outputDirectory);
 
@@ -58,15 +58,31 @@ internal static class OrbSnapshot
             ShowActivated = false
         };
 
-        var orb = new LiquidOrb { Width = Cell, Height = Cell };
+        var gota = shape == OrbShape.Gota ? new LiquidOrb { Width = Cell, Height = Cell } : null;
+        var nube = shape == OrbShape.Nube ? new NubeOrb { Width = Cell, Height = Cell } : null;
+        FrameworkElement orb = (FrameworkElement?)gota ?? nube!;
         host.Content = orb;
         host.Show();
 
         var shots = new List<(BitmapSource Image, string Caption)>();
+        var index = 0;
         foreach (var (state, seconds, microphone) in Frames)
         {
-            orb.State = state;
-            orb.IsMicrophoneActive = microphone;
+            if (gota is not null)
+            {
+                gota.State = state;
+                gota.IsMicrophoneArmed = microphone;
+            }
+
+            if (nube is not null)
+            {
+                nube.State = state;
+
+                // La segunda fila de la hoja va sobre fondo claro, y ahí la nube cambia de dibujo.
+                nube.IsLightDesktop = index >= 4;
+            }
+
+            index++;
 
             // El reloj de las animaciones corre en tiempo real, así que se espera de verdad.
             await Task.Delay(TimeSpan.FromSeconds(seconds));
@@ -80,7 +96,7 @@ internal static class OrbSnapshot
 
         host.Close();
 
-        var sheetPath = Path.Combine(outputDirectory, "orb-contact-sheet.png");
+        var sheetPath = Path.Combine(outputDirectory, $"orb-{shape.ToString().ToLowerInvariant()}.png");
         SaveContactSheet(shots, sheetPath);
         return sheetPath;
     }
