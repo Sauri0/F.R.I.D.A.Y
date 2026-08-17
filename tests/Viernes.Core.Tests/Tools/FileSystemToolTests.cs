@@ -67,6 +67,78 @@ public sealed class FileSystemToolTests : IDisposable
         Assert.Contains("accion=carpeta", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <remarks>
+    /// El peor bug que tuvo esta herramienta. «Mové el informe a Trabajo», con Trabajo inexistente,
+    /// renombraba <c>informe.docx</c> a un archivo llamado «Trabajo» sin extensión y contestaba que
+    /// lo había movido: el archivo seguía existiendo, sin nombre reconocible ni programa que lo
+    /// abriera, que es la forma más difícil de notar que se perdió algo.
+    /// </remarks>
+    [Fact]
+    public async Task Mover_ACarpetaInexistente_LaCreaYNoRenombraElArchivo()
+    {
+        var origen = Path.Combine(this.root, "informe.docx");
+        Directory.CreateDirectory(this.root);
+        await File.WriteAllTextAsync(origen, "importante");
+        var carpeta = Path.Combine(this.root, "Trabajo");
+
+        var result = await RunAsync("mover", origen, destination: carpeta);
+
+        Assert.Equal(ToolExecutionStatus.Succeeded, result.Status);
+        Assert.True(Directory.Exists(carpeta));
+        Assert.False(File.Exists(carpeta));
+        Assert.Equal("importante", await File.ReadAllTextAsync(
+            Path.Combine(carpeta, "informe.docx")));
+    }
+
+    [Fact]
+    public async Task Mover_ADestinoConExtension_SigueSiendoUnRenombre()
+    {
+        var origen = Path.Combine(this.root, "nota.txt");
+        Directory.CreateDirectory(this.root);
+        await File.WriteAllTextAsync(origen, "x");
+        var destino = Path.Combine(this.root, "copia.txt");
+
+        await RunAsync("mover", origen, destination: destino);
+
+        Assert.True(File.Exists(destino));
+        Assert.False(Directory.Exists(destino));
+    }
+
+    [Fact]
+    public async Task Copiar_SobreAlgoExistente_GuardaLoPisado()
+    {
+        Directory.CreateDirectory(this.root);
+        var origen = Path.Combine(this.root, "nuevo.txt");
+        var destino = Path.Combine(this.root, "viejo.txt");
+        await File.WriteAllTextAsync(origen, "nuevo");
+        await File.WriteAllTextAsync(destino, "el que se pisa");
+
+        var result = await RunAsync("copiar", origen, destination: destino);
+
+        Assert.Equal(ToolExecutionStatus.Succeeded, result.Status);
+        Assert.Contains("papelera", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <remarks>
+    /// La herramienta prometía «se puede recuperar» en cada borrado y la acción no existía: la única
+    /// forma era abrir la papelera a mano y adivinar cuál de las carpetas con fecha era.
+    /// </remarks>
+    [Fact]
+    public async Task Recuperar_SinRutaListaLoQueHay()
+    {
+        var result = await RunAsync("recuperar", path: null);
+
+        Assert.Equal(ToolExecutionStatus.Succeeded, result.Status);
+    }
+
+    [Fact]
+    public async Task Recuperar_LoQueNoEstaFallaEnVezDeInventar()
+    {
+        var result = await RunAsync("recuperar", "no-existe-ningun-archivo-asi.txt");
+
+        Assert.Equal(ToolExecutionStatus.Failed, result.Status);
+    }
+
     [Fact]
     public async Task Abrir_LoQueNoExisteFallaEnVezDeAbrirOtraCosa()
     {
@@ -123,11 +195,16 @@ public sealed class FileSystemToolTests : IDisposable
     }
 
     private static async Task<ToolExecutionResult> RunAsync(
-        string action, string path, string? content = null)
+        string action, string? path = null, string? content = null, string? destination = null)
     {
-        var arguments = content is null
-            ? JsonSerializer.SerializeToElement(new { accion = action, ruta = path })
-            : JsonSerializer.SerializeToElement(new { accion = action, ruta = path, contenido = content });
+        var arguments = JsonSerializer.SerializeToElement(new Dictionary<string, string>(
+            new[]
+            {
+                new KeyValuePair<string, string>("accion", action),
+                new KeyValuePair<string, string>("ruta", path!),
+                new KeyValuePair<string, string>("contenido", content!),
+                new KeyValuePair<string, string>("destino", destination!)
+            }.Where(pair => pair.Value is not null)));
 
         return await new FileSystemTool().ExecuteAsync(
             arguments, new ToolExecutionContext("t1"), CancellationToken.None);

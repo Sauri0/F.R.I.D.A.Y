@@ -38,7 +38,9 @@ public sealed class FileSystemTool : IAssistantTool
         "accion=«listar» enumera lo que hay en ruta. " +
         "accion=«buscar» busca archivos por nombre bajo ruta, usando contenido como patrón. " +
         "accion=«mover» lleva ruta a destino. accion=«copiar» la duplica en destino. " +
-        "accion=«borrar» manda ruta a la papelera de Viernes, de donde se puede recuperar. " +
+        "accion=«borrar» manda ruta a la papelera propia. " +
+        "accion=«recuperar» devuelve algo borrado: sin ruta lista lo que hay, con ruta —sólo el " +
+        "nombre— lo restaura al escritorio. " +
         "accion=«existe» dice si ruta está. " +
         "Para las carpetas del usuario escribí la palabra y no una ruta: «escritorio», «documentos», " +
         "«descargas», «imágenes», «música», «videos» — yo las resuelvo a la ruta real de su equipo. " +
@@ -49,12 +51,14 @@ public sealed class FileSystemTool : IAssistantTool
             new Dictionary<string, object>
             {
                 ["accion"] = ToolSchemas.String(
-                    "carpeta, abrir, leer, escribir, agregar, listar, buscar, mover, copiar, borrar o existe."),
-                ["ruta"] = ToolSchemas.String("Ruta completa del archivo o carpeta."),
+                    "carpeta, abrir, leer, escribir, agregar, listar, buscar, mover, copiar, " +
+                    "borrar, recuperar o existe."),
+                ["ruta"] = ToolSchemas.String(
+                    "Ruta completa del archivo o carpeta. Opcional sólo en recuperar."),
                 ["contenido"] = ToolSchemas.String("Lo que se escribe, o el patrón al buscar."),
                 ["destino"] = ToolSchemas.String("Ruta de destino al mover o copiar.")
             },
-            ["accion", "ruta"]),
+            ["accion"]),
         ToolRiskLevel.Safe);
 
     /// <summary>Papelera propia: borrar es reversible mientras el archivo siga acá.</summary>
@@ -70,9 +74,25 @@ public sealed class FileSystemTool : IAssistantTool
     {
         cancellationToken.ThrowIfCancellationRequested();
         var action = JsonToolArguments.RequiredString(arguments, "accion", 20).ToLowerInvariant();
-        var path = Expand(JsonToolArguments.RequiredString(arguments, "ruta", 400));
+
+        // «recuperá lo que borraste» es un pedido completo sin ruta: la gracia de la papelera es que
+        // no tenés que acordarte dónde estaba. Por eso la ruta se lee opcional y se exige después,
+        // sólo para las acciones que de verdad la necesitan.
+        var rawPath = JsonToolArguments.OptionalString(arguments, "ruta", 400);
         var content = JsonToolArguments.OptionalString(arguments, "contenido", 200_000);
         var destination = JsonToolArguments.OptionalString(arguments, "destino", 400);
+
+        if (action is "recuperar" or "restaurar")
+        {
+            return Task.FromResult(Restore(context, rawPath));
+        }
+
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return Task.FromResult(Fail(context, "Necesito saber sobre qué archivo o carpeta."));
+        }
+
+        var path = Expand(rawPath);
 
         try
         {
@@ -385,6 +405,15 @@ public sealed class FileSystemTool : IAssistantTool
         {
             target = Path.Combine(target, Path.GetFileName(path));
         }
+        else if (LooksLikeAFolder(target))
+        {
+            // La carpeta destino todavía no existe. Sin esto, «mové el informe a Trabajo» no creaba
+            // «Trabajo»: renombraba informe.docx a un archivo llamado «Trabajo», sin extensión, y
+            // contestaba que lo había movido. El archivo seguía ahí, con otro nombre y sin programa
+            // que lo abriera, que es la forma más difícil de darse cuenta de que se perdió algo.
+            Directory.CreateDirectory(target);
+            target = Path.Combine(target, Path.GetFileName(path));
+        }
 
         var folder = Path.GetDirectoryName(target);
         if (!string.IsNullOrWhiteSpace(folder))
@@ -408,15 +437,45 @@ public sealed class FileSystemTool : IAssistantTool
             return Fail(context, $"No encontré «{path}».");
         }
 
+        // Pisar el destino sin guardarlo es una pérdida silenciosa: el archivo que estaba ahí
+        // desaparece y nadie lo menciona. «escribir» ya hace esto mismo antes de reemplazar.
+        var replaced = File.Exists(target);
+        if (replaced)
+        {
+            MoveToRecycle(target, copy: true);
+        }
+
+        var aviso = replaced ? " Lo que había ahí quedó guardado en la papelera." : string.Empty;
+
         if (move)
         {
             File.Move(path, target, overwrite: true);
-            return Ok(context, $"Moví a «{target}».");
+            return File.Exists(target)
+                ? Ok(context, $"Moví «{Path.GetFileName(path)}» a «{target}».{aviso}")
+                : Fail(context, $"Dije de mover a «{target}» pero no aparece ahí.");
         }
 
         File.Copy(path, target, overwrite: true);
-        return Ok(context, $"Copié a «{target}».");
+        return File.Exists(target)
+            ? Ok(context, $"Copié «{Path.GetFileName(path)}» a «{target}».{aviso}")
+            : Fail(context, $"Dije de copiar a «{target}» pero no aparece ahí.");
     }
+
+    /// <summary>
+    /// Decide si un destino inexistente era una carpeta o un nombre de archivo nuevo.
+    /// </summary>
+    /// <remarks>
+    /// No hay forma de saberlo con certeza, así que se elige el error barato. Si se acierta que era
+    /// una carpeta, todo bien. Si se equivoca y era un renombre, queda un archivo dentro de una
+    /// carpeta de más —molesto y visible—. Al revés, tratar una carpeta como renombre deja el
+    /// archivo sin extensión y sin rastro de cuál era, que es una pérdida silenciosa.
+    /// <para>
+    /// La señal es la extensión: «mové esto a Trabajo» es una carpeta; «mové esto a copia.docx» es
+    /// un renombre. Nada más decide, porque nada más se sabe.
+    /// </para>
+    /// </remarks>
+    private static bool LooksLikeAFolder(string target) =>
+        Path.GetExtension(target).Length == 0;
 
     private static ToolExecutionResult Recycle(ToolExecutionContext context, string path)
     {
@@ -428,7 +487,8 @@ public sealed class FileSystemTool : IAssistantTool
         var moved = MoveToRecycle(path, copy: false);
         return moved is null
             ? Fail(context, $"No pude mover «{path}» a la papelera.")
-            : Ok(context, $"Mandé «{Path.GetFileName(path)}» a la papelera de Viernes. Se puede recuperar.");
+            : Ok(context, $"Mandé «{Path.GetFileName(path)}» a la papelera. " +
+                "Si te arrepentís, pedime que lo recupere.");
     }
 
     /// <summary>
@@ -438,7 +498,10 @@ public sealed class FileSystemTool : IAssistantTool
     {
         try
         {
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            // Milisegundos, no segundos. Con resolución de segundo, dos borrados del mismo nombre en
+            // el mismo segundo caían en la misma carpeta y el segundo pisaba al primero con
+            // overwrite —mientras las dos respuestas decían «se puede recuperar»—.
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
             var folder = Path.Combine(RecycleRoot, stamp);
             Directory.CreateDirectory(folder);
             var target = Path.Combine(folder, Path.GetFileName(path));
@@ -464,6 +527,101 @@ public sealed class FileSystemTool : IAssistantTool
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Devuelve lo borrado desde la papelera propia, lo más reciente primero.
+    /// </summary>
+    /// <remarks>
+    /// Existía la papelera y no existía la vuelta: cada borrado contestaba «se puede recuperar» y la
+    /// única forma de hacerlo era abrir <c>%LOCALAPPDATA%\Viernes\papelera</c> a mano y adivinar cuál
+    /// de las carpetas con fecha era. Una promesa que sólo puede cumplir quien conoce el código no
+    /// es una promesa.
+    /// <para>
+    /// Sin nombre, lista lo que hay. Con nombre, restaura la copia más nueva que coincida.
+    /// </para>
+    /// </remarks>
+    private static ToolExecutionResult Restore(ToolExecutionContext context, string? name)
+    {
+        if (!Directory.Exists(RecycleRoot))
+        {
+            return Ok(context, "La papelera está vacía; no borré nada todavía.");
+        }
+
+        var borrados = Directory.EnumerateDirectories(RecycleRoot)
+            .OrderByDescending(folder => folder, StringComparer.Ordinal)
+            .SelectMany(folder => Directory
+                .EnumerateFileSystemEntries(folder)
+                .Select(entry => (Folder: folder, Entry: entry)))
+            .ToArray();
+
+        if (borrados.Length == 0)
+        {
+            return Ok(context, "La papelera está vacía; no borré nada todavía.");
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            var listado = borrados
+                .Take(MaximumListed)
+                .Select(item => $"· {Path.GetFileName(item.Entry)}  (borrado {Stamp(item.Folder)})");
+            return Ok(
+                context,
+                $"Tengo {borrados.Length} cosas en la papelera. Decime cuál devuelvo:\n" +
+                string.Join('\n', listado));
+        }
+
+        var buscado = name.Trim();
+        var match = borrados.FirstOrDefault(item =>
+            Path.GetFileName(item.Entry).Equals(buscado, StringComparison.OrdinalIgnoreCase));
+
+        if (match.Entry is null)
+        {
+            match = borrados.FirstOrDefault(item =>
+                Path.GetFileName(item.Entry).Contains(buscado, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (match.Entry is null)
+        {
+            return Fail(context, $"No tengo nada llamado «{buscado}» en la papelera.");
+        }
+
+        // Vuelve al escritorio y no a su lugar original: la ruta de origen no se guarda, y adivinarla
+        // sería restaurar en un lugar equivocado con cara de certeza.
+        var destino = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            Path.GetFileName(match.Entry));
+
+        if (File.Exists(destino) || Directory.Exists(destino))
+        {
+            return Fail(context, $"Ya hay algo llamado «{Path.GetFileName(destino)}» en el escritorio.");
+        }
+
+        if (Directory.Exists(match.Entry))
+        {
+            Directory.Move(match.Entry, destino);
+        }
+        else
+        {
+            File.Move(match.Entry, destino);
+        }
+
+        return File.Exists(destino) || Directory.Exists(destino)
+            ? Ok(context, $"Devolví «{Path.GetFileName(destino)}» al escritorio.")
+            : Fail(context, $"No pude devolver «{buscado}».");
+    }
+
+    private static string Stamp(string folder)
+    {
+        var raw = Path.GetFileName(folder);
+        return DateTime.TryParseExact(
+            raw,
+            "yyyyMMdd-HHmmss-fff",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None,
+            out var parsed)
+                ? parsed.ToString("dd/MM HH:mm", System.Globalization.CultureInfo.InvariantCulture)
+                : raw;
     }
 
     private static ToolExecutionResult Ok(ToolExecutionContext context, string message) =>
