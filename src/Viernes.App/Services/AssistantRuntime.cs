@@ -980,6 +980,22 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Acuse de recibo hablado. Que conteste apenas lo llamás es lo que convierte «se activó» en
+    /// «me escuchó»: sin voz, una animación no distingue estar atento de estar colgado.
+    /// </summary>
+    private async Task GreetAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SpeakIfEnabledAsync("Te escucho.", cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Si la voz falla, la conversación sigue: el saludo no es la conversación.
+        }
+    }
+
     public async Task EndConversationAsync(string reason, CancellationToken cancellationToken)
     {
         if (!_conversationActive)
@@ -1021,12 +1037,21 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
 
+            // SAPI avisa que soltó el micrófono antes de que el driver lo libere de verdad.
+            await Task.Delay(TimeSpan.FromMilliseconds(400), cancellationToken).ConfigureAwait(false);
+            await GreetAsync(cancellationToken).ConfigureAwait(false);
+
             while (_conversationActive && !cancellationToken.IsCancellationRequested && !IsMuted)
             {
                 if (_recognition is null)
                 {
                     break;
                 }
+
+                Publish(new AssistantRuntimeUpdate(
+                    AssistantVisualState.Listening,
+                    "Te escucho · decime «listo» para cortar",
+                    MicrophoneActive: true));
 
                 var capture = await _recognition
                     .RecognizeSingleUtteranceAsync(
@@ -1041,14 +1066,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 if (!capture.Succeeded)
                 {
-                    // Un fallo de dispositivo repetido sí corta: seguir sería fingir que escucha.
-                    if (capture.ErrorCode is SpeechErrorCode.DeviceError or SpeechErrorCode.Unavailable &&
-                        ++consecutiveDeviceFailures >= 2)
+                    // El dispositivo puede tardar en quedar libre: se reintenta antes de rendirse,
+                    // y sólo se corta si falla dos veces seguidas. Seguir sería fingir que escucha.
+                    if (capture.ErrorCode is SpeechErrorCode.DeviceError or SpeechErrorCode.Unavailable)
                     {
-                        await EndConversationAsync(
-                            $"Corté la conversación: {SafeSpeechMessage(capture.ErrorCode)}",
-                            CancellationToken.None).ConfigureAwait(false);
-                        return;
+                        if (++consecutiveDeviceFailures >= 3)
+                        {
+                            await EndConversationAsync(
+                                $"Corté la conversación: {SafeSpeechMessage(capture.ErrorCode)}",
+                                CancellationToken.None).ConfigureAwait(false);
+                            return;
+                        }
+
+                        await Task.Delay(TimeSpan.FromMilliseconds(600), cancellationToken).ConfigureAwait(false);
+                        continue;
                     }
 
                     continue;
@@ -1207,46 +1238,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 MicrophoneActive: true,
                 WakeWordEnabled: true));
 
-            var handoff = await _wakeCoordinator.RecognizeAfterWakeAsync(
-                _wakeWord,
-                _recognition,
-                new SingleUtteranceRecognitionOptions(),
-                _wakeHandoffCancellation.Token).ConfigureAwait(false);
-            _orchestrator.SetListening(false);
-
-            if (!handoff.Recognition.Succeeded)
-            {
-                Publish(new AssistantRuntimeUpdate(
-                    handoff.Recognition.ErrorCode is SpeechErrorCode.Cancelled or SpeechErrorCode.TimedOut
-                        ? AssistantVisualState.Idle
-                        : AssistantVisualState.Error,
-                    "No pude completar la escucha",
-                    SafeSpeechMessage(handoff.Recognition.ErrorCode),
-                    MicrophoneActive: IsAnyMicrophoneActive(),
-                    WakeWordEnabled: _isWakeWordEnabled));
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(handoff.Recognition.Text))
-            {
-                Publish(new AssistantRuntimeUpdate(
-                    AssistantVisualState.Idle,
-                    "No detecté una frase · sigo disponible",
-                    MicrophoneActive: IsAnyMicrophoneActive(),
-                    WakeWordEnabled: _isWakeWordEnabled));
-                return;
-            }
-
-            var transcript = handoff.Recognition.Text.Trim();
-            Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Thinking,
-                "Entendido · procesando…",
-                transcript,
-                MicrophoneActive: IsAnyMicrophoneActive(),
-                WakeWordEnabled: _isWakeWordEnabled));
-            await SendAsync(transcript, CancellationToken.None).ConfigureAwait(false);
-
-            // Llamarlo por su nombre abre la conversación: a partir de acá no hay que repetirlo.
+            // Llamarlo por su nombre abre la conversación directamente. Antes se hacía una captura
+            // suelta primero y sólo se abría la conversación si ésa salía bien: una captura fallida
+            // dejaba todo cerrado, sin respuesta y sin voz. El bucle es quien captura, y reintenta.
             await StartConversationAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
