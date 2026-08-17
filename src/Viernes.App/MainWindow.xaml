@@ -126,14 +126,14 @@
                                                              Storyboard.TargetProperty="ScaleX"
                                                              To="1" Duration="0:0:0.4">
                                                 <DoubleAnimation.EasingFunction>
-                                                    <ElasticEase Oscillations="2" Springiness="5" EasingMode="EaseOut" />
+                                                    <BackEase Amplitude="0.3" EasingMode="EaseOut" />
                                                 </DoubleAnimation.EasingFunction>
                                             </DoubleAnimation>
                                             <DoubleAnimation Storyboard.TargetName="PressDepth"
                                                              Storyboard.TargetProperty="ScaleY"
                                                              To="1" Duration="0:0:0.4">
                                                 <DoubleAnimation.EasingFunction>
-                                                    <ElasticEase Oscillations="2" Springiness="5" EasingMode="EaseOut" />
+                                                    <BackEase Amplitude="0.3" EasingMode="EaseOut" />
                                                 </DoubleAnimation.EasingFunction>
                                             </DoubleAnimation>
                                         </Storyboard>

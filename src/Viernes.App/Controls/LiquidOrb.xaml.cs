@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using Viernes.App.ViewModels;
 
@@ -12,50 +11,46 @@ using UserControl = System.Windows.Controls.UserControl;
 namespace Viernes.App.Controls;
 
 /// <summary>
-/// La gota. Un único <see cref="Path"/> cerrado cuyos puntos de control se animan con períodos que
-/// no coinciden entre sí, de modo que el contorno nunca repite un ciclo visible.
+/// La gota. Ocho puntos sobre una elipse, cada uno oscilando con su propio período, unidos con
+/// tangentes Catmull-Rom y reconstruidos cuadro a cuadro.
 /// </summary>
 /// <remarks>
-/// Los estados cambian la <em>viscosidad</em> —la velocidad del mismo fluido— y el color, nunca el
-/// vocabulario de formas: sigue siendo la misma sustancia haciendo otra cosa. Girar está reservado
-/// para «pensando», así que un giro siempre significa trabajo.
+/// Dos reglas que se pagaron caro y no conviene volver a probar: <b>deformar más no la hace más
+/// líquida</b> —una gota en reposo es casi esférica y lo que la vuelve agua es la luz—, y <b>nada
+/// rota</b>, porque girar un cuerpo ovoide barre la silueta y despega los reflejos.
 /// </remarks>
 internal partial class LiquidOrb : UserControl
 {
-    private static readonly Duration ColorFade = new(TimeSpan.FromMilliseconds(420));
+    private const int Points = 8;
+    private const double Radius = 25.0;
+    private const double CenterX = 35.0;
+    private const double CenterY = 36.5;
+    private const double ScaleX = 1.035;
+    private const double ScaleY = 0.965;
 
-    /// <summary>
-    /// Puntos de control de la masa, partiendo de un círculo de radio 25 (k = r · 0.5523).
-    /// Las excursiones son de dos o tres píxeles a propósito: la tensión superficial mantiene
-    /// redonda a una gota en reposo. Deformarla más la convierte en una ameba, no en agua.
-    /// </summary>
-    private static readonly (string Segment, string Property, Point Calm, Point Swell)[] ControlPoints =
-    [
-        ("ArcNE", "Point1", new Point(48.8, 10.0), new Point(51.5, 7.6)),
-        ("ArcNE", "Point2", new Point(60.0, 21.2), new Point(63.2, 19.4)),
-        ("ArcNE", "Point3", new Point(60.0, 35.0), new Point(62.8, 33.6)),
-        ("ArcSE", "Point1", new Point(60.0, 48.8), new Point(63.0, 51.2)),
-        ("ArcSE", "Point2", new Point(48.8, 60.0), new Point(46.6, 63.4)),
-        ("ArcSE", "Point3", new Point(35.0, 60.0), new Point(33.8, 63.0)),
-        ("ArcSW", "Point1", new Point(21.2, 60.0), new Point(18.4, 62.6)),
-        ("ArcSW", "Point2", new Point(10.0, 48.8), new Point(6.8, 46.8)),
-        ("ArcSW", "Point3", new Point(10.0, 35.0), new Point(7.2, 36.8)),
-        ("ArcNW", "Point1", new Point(10.0, 21.2), new Point(7.0, 23.6)),
-        ("ArcNW", "Point2", new Point(21.2, 10.0), new Point(23.4, 6.8))
-    ];
+    /// <summary>Tangente Catmull-Rom. A ocho puntos el error contra el círculo es menor al 0,1 %.</summary>
+    private const double Tangent = 0.1875;
 
-    /// <summary>Períodos deliberadamente no conmensurables: el conjunto no vuelve a alinearse.</summary>
-    private static readonly double[] Periods = [6.3, 7.1, 8.7, 7.9, 9.3, 6.7, 8.1, 10.3, 7.5, 9.9, 8.3];
+    /// <summary>Períodos deliberadamente no conmensurables: el conjunto nunca vuelve a alinearse.</summary>
+    private static readonly double[] Periods = [6.3, 7.1, 8.7, 7.9, 9.3, 6.7, 8.1, 10.3];
+    private static readonly double[] Phases = [0, 1.7, 3.1, 4.6, 2.2, 5.4, 0.9, 3.8];
 
-    private Storyboard? _liquid;
-    private Storyboard? _sheen;
-    private Storyboard? _tension;
+    private static readonly TimeSpan StateTransition = TimeSpan.FromMilliseconds(320);
+
+    private readonly Point[] _points = new Point[Points];
+    private StateProfile _from = StateProfile.For(AssistantVisualState.Idle);
+    private StateProfile _to = StateProfile.For(AssistantVisualState.Idle);
+    private double _transition = 1.0;
+    private double _phase;
+    private double _clock;
+    private long _lastTicks;
+    private bool _isRunning;
 
     public LiquidOrb()
     {
         InitializeComponent();
-        Loaded += OnLoaded;
-        Unloaded += OnUnloaded;
+        Loaded += (_, _) => Start();
+        Unloaded += (_, _) => Stop();
     }
 
     public static readonly DependencyProperty StateProperty = DependencyProperty.Register(
@@ -71,9 +66,22 @@ internal partial class LiquidOrb : UserControl
     }
 
     /// <summary>
-    /// El micrófono abierto no dibuja nada aparte: el estado <c>Listening</c> ya tiñe la gota
-    /// entera de verde, que es la señal integrada en el cuerpo y no un adorno encima.
+    /// Micrófono armado pero sin capturar. No dibuja geometría nueva: tiñe de verde el rebote que
+    /// ya existía, porque a 108 px cualquier anillo compite con el borde oscuro que da densidad.
     /// </summary>
+    public static readonly DependencyProperty IsMicrophoneArmedProperty = DependencyProperty.Register(
+        nameof(IsMicrophoneArmed),
+        typeof(bool),
+        typeof(LiquidOrb),
+        new PropertyMetadata(false));
+
+    internal bool IsMicrophoneArmed
+    {
+        get => (bool)GetValue(IsMicrophoneArmedProperty);
+        set => SetValue(IsMicrophoneArmedProperty, value);
+    }
+
+    /// <summary>Conservada por compatibilidad con el enlace del shell.</summary>
     public static readonly DependencyProperty IsMicrophoneActiveProperty = DependencyProperty.Register(
         nameof(IsMicrophoneActive),
         typeof(bool),
@@ -86,227 +94,225 @@ internal partial class LiquidOrb : UserControl
         set => SetValue(IsMicrophoneActiveProperty, value);
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e)
+    private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (_liquid is not null)
+        var orb = (LiquidOrb)d;
+
+        // Se interpola desde lo que se está viendo, no desde el estado anterior nominal: si el
+        // cambio llega a mitad de una transición, no hay salto.
+        orb._from = StateProfile.Lerp(orb._from, orb._to, orb._transition);
+        orb._to = StateProfile.For((AssistantVisualState)e.NewValue);
+        orb._transition = 0;
+    }
+
+    private void Start()
+    {
+        if (_isRunning)
         {
             return;
         }
 
-        _liquid = BuildLiquidStoryboard();
-        _sheen = BuildSheenStoryboard();
-        _tension = BuildTensionStoryboard();
-
-        _liquid.Begin(this, isControllable: true);
-        _sheen.Begin(this, isControllable: true);
-        ApplyState(State);
+        _isRunning = true;
+        _lastTicks = 0;
+        CompositionTarget.Rendering += OnRendering;
     }
 
-    private void OnUnloaded(object sender, RoutedEventArgs e)
+    private void Stop()
     {
-        StopControllable(_liquid);
-        StopControllable(_sheen);
-        StopControllable(_tension);
-        _liquid = _sheen = _tension = null;
-    }
-
-    private void StopControllable(Storyboard? storyboard)
-    {
-        try
-        {
-            storyboard?.Stop(this);
-            storyboard?.Remove(this);
-        }
-        catch (InvalidOperationException)
-        {
-            // El storyboard no llegó a arrancar; no hay reloj que detener.
-        }
-    }
-
-    private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
-        ((LiquidOrb)d).ApplyState((AssistantVisualState)e.NewValue);
-
-    private void ApplyState(AssistantVisualState state)
-    {
-        if (_liquid is null)
+        if (!_isRunning)
         {
             return;
         }
 
-        // Viscosidad: el mismo fluido, más suelto cuanto más trabaja.
-        var viscosity = state switch
-        {
-            AssistantVisualState.Listening => 2.6,
-            AssistantVisualState.Thinking => 3.4,
-            AssistantVisualState.Speaking => 4.5,
-            AssistantVisualState.Attention => 1.7,
-            AssistantVisualState.Error => 1.4,
-            _ => 1.0
-        };
-
-        _liquid.SetSpeedRatio(this, viscosity);
-        _sheen?.SetSpeedRatio(this, Math.Max(1.0, viscosity * 0.5));
-
-        // Girar 360° un cuerpo ovoide barre la silueta y deja los reflejos flotando fuera del borde.
-        // «Pensando» se distingue por viscosidad y color, que es más fiel a un líquido agitándose.
-        Toggle(_tension, state is AssistantVisualState.Attention or AssistantVisualState.Error);
-
-        var (body, deep, rim, halo) = PaletteFor(state);
-        Animate(MassBody, GradientStop.ColorProperty, body);
-        Animate(MassDeep, GradientStop.ColorProperty, deep);
-        Animate(MassRim, GradientStop.ColorProperty, rim);
-        Animate(GlowInner, GradientStop.ColorProperty, WithAlpha(halo, 0x38));
-        Animate(MassGlow, DropShadowEffect.ColorProperty, halo);
-
-        // El rebote de luz se tiñe del estado: en blanco puro parecía suciedad sobre el cuerpo.
-        Animate(RimCore, GradientStop.ColorProperty, WithAlpha(Lighten(body), 0xC4));
-        Animate(RimEdge, GradientStop.ColorProperty, WithAlpha(body, 0x00));
+        _isRunning = false;
+        CompositionTarget.Rendering -= OnRendering;
     }
 
-    private void Toggle(Storyboard? storyboard, bool shouldRun)
+    private void OnRendering(object? sender, EventArgs e)
     {
-        if (storyboard is null)
+        if (e is not RenderingEventArgs rendering)
         {
             return;
         }
 
-        if (shouldRun)
+        var ticks = rendering.RenderingTime.Ticks;
+        var delta = _lastTicks == 0 ? 0 : (ticks - _lastTicks) / (double)TimeSpan.TicksPerSecond;
+        _lastTicks = ticks;
+
+        // Un cuadro perdido no puede empujar la fase varios segundos de golpe.
+        delta = Math.Clamp(delta, 0, 0.1);
+        _clock += delta;
+
+        if (_transition < 1)
         {
-            storyboard.Begin(this, isControllable: true);
+            _transition = Math.Min(1, _transition + (delta / StateTransition.TotalSeconds));
         }
-        else
-        {
-            StopControllable(storyboard);
-        }
+
+        var eased = SineInOut(_transition);
+        var current = StateProfile.Lerp(_from, _to, eased);
+
+        // La viscosidad es velocidad del mismo fluido: acelera el reloj de la ondulación, no la amplitud.
+        _phase += delta * current.Viscosity;
+
+        ApplyGeometry(current);
+        ApplyPalette(current);
     }
 
-    private static void Animate(Animatable target, DependencyProperty property, Color to) =>
-        target.BeginAnimation(property, new ColorAnimation(to, ColorFade)
+    private void ApplyGeometry(StateProfile profile)
+    {
+        var (bias, excursionFactor) = profile.Character.Evaluate(_clock);
+        var excursion = profile.Excursion * excursionFactor;
+
+        for (var i = 0; i < Points; i++)
         {
-            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
-        });
+            var angle = (-Math.PI / 2) + (i * 2 * Math.PI / Points);
+            var radius = Radius + bias + (excursion * Math.Sin((2 * Math.PI * _phase / Periods[i]) + Phases[i]));
+            _points[i] = new Point(
+                CenterX + (radius * ScaleX * Math.Cos(angle)),
+                CenterY + (radius * ScaleY * Math.Sin(angle)));
+        }
 
-    private static Color WithAlpha(Color color, byte alpha) =>
-        Color.FromArgb(alpha, color.R, color.G, color.B);
+        var geometry = new StreamGeometry();
+        using (var context = geometry.Open())
+        {
+            context.BeginFigure(_points[0], isFilled: true, isClosed: true);
+            for (var i = 0; i < Points; i++)
+            {
+                var previous = _points[(i - 1 + Points) % Points];
+                var start = _points[i];
+                var end = _points[(i + 1) % Points];
+                var next = _points[(i + 2) % Points];
 
-    /// <summary>Lleva el color hacia el blanco sin desaturarlo del todo, para el rebote de luz.</summary>
-    private static Color Lighten(Color color) => Color.FromRgb(
-        (byte)(color.R + ((255 - color.R) * 0.62)),
-        (byte)(color.G + ((255 - color.G) * 0.62)),
-        (byte)(color.B + ((255 - color.B) * 0.62)));
+                context.BezierTo(
+                    new Point(
+                        start.X + ((end.X - previous.X) * Tangent),
+                        start.Y + ((end.Y - previous.Y) * Tangent)),
+                    new Point(
+                        end.X - ((next.X - start.X) * Tangent),
+                        end.Y - ((next.Y - start.Y) * Tangent)),
+                    end,
+                    isStroked: true,
+                    isSmoothJoin: true);
+            }
+        }
+
+        geometry.Freeze();
+        Mass.Data = geometry;
+
+        // Recortar los reflejos contra la silueta es lo que hace que la luz resbale por el borde.
+        Reflections.Clip = geometry;
+    }
+
+    private void ApplyPalette(StateProfile profile)
+    {
+        StopLight.Color = Lighten(profile.Body, 0.26);
+        StopBody.Color = profile.Body;
+        StopDeep.Color = profile.Depth;
+        StopRim.Color = profile.Rim;
+        MassGlow.Color = profile.Body;
+
+        // Armado: verde sobre la luz que ya existe, en vez de geometría nueva.
+        var bounce = IsMicrophoneArmed && State == AssistantVisualState.Idle
+            ? Color.FromRgb(0x72, 0xF0, 0xC0)
+            : profile.Body;
+        var strength = IsMicrophoneArmed && State == AssistantVisualState.Idle ? 0x4D : 0x57;
+        BounceCore.Color = Color.FromArgb((byte)strength, bounce.R, bounce.G, bounce.B);
+        BounceEdge.Color = Color.FromArgb(0x00, bounce.R, bounce.G, bounce.B);
+    }
+
+    private static double SineInOut(double t) => 0.5 - (Math.Cos(Math.PI * Math.Clamp(t, 0, 1)) / 2);
+
+    private static Color Lighten(Color color, double amount) => Color.FromRgb(
+        (byte)(color.R + ((255 - color.R) * amount)),
+        (byte)(color.G + ((255 - color.G) * amount)),
+        (byte)(color.B + ((255 - color.B) * amount)));
 
     /// <summary>
-    /// Cuerpo, profundidad y borde. El borde oscuro es lo que da densidad: sin él la gota se ve
-    /// como una mancha de color plana, por más reflejo que tenga encima.
+    /// El término propio de cada estado. La velocidad sola no alcanzaba para distinguirlos: cada uno
+    /// suma su carácter sobre el radio, en tiempo de reloj y no acumulado.
     /// </summary>
-    private static (Color Body, Color Deep, Color Rim, Color Halo) PaletteFor(AssistantVisualState state) => state switch
+    private readonly record struct CharacterTerm(CharacterKind Kind, double Amplitude, double Period)
     {
-        AssistantVisualState.Listening => (
-            Color.FromRgb(0x72, 0xF0, 0xC0),
-            Color.FromRgb(0x16, 0x6B, 0x54),
-            Color.FromRgb(0x07, 0x36, 0x2A),
-            Color.FromRgb(0x72, 0xF0, 0xC0)),
-        AssistantVisualState.Thinking => (
-            Color.FromRgb(0x9B, 0xB7, 0xFF),
-            Color.FromRgb(0x30, 0x44, 0x86),
-            Color.FromRgb(0x15, 0x1E, 0x45),
-            Color.FromRgb(0x9B, 0xB7, 0xFF)),
-        AssistantVisualState.Speaking => (
-            Color.FromRgb(0xFF, 0xCE, 0x82),
-            Color.FromRgb(0x7D, 0x54, 0x1C),
-            Color.FromRgb(0x3E, 0x28, 0x08),
-            Color.FromRgb(0xFF, 0xC5, 0x6B)),
-        AssistantVisualState.Attention => (
-            Color.FromRgb(0xFF, 0xB3, 0x47),
-            Color.FromRgb(0x7D, 0x4D, 0x13),
-            Color.FromRgb(0x3E, 0x23, 0x04),
-            Color.FromRgb(0xFF, 0xB3, 0x47)),
-        AssistantVisualState.Error => (
-            Color.FromRgb(0xFF, 0x73, 0x85),
-            Color.FromRgb(0x78, 0x26, 0x32),
-            Color.FromRgb(0x3B, 0x0F, 0x17),
-            Color.FromRgb(0xFF, 0x73, 0x85)),
-        _ => (
-            Color.FromRgb(0x72, 0xD9, 0xFF),
-            Color.FromRgb(0x17, 0x60, 0x7F),
-            Color.FromRgb(0x08, 0x31, 0x4A),
-            Color.FromRgb(0x72, 0xD9, 0xFF))
-    };
+        public static CharacterTerm None => new(CharacterKind.None, 0, 1);
 
-    private Storyboard BuildLiquidStoryboard()
-    {
-        var storyboard = new Storyboard { RepeatBehavior = RepeatBehavior.Forever };
-
-        for (var index = 0; index < ControlPoints.Length; index++)
+        /// <summary>Devuelve el corrimiento de radio y el factor que multiplica la excursión.</summary>
+        public (double Bias, double ExcursionFactor) Evaluate(double clock) => Kind switch
         {
-            var (segment, property, calm, swell) = ControlPoints[index];
-            var animation = new PointAnimation
-            {
-                From = calm,
-                To = swell,
-                Duration = new Duration(TimeSpan.FromSeconds(Periods[index])),
-                AutoReverse = true,
-                RepeatBehavior = RepeatBehavior.Forever,
-                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
-            };
-            Storyboard.SetTargetName(animation, segment);
-            Storyboard.SetTargetProperty(animation, new PropertyPath(property));
-            storyboard.Children.Add(animation);
-        }
+            // Temblor y respiración mueven el radio entero: la masa crece bajo la misma luz.
+            CharacterKind.Tremor or CharacterKind.Breath =>
+                (Amplitude * Math.Sin(2 * Math.PI * clock / Period), 1.0),
 
-        // Respiración sobre la base ovoide (1.035 × 0.965): se ensancha y se afina, sin latido.
-        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleXProperty, 1.02, 1.055, 7.3));
-        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleYProperty, 0.98, 0.945, 6.1));
-        storyboard.Children.Add(Rotate("MassTilt", -3.5, 3.5, 9.7));
-        return storyboard;
-    }
+            // La envolvente silábica modula cuánto ondula, entre el 52 % y el 100 %.
+            CharacterKind.Syllabic =>
+                (0.0, 0.52 + (0.48 * (0.5 + (0.5 * Math.Sin(2 * Math.PI * clock / Period))))),
 
-    private static Storyboard BuildSheenStoryboard()
-    {
-        var storyboard = new Storyboard { RepeatBehavior = RepeatBehavior.Forever };
-        // El reflejo se corre poco: si viaja mucho deja de parecer un reflejo fijo sobre una curva.
-        storyboard.Children.Add(Translate("SheenDrift", TranslateTransform.XProperty, -1.2, 1.8, 8.3));
-        storyboard.Children.Add(Translate("SheenDrift", TranslateTransform.YProperty, 1.0, -1.4, 9.7));
-        storyboard.Children.Add(Scale("GlowScale", ScaleTransform.ScaleXProperty, 0.98, 1.05, 7.9));
-        storyboard.Children.Add(Scale("GlowScale", ScaleTransform.ScaleYProperty, 0.98, 1.05, 7.9));
-        return storyboard;
-    }
-
-    private static Storyboard BuildTensionStoryboard()
-    {
-        var storyboard = new Storyboard { RepeatBehavior = RepeatBehavior.Forever };
-        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleXProperty, 0.96, 1.08, 0.9));
-        storyboard.Children.Add(Scale("MassScale", ScaleTransform.ScaleYProperty, 0.96, 1.08, 0.9));
-        return storyboard;
-    }
-
-    private static DoubleAnimation Scale(string target, DependencyProperty property, double from, double to, double seconds) =>
-        Timeline(target, property, from, to, seconds);
-
-    private static DoubleAnimation Translate(string target, DependencyProperty property, double from, double to, double seconds) =>
-        Timeline(target, property, from, to, seconds);
-
-    private static DoubleAnimation Rotate(string target, double from, double to, double seconds) =>
-        Timeline(target, RotateTransform.AngleProperty, from, to, seconds);
-
-    private static DoubleAnimation Timeline(
-        string target,
-        DependencyProperty property,
-        double from,
-        double to,
-        double seconds)
-    {
-        var animation = new DoubleAnimation
-        {
-            From = from,
-            To = to,
-            Duration = new Duration(TimeSpan.FromSeconds(seconds)),
-            AutoReverse = true,
-            RepeatBehavior = RepeatBehavior.Forever,
-            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            _ => (0.0, 1.0)
         };
-        Storyboard.SetTargetName(animation, target);
-        Storyboard.SetTargetProperty(animation, new PropertyPath(property));
-        return animation;
+
+        public static CharacterTerm Lerp(CharacterTerm start, CharacterTerm target, double t)
+        {
+            // Con el mismo carácter, la amplitud se interpola. Con caracteres distintos no hay mezcla
+            // posible —un temblor no es medio una respiración—, así que se cambia a mitad de camino.
+            if (start.Kind == target.Kind)
+            {
+                return target with { Amplitude = start.Amplitude + ((target.Amplitude - start.Amplitude) * t) };
+            }
+
+            return t >= 0.5 ? target : start;
+        }
+    }
+
+    private enum CharacterKind
+    {
+        None,
+        Tremor,
+        Breath,
+        Syllabic
+    }
+
+    private readonly record struct StateProfile(
+        Color Body,
+        Color Depth,
+        Color Rim,
+        double Viscosity,
+        double Excursion,
+        CharacterTerm Character)
+    {
+        public static StateProfile For(AssistantVisualState state) => state switch
+        {
+            AssistantVisualState.Listening => new(
+                Rgb(0x72, 0xF0, 0xC0), Rgb(0x16, 0x6B, 0x54), Rgb(0x07, 0x36, 0x2A),
+                2.6, 2.8, new CharacterTerm(CharacterKind.Tremor, 0.5, 0.42)),
+            AssistantVisualState.Thinking => new(
+                Rgb(0x9B, 0xB7, 0xFF), Rgb(0x30, 0x44, 0x86), Rgb(0x15, 0x1E, 0x45),
+                3.0, 3.6, new CharacterTerm(CharacterKind.Breath, 1.0, 2.4)),
+            AssistantVisualState.Speaking => new(
+                Rgb(0xFF, 0xCE, 0x82), Rgb(0x7D, 0x54, 0x1C), Rgb(0x3E, 0x28, 0x08),
+                4.0, 4.3, new CharacterTerm(CharacterKind.Syllabic, 0, 0.34)),
+            AssistantVisualState.Attention => new(
+                Rgb(0xFF, 0xB3, 0x47), Rgb(0x7D, 0x4D, 0x13), Rgb(0x3E, 0x23, 0x04),
+                1.7, 2.0, new CharacterTerm(CharacterKind.Breath, 1.6, 1.6)),
+            AssistantVisualState.Error => new(
+                Rgb(0xFF, 0x73, 0x85), Rgb(0x78, 0x26, 0x32), Rgb(0x3B, 0x0F, 0x17),
+                2.2, 2.5, new CharacterTerm(CharacterKind.Tremor, 0.65, 0.28)),
+            _ => new(
+                Rgb(0x72, 0xD9, 0xFF), Rgb(0x17, 0x60, 0x7F), Rgb(0x08, 0x31, 0x4A),
+                1.0, 1.7, CharacterTerm.None)
+        };
+
+        public static StateProfile Lerp(StateProfile start, StateProfile target, double t) => new(
+            LerpColor(start.Body, target.Body, t),
+            LerpColor(start.Depth, target.Depth, t),
+            LerpColor(start.Rim, target.Rim, t),
+            start.Viscosity + ((target.Viscosity - start.Viscosity) * t),
+            start.Excursion + ((target.Excursion - start.Excursion) * t),
+            CharacterTerm.Lerp(start.Character, target.Character, t));
+
+        private static Color Rgb(byte r, byte g, byte b) => Color.FromRgb(r, g, b);
+
+        private static Color LerpColor(Color start, Color target, double t) => Color.FromRgb(
+            (byte)(start.R + ((target.R - start.R) * t)),
+            (byte)(start.G + ((target.G - start.G) * t)),
+            (byte)(start.B + ((target.B - start.B) * t)));
     }
 }

@@ -265,7 +265,8 @@ public partial class MainWindow : Window
         stretch.KeyFrames.Add(new EasingDoubleKeyFrame(1.24, KeyTime.FromPercent(0.72)));
         stretch.KeyFrames.Add(new EasingDoubleKeyFrame(1.0, KeyTime.FromPercent(1))
         {
-            EasingFunction = new ElasticEase { Oscillations = 2, Springiness = 5, EasingMode = EasingMode.EaseOut }
+            // El diseño prohíbe ElasticEase: a las ocho horas en pantalla, cada oscilación se siente.
+            EasingFunction = new BackEase { Amplitude = 0.35, EasingMode = EasingMode.EaseOut }
         });
 
         var squash = new DoubleAnimationUsingKeyFrames { Duration = travel + TimeSpan.FromMilliseconds(240) };
@@ -275,7 +276,8 @@ public partial class MainWindow : Window
         squash.KeyFrames.Add(new EasingDoubleKeyFrame(0.78, KeyTime.FromPercent(0.72)));
         squash.KeyFrames.Add(new EasingDoubleKeyFrame(1.0, KeyTime.FromPercent(1))
         {
-            EasingFunction = new ElasticEase { Oscillations = 2, Springiness = 5, EasingMode = EasingMode.EaseOut }
+            // El diseño prohíbe ElasticEase: a las ocho horas en pantalla, cada oscilación se siente.
+            EasingFunction = new BackEase { Amplitude = 0.35, EasingMode = EasingMode.EaseOut }
         });
 
         OrbArrivalScale.BeginAnimation(ScaleTransform.ScaleXProperty, stretch);
