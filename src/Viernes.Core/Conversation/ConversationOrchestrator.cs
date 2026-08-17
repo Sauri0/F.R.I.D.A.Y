@@ -1,3 +1,4 @@
+using Viernes.Core.Autonomy;
 using Viernes.Core.Awareness;
 using Viernes.Core.Configuration;
 using Viernes.Core.Goals;
@@ -132,6 +133,9 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
 
     /// <summary>Los encargos que siguen vivos entre charlas, con sus preguntas sin contestar.</summary>
     private readonly MissionBook? _missions;
+
+    /// <summary>Hasta dónde la dejó llegar el usuario con cada acción y cada persona.</summary>
+    private readonly AutonomyPolicy? _autonomy;
     private readonly int _maxToolIterations;
     private readonly string _systemPrompt;
     private readonly SemaphoreSlim _turnGate = new(1, 1);
@@ -151,13 +155,15 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         RuleBook? rules = null,
         GoalBook? goals = null,
         Func<CancellationToken, Task<string?>>? personalContext = null,
-        MissionBook? missions = null)
+        MissionBook? missions = null,
+        AutonomyPolicy? autonomy = null)
     {
         _environment = environment;
         _rules = rules;
         _goals = goals;
         _personalContext = personalContext;
         _missions = missions;
+        _autonomy = autonomy;
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _toolExecutor = toolExecutor ?? throw new ArgumentNullException(nameof(toolExecutor));
         _actionMemory = actionMemory;
@@ -255,6 +261,13 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 ? null
                 : await _missions.DescribeOpenAsync(cancellationToken).ConfigureAwait(false);
 
+            // Los permisos aprendidos. Van en cada turno por la misma razón que las reglas: son
+            // decisiones que el usuario tomó a propósito, y olvidarlas justo cuando hay que mandar
+            // algo es el error que más caro sale.
+            var permisos = _autonomy is null
+                ? null
+                : await _autonomy.DescribeAsync(cancellationToken).ConfigureAwait(false);
+
             var results = new List<ToolExecutionResult>();
             for (var iteration = 0; iteration < _maxToolIterations; iteration++)
             {
@@ -292,6 +305,11 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 if (pending is not null)
                 {
                     extras.Add(ConversationMessage.System(pending));
+                }
+
+                if (permisos is not null)
+                {
+                    extras.Add(ConversationMessage.System(permisos));
                 }
 
                 // La fecha va en cada turno porque el modelo no la tiene. Sin esto, «recordame el

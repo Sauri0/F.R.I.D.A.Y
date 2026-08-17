@@ -1,4 +1,5 @@
 using Viernes.Core.Configuration;
+using Viernes.Core.Autonomy;
 using Viernes.Core.Awareness;
 using Viernes.Core.Conversation;
 using Viernes.Core.Goals;
@@ -27,7 +28,8 @@ public static class ViernesCoreFactory
         RuleBook? rules = null,
         GoalBook? goals = null,
         Func<CancellationToken, Task<string?>>? personalContext = null,
-        MissionBook? missions = null)
+        MissionBook? missions = null,
+        AutonomyPolicy? autonomy = null)
     {
         rules ??= new RuleBook();
         goals ??= new GoalBook();
@@ -35,6 +37,7 @@ public static class ViernesCoreFactory
         // Las misiones vienen puestas por defecto, como el recetario: que un encargo sobreviva a
         // cerrar la charla no debería ser algo que haya que acordarse de encender en cada host.
         missions ??= new MissionBook();
+        autonomy ??= new AutonomyPolicy();
         ArgumentNullException.ThrowIfNull(httpClient);
         options ??= ViernesOptions.FromEnvironment();
         dataStore ??= new JsonUserDataStore();
@@ -49,7 +52,8 @@ public static class ViernesCoreFactory
             environment,
             rules,
             goals,
-            missions);
+            missions,
+            autonomy);
         var tools = new ToolExecutor(
             extraTools is { Count: > 0 } ? [.. builtIn, .. extraTools] : builtIn,
             new SafeToolPolicy());
