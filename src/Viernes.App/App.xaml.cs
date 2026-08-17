@@ -38,10 +38,14 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        if (e.Args.Contains("--check-voice") || e.Args.Contains("--check-listen"))
+        if (e.Args.Contains("--check-voice") ||
+            e.Args.Contains("--check-listen") ||
+            e.Args.Contains("--check-whisper"))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            _ = CheckVoiceAndExitAsync(e.Args.Contains("--check-listen"));
+            _ = CheckVoiceAndExitAsync(
+                e.Args.Contains("--check-listen"),
+                e.Args.Contains("--check-whisper"));
             return;
         }
 
@@ -77,13 +81,15 @@ public partial class App : System.Windows.Application
         _window.Activate();
     }
 
-    private async Task CheckVoiceAndExitAsync(bool listenOnly)
+    private async Task CheckVoiceAndExitAsync(bool listenOnly, bool whisperOnly = false)
     {
         try
         {
-            var report = listenOnly
-                ? await Diagnostics.VoiceDiagnostics.ListenAsync()
-                : await Diagnostics.VoiceDiagnostics.RunAsync();
+            var report = whisperOnly
+                ? await Diagnostics.WhisperBenchmark.RunAsync()
+                : listenOnly
+                    ? await Diagnostics.VoiceDiagnostics.ListenAsync()
+                    : await Diagnostics.VoiceDiagnostics.RunAsync();
             var path = Path.Combine(Path.GetTempPath(), "viernes-voice-check.txt");
             await File.WriteAllTextAsync(path, report);
             Console.WriteLine(report);

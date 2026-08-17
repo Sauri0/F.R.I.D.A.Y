@@ -52,19 +52,25 @@ public sealed record WhisperSpeechRecognitionOptions
     }
 
     /// <summary>
-    /// Elige el mejor modelo instalado, de más preciso a menos. Turbo es ~5x más rápido que
-    /// large-v3 conservando casi toda la precisión; base queda como piso porque siempre estuvo.
+    /// Elige el modelo instalado que mejor equilibra precisión y velocidad, no el más grande.
     /// </summary>
+    /// <remarks>
+    /// Medido en una máquina real con la misma frase de 4,7 s: <c>small</c> transcribe en ×0,88 del
+    /// tiempo real y acierta nombres propios; <c>turbo</c> tarda ×4,88 —cinco veces más— y encima
+    /// castellaniza el rioplatense («recórdame» por «recordame»); <c>base</c> vuela a ×0,28 pero
+    /// falla el nombre propio, que es justo lo que hay que entender. Por eso turbo va último: en un
+    /// asistente conversacional, veinte segundos de espera pesan más que un acento bien puesto.
+    /// </remarks>
     public static string GetDefaultModelPath()
     {
         var directory = GetDefaultModelDirectory();
         string[] preference =
         [
-            "ggml-large-v3-turbo.bin",
-            "ggml-large-v3-turbo-q8_0.bin",
-            "ggml-large-v3-turbo-q5_0.bin",
             "ggml-small.bin",
-            "ggml-base.bin"
+            "ggml-base.bin",
+            "ggml-large-v3-turbo-q5_0.bin",
+            "ggml-large-v3-turbo-q8_0.bin",
+            "ggml-large-v3-turbo.bin"
         ];
 
         foreach (var candidate in preference)

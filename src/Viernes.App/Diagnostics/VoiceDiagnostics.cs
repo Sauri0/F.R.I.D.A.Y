@@ -60,20 +60,32 @@ internal static class VoiceDiagnostics
         provider.ServiceError += (_, e) => errors.Add($"{e.ErrorCode}: {e.Message}");
         provider.TranscriptionUpdated += (_, e) => report.AppendLine($"  parcial: «{e.Text}» (final={e.IsFinal})");
 
-        report.AppendLine();
-        report.AppendLine(">>> HABLÁ AHORA. Tenés 8 segundos para empezar. <<<");
-
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        var result = await provider.RecognizeSingleUtteranceAsync(new SingleUtteranceRecognitionOptions());
-        clock.Stop();
-
-        report.AppendLine();
-        report.AppendLine($"Resultado    : {(result.Succeeded ? "OK" : "FALLÓ")}");
-        report.AppendLine($"Texto        : «{result.Text}»");
-        report.AppendLine($"Tiempo total : {clock.ElapsedMilliseconds} ms");
-        if (!result.Succeeded)
+        // Dos capturas: la primera paga la carga del modelo, la segunda mide el régimen real.
+        // Sin separarlas, «tarda un minuto» no distingue entre cargar 547 MB y transcribir mal.
+        var options = new SingleUtteranceRecognitionOptions
         {
-            report.AppendLine($"Código       : {result.ErrorCode}");
+            InitialSilenceTimeout = TimeSpan.FromSeconds(20),
+            MaximumDuration = TimeSpan.FromSeconds(30)
+        };
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            report.AppendLine();
+            report.AppendLine(attempt == 1
+                ? ">>> HABLÁ AHORA (1 de 2). Hay 20 segundos. <<<"
+                : ">>> HABLÁ DE NUEVO (2 de 2). Ésta mide el régimen real. <<<");
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var result = await provider.RecognizeSingleUtteranceAsync(options);
+            clock.Stop();
+
+            report.AppendLine($"  Resultado : {(result.Succeeded ? "OK" : "FALLÓ")}");
+            report.AppendLine($"  Texto     : «{result.Text}»");
+            report.AppendLine($"  Tiempo    : {clock.ElapsedMilliseconds} ms");
+            if (!result.Succeeded)
+            {
+                report.AppendLine($"  Código    : {result.ErrorCode}");
+            }
         }
 
         foreach (var error in errors)
