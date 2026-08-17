@@ -1,0 +1,84 @@
+# Publica el paquete que baja el instalador.
+#
+# Se compila con --self-contained: el .NET va adentro del zip. Pesa unos 150 MB más, y a cambio
+# quien instala no tiene que bajar ni instalar ningún runtime, que es donde se traba la mitad de la
+# gente que sólo quería probar la aplicación.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Etiqueta a publicar (por ejemplo v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Las pruebas corren antes de publicar. Un paquete que no pasa sus pruebas no llega al
+      # instalador de nadie.
+      - name: Probar
+        run: dotnet test Viernes.slnx --configuration Release
+
+      - name: Resolver la etiqueta
+        id: etiqueta
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $env:GITHUB_REF -replace '^refs/tags/', ''
+          } else {
+            '${{ github.event.inputs.tag }}'
+          }
+          "valor=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Publicar la aplicación
+        run: >
+          dotnet publish src/Viernes.App/Viernes.App.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=false
+          -p:DebugType=none
+          --output publicado
+
+      - name: Empaquetar
+        shell: pwsh
+        run: |
+          $nombre = "Viernes-${{ steps.etiqueta.outputs.valor }}-win-x64.zip"
+          Compress-Archive -Path publicado\* -DestinationPath $nombre -CompressionLevel Optimal
+          "paquete=$nombre" >> $env:GITHUB_OUTPUT
+          $mb = [math]::Round((Get-Item $nombre).Length / 1MB, 1)
+          Write-Host "Paquete: $nombre ($mb MB)"
+        id: empaquetar
+
+      # El instalador busca el asset cuyo nombre contiene «win-x64» y termina en .zip. Si se cambia
+      # el nombre del paquete acá, hay que cambiarlo también en instalador/instalar.ps1.
+      - name: Crear el release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.etiqueta.outputs.valor }}
+          name: ${{ steps.etiqueta.outputs.valor }}
+          files: ${{ steps.empaquetar.outputs.paquete }}
+          generate_release_notes: true
+          body: |
+            ## Instalación
+
+            1. Bajá **INSTALAR.cmd** e **instalar.ps1** de la carpeta `instalador/`.
+            2. Doble clic en `INSTALAR.cmd`.
+            3. Elegí cómo se va a llamar y pegá tu clave de OpenRouter.
+
+            El instalador baja este paquete solo. No hace falta instalar .NET: viene adentro.

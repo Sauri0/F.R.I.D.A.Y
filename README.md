@@ -1,188 +1,120 @@
-# Viernes
+# F.R.I.D.A.Y
 
-Viernes es un asistente personal nativo para Windows: sereno, preciso, cálido, proactivo sin invadir y siempre con el usuario al mando. No es una web app: es un shell WPF que vive sobre el escritorio como un orbe luminoso, se integra con la bandeja y funciona sin una clave de OpenRouter.
+Un asistente de escritorio para Windows que vive en una gota de vidrio, escucha cuando lo llamás y
+hace cosas en tu máquina: abre aplicaciones, maneja archivos, pone música, mira la pantalla, busca en
+la web y aprende cómo trabajás.
 
-> Estado: MVP ejecutable en desarrollo activo. Sin `OPENROUTER_API_KEY` arranca en **modo local seguro** y no intenta conectarse a OpenRouter.
+Habla en rioplatense. Vos elegís cómo se llama.
 
-## Primera prueba, sin clave
+---
 
-Requisitos de desarrollo:
+## Instalación
 
-- Windows 10 2004 (build 19041) o Windows 11;
-- .NET 10 SDK;
-- PowerShell 7 recomendado.
+1. Bajá la carpeta [`instalador/`](instalador/) — necesitás `INSTALAR.cmd` e `instalar.ps1` juntos.
+2. Doble clic en **`INSTALAR.cmd`**.
+3. Contestá dos preguntas: cómo se va a llamar y cuál es tu clave de OpenRouter.
 
-Desde la raíz del repositorio:
+El instalador se encarga del resto: baja la aplicación, baja el modelo de voz, crea los accesos
+directos y lo deja andando. **No hace falta instalar .NET** — viene adentro del paquete.
 
-```powershell
-.\scripts\run.ps1
-```
+Volver a correr `INSTALAR.cmd` actualiza a la última versión sin volver a preguntar nada.
 
-La primera vista es un orbe de aproximadamente `78 × 78 px`, sin marco ni panel fijo. Durante escucha, pensamiento, respuesta o confirmación se expande temporalmente a una burbuja breve; después vuelve al orbe. Está siempre disponible, no aparece en la barra de tareas y puede ocultarse o cerrarse desde la bandeja.
+### Qué necesitás
 
-Para instalar el STT local preferido antes de ejecutar:
-
-```powershell
-.\scripts\setup-whisper.ps1                 # modelo base
-.\scripts\setup-whisper.ps1 -Model small    # alternativa más pesada
-```
-
-El script descarga un modelo multilingüe desde el repositorio de `whisper.cpp` a `%LOCALAPPDATA%\Viernes\Models\Whisper`, verifica el SHA-1 publicado y nunca toca credenciales. Si Whisper no está disponible, la capa de voz vuelve a SAPI/Windows cuando existe un reconocedor español instalado.
-
-El pipeline Whisper fue verificado de extremo a extremo con audio español sintético, pero la transcripción base todavía tuvo errores. Es una prueba de funcionamiento, no de precisión; ver [validación de voz](docs/VOICE.md#validación-técnica-actual).
-
-También se puede reproducir manualmente el mismo flujo, manteniendo artefactos fuera del workspace:
-
-```powershell
-$artifacts = Join-Path $env:LOCALAPPDATA 'Viernes\BuildArtifacts'
-dotnet restore .\Viernes.slnx --artifacts-path $artifacts
-dotnet build .\Viernes.slnx --no-restore --artifacts-path $artifacts
-& "$artifacts\bin\Viernes.App\debug\Viernes.exe"
-```
-
-Publicación autocontenida:
-
-```powershell
-.\scripts\publish.ps1
-```
-
-El ejecutable queda en `%LOCALAPPDATA%\Viernes\Published\win-x64\Viernes.exe`. El script no lee ni escribe claves.
-
-## Interacción del orbe
-
-- **Mover:** arrastrá desde el aura exterior. La posición se guarda en `%LOCALAPPDATA%\Viernes\window.json` y se corrige si queda fuera de las pantallas disponibles.
-- **Escribir:** hacé un toque corto sobre el núcleo; aparece una entrada compacta. `Enter` envía.
-- **Hablar por PTT:** mantené presionado el núcleo y soltá al terminar. Es el fallback manual y privado.
-- **Wake word:** al primer inicio se intenta activar la demo local con `Viernes` y `Hola Viernes`. Admite entre una y ocho frases configurables. El detector incluido usa SAPI con gramática exacta y está marcado **DEMO/no robusto**: puede perder activaciones o activarse por error. No debe confundirse con un wake engine de producción.
-- **Aparecer al ser llamado:** con `Escuchar aunque esté oculto` (activado por defecto, toggle en la bandeja), Viernes sigue atento con el orbe escondido y se muestra solo al oír su nombre, sin robarte el foco del teclado. Mute sigue siendo el corte duro que libera el micrófono. Ver [seguridad](docs/SECURITY.md#escucha-con-el-orbe-oculto).
-- **Recordatorios que suenan:** un recordatorio vencido trae el orbe al frente, avisa por la bandeja y lo dice en voz alta. Si la máquina estuvo apagada, los que quedaron viejos no se vuelcan todos juntos: se marcan en silencio y siguen listados en `/recordatorios`.
-- **Privacidad:** el indicador unido al orbe muestra si el micrófono está activo. Mute detiene captura y síntesis; PTT sigue siendo la alternativa si wake word no resulta fiable.
-- **Estado breve:** la etiqueta muestra `Escuchando`, `Pensando`, `Hablando` o `Revisar`; la burbuja conserva sólo dos líneas de contexto y desaparece después de unos segundos.
-- **Bandeja:** permite mostrar/ocultar, silenciar, encender/apagar la activación por voz demo, habilitar inicio con Windows y salir realmente.
-- **Inicio automático:** es opt-in, por usuario y sin elevación; se registra bajo `HKCU\...\Run` sólo al elegirlo.
-
-Detalles y limitaciones de audio: [docs/VOICE.md](docs/VOICE.md).
-
-Opciones de prueba no secretas:
-
-```powershell
-$env:VIERNES_WAKE_ENABLED = 'true'                  # false/off/0 lo apaga
-$env:VIERNES_WAKE_PHRASES = 'Viernes;Hola Viernes' # hasta 8 frases
-$env:VIERNES_STT_PROVIDER = 'sapi'                  # fuerza fallback; omitido prefiere Whisper
-$env:VIERNES_WHISPER_MODEL_PATH = "$env:LOCALAPPDATA\Viernes\Models\Whisper\ggml-base.bin"
-```
-
-Mute, modo wake/PTT y frases se guardan como preferencias locales sin secretos. Wake mantiene el micrófono abierto mientras está activo; usá el indicador, mute o el toggle de bandeja para apagarlo.
-
-## Qué funciona sin OpenRouter
-
-Un toque corto abre la entrada de texto. Estos comandos forman una superficie local determinista: agenda/recordatorios/búsqueda/PC atraviesan la política de tools; memoria atraviesa su store y política de contenido consentido.
-
-| Comando | Resultado actual |
+| | |
 |---|---|
-| `/ayuda` | Muestra la ayuda local. |
-| `/recordatorios` | Lista recordatorios guardados en el perfil local. |
-| `/recordar 2026-08-17 09:00 \| llamar a Ana` | Crea un recordatorio local. |
-| `/agenda` | Lista la agenda local de Viernes. |
-| `/evento 2026-08-17 15:30 \| Reunión \| notas` | Crea un evento local; no toca un calendario externo. |
-| `/buscar auriculares con cancelación` | Prepara una búsqueda **simulada**; no hace red ni abre el navegador. |
-| `/pc open_settings` | Solicita confirmación y luego genera una vista previa **simulada**; no modifica Windows. |
-| `/memoria` | Revisa recuerdos locales con tipo e ID corto. |
-| `/recordá que prefiero reuniones por la mañana` | Guarda un recuerdo explícito con consentimiento. |
-| `/editar memoria ID \| dato corregido` | Edita un elemento de memoria identificado. |
-| `/olvidar ID` | Borra un elemento concreto. |
-| `/pausar hábitos` / `/reanudar hábitos` | Cambia el permiso local para observaciones temporales. |
+| Sistema | Windows 10 o posterior, 64 bits |
+| Espacio | ~700 MB (200 la aplicación, 490 el modelo de voz) |
+| Micrófono | Cualquiera |
+| Clave | Una de [OpenRouter](https://openrouter.ai/keys), gratis de sacar |
 
-Recordatorios y agenda viven en `%LOCALAPPDATA%\Viernes\assistant-data.json`; sus tools rechazan patrones comunes de credenciales antes de persistir, aunque igual no deben usarse para secretos. Las operaciones sensibles o destructivas de PC permanecen bloqueadas incluso después de una confirmación; no hay shell arbitrario, borrado, elevación, compras ni envío de mensajes.
+---
 
-## OpenRouter, sin guardar secretos
+## El nombre lo elegís vos
 
-La única credencial prevista es `OPENROUTER_API_KEY`. Viernes la lee del entorno del proceso y **no ofrece un campo de clave, archivo `.env`, argumento de línea de comandos ni almacenamiento local para ella**. No existe un archivo donde pegarla: es a propósito. Este repositorio se entrega y se prueba sin una clave.
+El instalador pregunta cómo se va a llamar. Ese nombre entra en la primera línea de su prompt, en el
+título de la ventana, en la bandeja del sistema, y define cómo lo despertás.
 
-Para habilitarla hay que crearla como variable de entorno **de usuario**, desde `Editar las variables de entorno de esta cuenta` de Windows, y reiniciar Viernes. No la pegues en comandos, archivos, logs, capturas, issues ni reportes; la documentación no solicita ni contiene un valor real.
+**Siempre son dos palabras.** Si lo llamás Ana, lo despertás diciendo *«Hola Ana»*, *«Che Ana»* o
+*«Ey Ana»* — nunca *«Ana»* a secas. No es un capricho: con el nombre original, la palabra suelta
+dicha al pasar (*«el viernes tengo turno»*) lo despertaba con confianza 0,69, mientras las
+activaciones verdaderas puntuaban entre 0,62 y 0,68. El falso positivo puntuaba **más alto** que casi
+todos los aciertos, así que ningún umbral los separaba. Dos palabras resuelven el problema de raíz, y
+sirven para cualquier nombre.
 
-### Selección de modelo
+Para cambiarlo después, volvé a correr el instalador.
 
-El valor por defecto es el **router automático** de OpenRouter (`openrouter/auto`): clasifica el pedido y elige entre los modelos que la comunidad más usa para esa tarea, sin recargo, con tool calling y actualizándose solo. Lo que distingue a cada rol ya no es un slug fijo sino la **banda de costo**.
+---
 
-| Variable | Función | Default |
-|---|---|---|
-| `VIERNES_OPENROUTER_PRESET` | preset del dashboard; gobierna modelo y routing desde el servidor | sin valor |
-| `VIERNES_OPENROUTER_FAST_COST_TIER` | banda del lane fast | `low` |
-| `VIERNES_OPENROUTER_AGENT_COST_TIER` | banda de agent | `medium` |
-| `VIERNES_OPENROUTER_REASONING_COST_TIER` | banda de reasoning | `high` |
-| `VIERNES_OPENROUTER_ALLOWED_MODELS` | patrones permitidos, ej. `anthropic/*,openai/*` | sin restricción |
-| `VIERNES_OPENROUTER_EXCLUDED_MODELS` | patrones excluidos | sin valor |
-| `VIERNES_OPENROUTER_MAX_PROMPT_PRICE` | techo USD por millón de tokens de entrada | sin valor |
-| `VIERNES_OPENROUTER_MAX_COMPLETION_PRICE` | techo USD por millón de salida | sin valor |
+## Tu clave es tuya
 
-Fijar un modelo concreto sigue siendo posible con `VIERNES_OPENROUTER_FAST_MODEL`; en ese caso vuelven a aplicarse los fallbacks locales de `VIERNES_OPENROUTER_FAST_FALLBACK_MODELS`. Con router o preset no se encadenan slugs locales: el servidor ya resuelve alternativas.
+**Este repositorio no contiene ninguna clave, y nunca va a contener una.**
 
-El MVP conversacional usa el rol **fast**. Agent, reasoning y premium están modelados como selecciones explícitas; el widget no escala automáticamente a una banda más cara. Como el modelo puede cambiar entre días, el ledger guarda el modelo realmente resuelto de cada completion.
+La única credencial que usa el asistente es `OPENROUTER_API_KEY`. La ponés vos en la instalación y se
+guarda como variable de entorno de tu cuenta de Windows:
 
-Más detalle: [cerebro, modelos y costo](docs/BRAIN.md) y [registro de capacidades](docs/CAPABILITIES.md).
+- No se escribe en ningún archivo del proyecto.
+- No se manda a ningún lado que no sea OpenRouter.
+- No viaja a los procesos que el asistente ejecuta por vos: cuando corre un comando de PowerShell,
+  la borra explícitamente del entorno del proceso hijo.
 
-## Presupuestos y costo: estado honesto
+Todos los modelos pasan por OpenRouter. No hay ninguna otra API involucrada.
 
-La configuración admite límites globales y por rol, máximo de solicitudes, cuota de tareas profundas y una rate card local. El cliente devuelve modelo resuelto, tokens y costo exacto informado por OpenRouter o estimado con una tarifa configurada. `UsageLedger` persiste registros sin contenido en `%LOCALAPPDATA%\Viernes\usage-ledger.json`, calcula totales y el runtime consulta el guard antes de cada turno remoto fast. Cada completion remota exitosa —incluidos pasos posteriores a tools— se registra; si un límite ya fue alcanzado, el siguiente turno no sale.
+---
 
-Límite honesto: el guard fast no conoce de antemano el costo real de una petición, salvo que el llamador proporcione una estimación; el widget actual evalúa con el consumo ya registrado y anota el costo después de completar. Agent/reasoning aún no forman parte del recorrido normal, por lo que la cuota de tareas profundas es una protección preparada para esos flujos.
+## Qué hace
 
-Variables principales:
+**Voz.** Te escucha en tu máquina con Whisper — el audio no sale de tu equipo para transcribirse.
+Detecta cuándo empezás a hablar y cuándo terminás calibrándose contra el ruido de tu cuarto, no
+contra un número fijo. Podés interrumpirlo mientras habla.
 
-```text
-VIERNES_OPENROUTER_DAILY_BUDGET_USD
-VIERNES_OPENROUTER_MONTHLY_BUDGET_USD
-VIERNES_OPENROUTER_MAX_REQUESTS_PER_DAY
-VIERNES_MAX_DEEP_TASKS_PER_DAY
-VIERNES_OPENROUTER_FAST_DAILY_BUDGET_USD
-VIERNES_OPENROUTER_AGENT_DAILY_BUDGET_USD
-VIERNES_OPENROUTER_REASONING_DAILY_BUDGET_USD
-VIERNES_OPENROUTER_<ROL>_MONTHLY_BUDGET_USD
-VIERNES_OPENROUTER_<ROL>_MAX_REQUESTS_PER_DAY
-VIERNES_OPENROUTER_RATES_JSON
+**Actúa.** Abre, cierra y trae al frente aplicaciones instaladas. Controla el volumen y lo que se
+está reproduciendo. Crea, lee, mueve y borra archivos y carpetas (los borrados van a una papelera
+propia de la que se pueden recuperar). Ejecuta comandos de PowerShell. Busca en la web.
+
+**Ve y toca.** Saca capturas de pantalla y las manda al modelo. Lee los controles de una ventana
+ajena por accesibilidad y hace clic en ellos por nombre, en vez de por coordenadas.
+
+**Aprende.** Le podés enseñar reglas explícitas (*«que cada vez que te pida una canción, le des play
+automáticamente»*) y quedan guardadas. Recuerda objetivos abiertos entre conversaciones.
+
+**Se conecta.** Habla el protocolo MCP, así que le podés enchufar servidores externos —Spotify,
+Google Drive, lo que exista— y sus herramientas aparecen junto a las nativas.
+
+**Frena.** Un atajo global corta todo en cualquier momento.
+
+---
+
+## Qué falta
+
+Este proyecto está en desarrollo activo y hay cosas a medias. Las conocidas, sin maquillar:
+
+- La memoria de recetas guarda transcripciones crudas como clave, así que casi nunca vuelve a
+  encontrar lo que aprendió: de 58 recetas guardadas, 56 se usaron una sola vez.
+- Los objetivos persistentes se escriben pero el archivo nunca llegó a crearse en uso real.
+- La transcripción tarda alrededor de 0,85× el largo del audio; ése es hoy el piso de latencia.
+
+---
+
+## Para desarrollar
+
+```bash
+dotnet build Viernes.slnx
 ```
 
-Los precios no están hardcodeados porque cambian. Si el proveedor no informa costo y no se configuró una tarifa, el costo queda desconocido —aunque tokens/requests sí se cuentan— y el presupuesto monetario no puede contabilizarlo; nunca se inventa un valor.
-
-## Memoria personal
-
-`Viernes.Memory` implementa un store JSON local y auditable con tres niveles:
-
-1. **recuerdos explícitos**, guardados porque el usuario lo pidió;
-2. **observaciones temporales**, con confianza, fecha y vencimiento; la observación está pausada por defecto;
-3. **sugerencias**, que sólo pasan a memoria explícita mediante opt-in.
-
-La API permite revisar, editar, olvidar, borrar todo, aprobar/rechazar sugerencias y pausar/reanudar observaciones. El widget ya conecta revisión, recuerdo explícito, edición, olvido individual y pausa/reanudación mediante los comandos locales de arriba. Rechaza credenciales y contenido con forma de conversación.
-
-No reentrena modelos, no promete “aprendizaje autónomo” y no almacena conversaciones indiscriminadamente. Aunque se reanuden hábitos, el MVP todavía no extrae observaciones automáticamente de una charla ni crea sugerencias por sí solo; el flag sólo deja preparado ese flujo consentido.
-
-## Arquitectura y límites
-
-```text
-src/Viernes.App/               Shell WPF, orbe, bandeja y adaptador de runtime
-src/Viernes.Core/              Conversación, OpenRouter, tools, riesgo, ledger y presupuestos
-src/Viernes.Platform.Windows/  Voz, wake demo, autorun y preferencias locales
-src/Viernes.Memory/            Memoria personal local, tipada y consentida
-tests/                         Pruebas del núcleo y del store de memoria
-docs/                          Arquitectura, voz, seguridad, cerebro y capacidades
-scripts/                       Ejecución, publicación e instalación de Whisper
+```bash
+dotnet test Viernes.slnx
 ```
 
-- [Arquitectura](docs/ARCHITECTURE.md)
-- [Seguridad y privacidad](docs/SECURITY.md)
-- [Voz local](docs/VOICE.md)
-- [Cerebro, modelos y costo](docs/BRAIN.md)
-- [Registro de capacidades](docs/CAPABILITIES.md)
+Necesitás el SDK de .NET fijado en [`global.json`](global.json). La solución tiene cuatro proyectos:
 
-Un modelo no concede permisos: archivos, agenda externa, navegador y acciones Windows sólo existen cuando hay una herramienta o conector concreto, acotado y autorizado.
+| Proyecto | Qué es |
+|---|---|
+| `Viernes.Core` | Conversación, herramientas, modelos, aprendizaje. Sin dependencias de Windows. |
+| `Viernes.Platform.Windows` | Voz, acciones sobre el sistema, preferencias. |
+| `Viernes.Memory` | Memoria personal persistente. |
+| `Viernes.App` | La ventana, la gota y la bandeja. WPF. |
 
-## Siguiente tramo
-
-1. Sustituir la demo SAPI por un wake engine local evaluado con ruido, distancia y voces reales; el candidato es openWakeWord (ONNX, español, sin vencimiento) sobre `IWakeWordService`.
-2. Reemplazar el VAD energético por Silero VAD y subir el modelo Whisper a `large-v3-turbo`.
-3. Elegir la dirección visual del orbe entre los bocetos de [`docs/bocetos/`](docs/bocetos/) e implementarla.
-4. Sumar pruebas a `Viernes.Platform.Windows`, empezando por el handoff wake→STT.
-5. Mostrar totales/costo y aprobación de override en una vista breve.
-6. Agregar aprobación/rechazo de sugerencias y borrado total con confirmación, sin convertir el orbe en un panel permanente.
-7. Agregar calendarios externos con OAuth, scopes mínimos y confirmaciones.
+Los comentarios del código están en castellano y explican **por qué**, no qué. Varios documentan
+mediciones reales — si vas a cambiar un umbral, leelos primero: la mayoría existe porque el valor
+obvio estaba mal.

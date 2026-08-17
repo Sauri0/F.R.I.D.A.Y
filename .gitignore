@@ -14,3 +14,30 @@ publish/
 appsettings.Local.json
 *.secrets.json
 
+# La única credencial del asistente es OPENROUTER_API_KEY y vive en el entorno del usuario,
+# nunca en un archivo. Estas reglas cubren los lugares donde alguien podría dejarla sin querer.
+*.key
+*.pem
+credenciales*.json
+servidores-mcp.json
+mcp-*.json
+
+# Estado local del asistente: es del equipo donde corre, no del repositorio.
+# Además delata al usuario (transcripciones, agenda, gasto) y pesa cientos de megas.
+aprendido.json
+reglas.json
+objetivos.json
+usage-ledger.json
+assistant-data.json
+settings.json
+window.json
+memory.json
+
+# Modelos de Whisper: 466 MB que se bajan en la instalación, no se versionan.
+*.bin
+*.ggml
+
+# Herramientas y cachés
+.claude/
+*.lock
+node_modules/

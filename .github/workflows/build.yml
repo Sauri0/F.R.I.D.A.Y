@@ -1,0 +1,35 @@
+# Cada empujón se compila y se prueba. Que el repositorio esté siempre al día no sirve de nada si
+# lo que hay arriba no arranca.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Windows y no Linux: la aplicación es WPF y dos de los proyectos apuntan a net10.0-windows.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restaurar
+        run: dotnet restore Viernes.slnx
+
+      - name: Compilar
+        run: dotnet build Viernes.slnx --configuration Release --no-restore
+
+      - name: Probar
+        run: dotnet test Viernes.slnx --configuration Release --no-build --verbosity normal
