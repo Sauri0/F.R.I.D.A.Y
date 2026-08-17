@@ -1,20 +1,20 @@
+using Viernes.Core.Conversation;
 using Xunit;
 
 namespace Viernes.Core.Tests.Conversation;
 
 /// <summary>
-/// Reglas de la frase de cierre. Es el inverso del wake word: la palabra que lo despide. Cortar de
-/// más es peor que cortar de menos —te deja hablando solo—, así que la regla es deliberadamente
-/// estrecha: frases cortas y sólo cuando son esencialmente la despedida.
+/// Reglas de la frase de cierre. Cortar de más es peor que cortar de menos —te deja hablando solo—,
+/// así que lo ambiguo sólo cierra cuando la frase entera es corta.
 /// </summary>
+/// <remarks>
+/// Antes este archivo <em>copiaba</em> la regla adentro, porque el runtime vivía en el proyecto de
+/// la aplicación y desde acá no se puede referenciar. La copia pasaba en verde mientras el código
+/// real hacía otra cosa: afirmaba que «basta de recordatorios…» no cerraba, y en el equipo cerraba.
+/// Ahora la regla vive en el núcleo y estas pruebas ejercitan la de verdad.
+/// </remarks>
 public sealed class ClosingPhraseTests
 {
-    private static readonly string[] Closing =
-    [
-        "listo", "gracias", "chau", "nada más", "nada mas", "dejá", "deja", "ya está", "ya esta",
-        "terminamos", "cortá", "corta", "basta", "salí", "sali", "adiós", "adios"
-    ];
-
     [Theory]
     [InlineData("listo")]
     [InlineData("Listo.")]
@@ -24,44 +24,58 @@ public sealed class ClosingPhraseTests
     [InlineData("ya está")]
     [InlineData("nada más")]
     [InlineData("terminamos")]
-    public void Cierra_ConUnaDespedidaCorta(string text) => Assert.True(IsClosingPhrase(text));
+    [InlineData("basta")]
+    [InlineData("callate")]
+    [InlineData("descansá")]
+    public void Cierra_ConUnaDespedidaCorta(string text) =>
+        Assert.True(ClosingPhrase.IsClosing(text));
 
+    /// <remarks>
+    /// Una orden explícita no se puede confundir con otra cosa, así que vale a cualquier largo:
+    /// «no, no, no, dejá de oír» son seis palabras y es exactamente cómo suena alguien pidiendo que
+    /// pare.
+    /// </remarks>
     [Theory]
+    [InlineData("no, no, no, dejá de oír")]
+    [InlineData("bueno Viernes, andá a dormir que ya terminamos por hoy")]
+    [InlineData("che, dejá de escucharme un rato por favor")]
+    public void Cierra_ConUnaOrdenExplicitaAunqueSeaLarga(string text) =>
+        Assert.True(ClosingPhrase.IsClosing(text));
+
+    /// <remarks>
+    /// El caso que fallaba en el equipo del usuario. «basta», «cortá» y «terminá» son palabras
+    /// corrientes: aparecen adentro de pedidos que piden justamente seguir trabajando.
+    /// </remarks>
+    [Theory]
+    [InlineData("basta de recordatorios a la mañana, moveme todo a la tarde")]
+    [InlineData("cortá el video por la mitad y guardalo en el escritorio")]
+    [InlineData("terminá de escribir eso que dejaste a medias")]
     [InlineData("gracias por armarme la agenda de mañana")]
     [InlineData("listo el recordatorio de las nueve o todavía no")]
     [InlineData("dejá anotado que tengo que llamar a Ana")]
-    [InlineData("basta de recordatorios a la mañana, moveme todo a la tarde")]
-    public void NoCierra_CuandoLaDespedidaEsParteDeUnaInstruccion(string text) =>
-        Assert.False(IsClosingPhrase(text));
+    public void NoCierra_CuandoLaPalabraEsParteDeUnaInstruccion(string text) =>
+        Assert.False(ClosingPhrase.IsClosing(text));
 
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("Viernes")]
-    public void NoCierra_ConNadaUtil(string text) => Assert.False(IsClosingPhrase(text));
+    [InlineData(null)]
+    public void NoCierra_ConNadaUtil(string? text) =>
+        Assert.False(ClosingPhrase.IsClosing(text));
 
     [Fact]
     public void NoCierra_ConUnaConsultaComun() =>
-        Assert.False(IsClosingPhrase("qué tengo en la agenda hoy"));
+        Assert.False(ClosingPhrase.IsClosing("qué tengo en la agenda hoy"));
 
-    /// <summary>Copia de la regla del runtime; el shell no es referenciable desde estas pruebas.</summary>
-    private static bool IsClosingPhrase(string text)
-    {
-        var normalized = new string(text
-            .ToLowerInvariant()
-            .Where(character => !char.IsPunctuation(character))
-            .ToArray())
-            .Replace("viernes", string.Empty, StringComparison.Ordinal)
-            .Trim();
-
-        if (normalized.Length == 0 || normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 3)
-        {
-            return false;
-        }
-
-        return Closing.Any(phrase =>
-            normalized.Equals(phrase, StringComparison.Ordinal) ||
-            normalized.StartsWith(phrase + " ", StringComparison.Ordinal) ||
-            normalized.EndsWith(" " + phrase, StringComparison.Ordinal));
-    }
+    /// <remarks>
+    /// La transcripción acentúa según le parece. Si la comparación dependiera del acento, la mitad
+    /// de las despedidas fallarían al azar.
+    /// </remarks>
+    [Theory]
+    [InlineData("Dejá de oír", "deja de oir")]
+    [InlineData("¡Listo!", "listo")]
+    [InlineData("no,  no,  no", "no no no")]
+    public void Normalize_PliegaAcentosYPuntuacion(string raw, string expected) =>
+        Assert.Equal(expected, ClosingPhrase.Normalize(raw));
 }

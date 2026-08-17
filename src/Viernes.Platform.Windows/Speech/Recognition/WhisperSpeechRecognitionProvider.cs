@@ -947,8 +947,35 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         private bool _voiceDetected;
         private TimeSpan _voiceEnergy;
         private TimeSpan _trailingSilence;
-        private double _noiseFloor;
         private short _lastSample;
+
+        /// <summary>
+        /// Cuánta energía sostenida hace falta para dar por empezada la voz.
+        /// </summary>
+        /// <remarks>
+        /// Eran 240 ms y hacían falta seguidos. Un «sí», un «dale» o un «listo» tienen unos 200 ms
+        /// de núcleo vocálico: no llegaban nunca. Con 150 ms y decaimiento en vez de reinicio, la
+        /// palabra corta entra y el portazo —dos buffers y se apaga— sigue afuera.
+        /// </remarks>
+        private static readonly TimeSpan RequiredVoiceEnergy = TimeSpan.FromMilliseconds(150);
+
+        /// <summary>
+        /// Piso de ruido del cuarto, heredado de la captura anterior.
+        /// </summary>
+        /// <remarks>
+        /// Era un campo de instancia y se crea una sesión por captura, así que arrancaba en cero en
+        /// cada turno: el piso se aprendía de nuevo desde el silencio absoluto mientras el cuarto ya
+        /// sonaba. Con la tele puesta, el umbral quedaba por debajo del ruido, la voz se daba por
+        /// detectada de entrada y se grababa el cuarto entero. Justo el caso que el piso existe para
+        /// resolver.
+        /// <para>
+        /// Estático porque el cuarto es uno solo y no cambia entre capturas. Lo que se aprendió del
+        /// ambiente en el turno anterior sigue siendo cierto en el siguiente.
+        /// </para>
+        /// </remarks>
+        private static double _sharedNoiseFloor;
+
+        private double _noiseFloor = Volatile.Read(ref _sharedNoiseFloor);
 
         /// <summary>Puente hacia el evento público; la sesión no conoce al proveedor.</summary>
         public Action<double, bool>? LevelObserver { get; set; }
@@ -1131,6 +1158,9 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             var threshold = NoiseFloorTracker.ThresholdFor(_noiseFloor);
             _noiseFloor = NoiseFloorTracker.Advance(_noiseFloor, rootMeanSquare, _voiceDetected);
 
+            // Se deja aprendido para la próxima captura: si no, cada turno vuelve a empezar de cero.
+            Volatile.Write(ref _sharedNoiseFloor, _noiseFloor);
+
             // El nivel para la interfaz se publica siempre, aunque no llegue al umbral: hay que poder
             // ver que entra algo por el micrófono antes de que sea voz sostenida. Se mide contra el
             // umbral —que ya lleva el piso de ruido adentro— para que reaccione igual con cualquier
@@ -1152,25 +1182,35 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             var soundsLikeVoice = zeroCrossingRate is >= 0.005 and <= 0.25;
 
             // Un golpe en el escritorio o una puerta superan el umbral por un instante. La voz no:
-            // se sostiene. Exigir energía continua durante 240 ms es lo que distingue una de otra
-            // sin traer un detector entrenado, y es lo que evita que el ruido abra una captura.
+            // se sostiene. Esa diferencia es la que separa una de otra sin traer un detector
+            // entrenado, y es lo que evita que el ruido abra una captura.
             if (rootMeanSquare >= threshold && soundsLikeVoice)
             {
                 _voiceEnergy += bufferDuration;
-                if (_voiceEnergy >= TimeSpan.FromMilliseconds(240))
+                if (_voiceEnergy >= RequiredVoiceEnergy)
                 {
                     _voiceDetected = true;
                     _trailingSilence = TimeSpan.Zero;
                 }
             }
+            else if (_voiceDetected)
+            {
+                // Un bache corto no reinicia nada: adentro de una frase hay micro-silencios.
+                _trailingSilence += bufferDuration;
+            }
             else
             {
-                // Un bache corto no reinicia la cuenta: adentro de una frase hay micro-silencios.
-                _voiceEnergy = _voiceDetected ? _voiceEnergy : TimeSpan.Zero;
-                if (_voiceDetected)
-                {
-                    _trailingSilence += bufferDuration;
-                }
+                // Antes esto ponía la cuenta en cero, así que hacían falta 240 ms *seguidos* por
+                // encima del umbral. Un «sí», un «dale» o un «listo» tienen unos 200 ms de núcleo
+                // vocálico y jamás llegaban: se agotaba el silencio inicial y la captura devolvía
+                // texto vacío sin siquiera transcribir lo que había grabado.
+                //
+                // Decaer en vez de reiniciar conserva lo que distingue a la voz del golpe. Un
+                // portazo son dos buffers y vuelve a cero enseguida; una palabra corta son cinco o
+                // seis seguidos y cruza el piso igual.
+                _voiceEnergy = _voiceEnergy > bufferDuration
+                    ? _voiceEnergy - bufferDuration
+                    : TimeSpan.Zero;
             }
 
             if (!_voiceDetected && totalDuration >= options.InitialSilenceTimeout)
