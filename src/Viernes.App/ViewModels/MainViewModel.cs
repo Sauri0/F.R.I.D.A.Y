@@ -21,6 +21,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isConfirmationVisible;
     private bool _isListeningWhileHidden = true;
     private Controls.OrbShape _orbShape = Controls.OrbShape.Gota;
+    private bool _isConversationActive;
     private string _confirmationTitle = "Confirmación necesaria";
     private string _confirmationDetail = string.Empty;
     private bool _isPresentingResult;
@@ -135,6 +136,18 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _orbShape, value);
     }
 
+    public bool IsConversationActive
+    {
+        get => _isConversationActive;
+        private set
+        {
+            if (SetProperty(ref _isConversationActive, value))
+            {
+                NotifyContentProperties();
+            }
+        }
+    }
+
     public async Task SetOrbShapeAsync(Controls.OrbShape shape, CancellationToken cancellationToken)
     {
         await _runtime.SetOrbShapeAsync(shape, cancellationToken);
@@ -201,8 +214,15 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsInputAreaVisible => IsExpanded && !IsConfirmationVisible;
     public bool IsConfirmationAreaVisible => IsExpanded && IsConfirmationVisible;
     public bool IsMessageVisible => !AreStepsVisible && !AreListItemsVisible;
+    /// <summary>
+    /// Durante una conversación hablada el orbe se queda solo: el color y el fluido ya dicen en qué
+    /// estado está, y desplegar la burbuja en cada turno convierte una charla en una ventana que
+    /// aparece y desaparece sin parar. La burbuja se abre al tocarla, o cuando hay que decidir algo.
+    /// </summary>
     public bool IsMinimalShellVisible =>
-        State == AssistantVisualState.Idle && !IsExpanded && !IsConfirmationVisible && !_isPresentingResult;
+        !IsExpanded &&
+        !IsConfirmationVisible &&
+        (IsConversationActive || (State == AssistantVisualState.Idle && !_isPresentingResult));
     public bool IsAssistantShellVisible => !IsMinimalShellVisible;
     public double WidgetWidth => IsMinimalShellVisible ? 108 : IsExpanded ? 368 : 360;
 
@@ -383,6 +403,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             var previousState = State;
             State = update.State;
             StatusText = update.Status;
+            IsConversationActive = _runtime.IsConversationActive;
             if (!string.IsNullOrWhiteSpace(update.Message))
             {
                 MessageText = update.Message;

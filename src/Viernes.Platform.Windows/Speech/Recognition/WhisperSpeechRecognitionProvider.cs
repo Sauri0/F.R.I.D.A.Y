@@ -897,6 +897,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         /// </summary>
         public long SingleUtteranceBytes => Interlocked.Read(ref _singleUtteranceBytes);
         private bool _voiceDetected;
+        private TimeSpan _voiceEnergy;
         private TimeSpan _trailingSilence;
 
         public CaptureSession(WaveInEvent capture, long maximumAudioBytes)
@@ -1050,14 +1051,26 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             var totalDuration = TimeSpan.FromSeconds(
                 (double)_singleUtteranceBytes / Capture.WaveFormat.AverageBytesPerSecond);
 
+            // Un golpe en el escritorio o una puerta superan el umbral por un instante. La voz no:
+            // se sostiene. Exigir energía continua durante 240 ms es lo que distingue una de otra
+            // sin traer un detector entrenado, y es lo que evita que el ruido abra una captura.
             if (rootMeanSquare >= options.VoiceEnergyThreshold)
             {
-                _voiceDetected = true;
-                _trailingSilence = TimeSpan.Zero;
+                _voiceEnergy += bufferDuration;
+                if (_voiceEnergy >= TimeSpan.FromMilliseconds(240))
+                {
+                    _voiceDetected = true;
+                    _trailingSilence = TimeSpan.Zero;
+                }
             }
-            else if (_voiceDetected)
+            else
             {
-                _trailingSilence += bufferDuration;
+                // Un bache corto no reinicia la cuenta: adentro de una frase hay micro-silencios.
+                _voiceEnergy = _voiceDetected ? _voiceEnergy : TimeSpan.Zero;
+                if (_voiceDetected)
+                {
+                    _trailingSilence += bufferDuration;
+                }
             }
 
             if (!_voiceDetected && totalDuration >= options.InitialSilenceTimeout)

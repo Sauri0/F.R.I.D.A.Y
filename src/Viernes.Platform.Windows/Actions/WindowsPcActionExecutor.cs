@@ -58,7 +58,12 @@ public sealed class WindowsPcActionExecutor : IPcActionExecutor
         "show_desktop"
     };
 
+    private readonly InstalledApplications _installed = new();
+
     public IReadOnlySet<string> SupportedActions { get; } = Supported;
+
+    /// <summary>Nombres instalados, para que la herramienta le diga al modelo qué puede abrir.</summary>
+    public IReadOnlyCollection<string> InstalledApplicationNames => _installed.Names;
 
     public Task<PcActionOutcome> ExecuteAsync(
         string action,
@@ -94,22 +99,27 @@ public sealed class WindowsPcActionExecutor : IPcActionExecutor
         return Launch(page.Uri, $"Abrí Configuración en {page.Label}.");
     }
 
-    private static PcActionOutcome OpenApplication(string? target)
+    private PcActionOutcome OpenApplication(string? target)
     {
         if (string.IsNullOrWhiteSpace(target))
         {
             return new PcActionOutcome(false, "Necesito saber qué aplicación abrir.");
         }
 
-        if (!Applications.TryGetValue(target.Trim(), out var application))
+        var name = target.Trim();
+
+        // Primero el puñado escrito a mano, que cubre las de sistema sin acceso directo.
+        if (Applications.TryGetValue(name, out var known))
         {
-            var available = string.Join(", ", Applications.Values.Select(item => item.Label).Distinct());
-            return new PcActionOutcome(
-                false,
-                $"Sólo tengo habilitadas estas aplicaciones: {available}.");
+            return Launch(known.Command, $"Abrí {known.Label}.");
         }
 
-        return Launch(application.Command, $"Abrí {application.Label}.");
+        // Después, cualquier cosa instalada en el menú Inicio. El modelo elige del catálogo real;
+        // nunca compone una ruta, así que un texto leído de la web no se vuelve un ejecutable.
+        var shortcut = _installed.Resolve(name);
+        return shortcut is null
+            ? new PcActionOutcome(false, $"No encontré ninguna aplicación instalada que se llame «{name}».")
+            : Launch(shortcut, $"Abrí {System.IO.Path.GetFileNameWithoutExtension(shortcut)}.");
     }
 
     /// <summary>Mostrar el escritorio se hace por el Shell de Windows, sin simular teclas.</summary>

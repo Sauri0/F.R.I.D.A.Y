@@ -47,12 +47,13 @@ public sealed class PcActionTool : IAssistantTool
         ToolName,
         _executor is null
             ? "Previsualiza una acción de PC. No ejecuta comandos ni cambios reales."
-            : "Ejecuta acciones de Windows permitidas, tras confirmación del usuario. " +
+            : "Ejecuta acciones de Windows, tras confirmación del usuario. " +
               "open_settings abre Configuración —target: sonido, pantalla, bluetooth, red, wifi, " +
               "batería, micrófono, privacidad, aplicaciones, notificaciones, inicio—. " +
-              "open_application abre una app —target: calculadora, bloc de notas, explorador, " +
-              "terminal, configuración—. show_desktop muestra el escritorio. " +
-              "No hay shell, borrado, apagado ni cambios de configuración.",
+              "open_application abre CUALQUIER aplicación instalada: pasá su nombre común en " +
+              "target (por ejemplo «spotify», «steam», «visual studio code», «discord»). " +
+              "show_desktop muestra el escritorio. " +
+              "No hay shell, comandos arbitrarios, borrado, apagado ni cambios de configuración.",
         ToolSchemas.Object(
             new Dictionary<string, object>
             {
