@@ -62,9 +62,9 @@ public sealed class PcActionTool : IAssistantTool
               "minimize_application minimiza UNA ventana y restore_application la vuelve a abrir " +
               "—target: nombre de la app—; para minimizar una sola cosa usá ésta, nunca " +
               "show_desktop, que minimiza absolutamente todo. " +
-              "play_music pone una canción o artista concreto en Spotify —target: qué poner, por " +
-              "ejemplo «Creep de Radiohead»—; úsala siempre para pedidos de música con nombre, " +
-              "nunca search_web. " +
+              "play_music NO reproduce nada: sólo abre Spotify con una búsqueda y queda esperando " +
+              "que alguien le dé play a mano. Si tenés herramientas spotify_, usá ésas para poner " +
+              "música; play_music es el último recurso cuando no hay ninguna. " +
               "media_control maneja lo que YA se está reproduciendo —target: play, pause, next, " +
               "previous, stop—. " +
               "volume ajusta el audio —target: up, down, mute—. " +
@@ -144,11 +144,16 @@ public sealed class PcActionTool : IAssistantTool
             !PreviewableActions.Contains(action) ||
             !_executor.SupportedActions.Contains(action.ToLowerInvariant()))
         {
-            return ToolExecutionResult.Success(
+            // Falla, no éxito. El estado es lo que viaja al modelo, y un «Succeeded» sobre algo que
+            // no pasó lo lleva a contestar que lo hizo. Las dos listas de acciones permitidas se
+            // mantienen a mano por separado, así que desincronizarlas dispara justo este camino:
+            // conviene que se note como error y no como una acción cumplida.
+            return ToolExecutionResult.Failure(
                 context.ToolCallId,
                 ToolName,
-                "Acción aprobada y simulada; no se modificó la PC.",
-                new { action, target, simulated = true });
+                _executor is null
+                    ? $"No puedo hacer «{action}» en esta PC: no tengo el control del sistema conectado."
+                    : $"No sé hacer «{action}». No modifiqué nada.");
         }
 
         var outcome = await _executor.ExecuteAsync(action, target, cancellationToken).ConfigureAwait(false);

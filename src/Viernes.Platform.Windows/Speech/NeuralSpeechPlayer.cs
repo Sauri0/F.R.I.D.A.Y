@@ -38,12 +38,16 @@ public sealed class NeuralSpeechPlayer : IAsyncDisposable
             _output = output;
             output.Init(stream);
 
+            // El argumento traía la excepción del dispositivo y se descartaba con un `_`: si sacabas
+            // el auricular a mitad de frase, la reproducción moría y esto igual informaba que había
+            // sonado entera. Ahora un fallo del dispositivo se propaga como lo que es.
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            output.PlaybackStopped += (_, _) => completion.TrySetResult(true);
+            output.PlaybackStopped += (_, stopped) => completion.TrySetResult(stopped.Exception is null);
 
             IsSpeaking = true;
             output.Play();
 
+            bool sonoEntera;
             await using (cancellationToken.Register(() =>
             {
                 try
@@ -56,10 +60,10 @@ public sealed class NeuralSpeechPlayer : IAsyncDisposable
                 }
             }).ConfigureAwait(false))
             {
-                await completion.Task.ConfigureAwait(false);
+                sonoEntera = await completion.Task.ConfigureAwait(false);
             }
 
-            return !cancellationToken.IsCancellationRequested;
+            return sonoEntera && !cancellationToken.IsCancellationRequested;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

@@ -108,6 +108,16 @@ public sealed class OpenRouterSpeechClient
                 return null;
             }
 
+            // Lo que vuelve se reproduce como muestras crudas, así que hay que saber que son muestras.
+            // Se comprobaban el estado, el largo declarado y el largo real, nunca el tipo: un cuerpo
+            // MP3 o JSON con 200 OK pasaba las tres y salía por los parlantes como estática.
+            var tipo = response.Content.Headers.ContentType?.MediaType;
+            if (tipo is not null && !tipo.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+            {
+                LastFailure = $"El servidor devolvió «{tipo}» en vez de audio.";
+                return null;
+            }
+
             var audio = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
             if (audio.Length is <= 0 or > MaximumAudioBytes)
             {

@@ -103,7 +103,9 @@ public sealed class ToolExecutorTests
         var asking = await new ToolExecutor([new PcActionTool(confirmActions: true)]).ExecuteAsync(call);
 
         // La preferencia gobierna la barrera blanda, y sólo esa: la lista blanca no la toca nadie.
-        Assert.Equal(ToolExecutionStatus.Succeeded, silent.Status);
+        // Sin preguntar, la acción llega a ejecutarse —y falla porque en la prueba no hay ejecutor
+        // de sistema conectado, que es lo correcto: sin ejecutor no hay nada que dar por hecho—.
+        Assert.Equal(ToolExecutionStatus.Failed, silent.Status);
         Assert.Equal(ToolExecutionStatus.NeedsConfirmation, asking.Status);
     }
 

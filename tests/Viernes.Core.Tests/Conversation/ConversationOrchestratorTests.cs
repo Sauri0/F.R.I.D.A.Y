@@ -146,11 +146,11 @@ public sealed class ConversationOrchestratorTests
             JsonSerializer.SerializeToElement(new { action = "delete_file", target = "test.txt" }),
             confirmationGranted: true);
 
-        // Lo permitido corre; lo destructivo no pasa ni con la confirmación ya dada. Esa asimetría
-        // es el punto: la preferencia afloja el permiso, nunca la lista blanca.
-        Assert.Equal(ToolExecutionStatus.Succeeded, allowed.Status);
-        Assert.True(allowed.Data.HasValue);
-        Assert.True(allowed.Data!.Value.GetProperty("simulated").GetBoolean());
+        // Lo permitido llega a ejecutarse; lo destructivo no pasa ni con la confirmación ya dada.
+        // Esa asimetría es el punto: la preferencia afloja el permiso, nunca la lista blanca.
+        // Lo permitido termina en Failed porque acá no hay ejecutor de sistema: sin él no se puede
+        // hacer nada, y decir que se hizo sería exactamente el reporte falso que se sacó.
+        Assert.Equal(ToolExecutionStatus.Failed, allowed.Status);
         Assert.Equal(ToolExecutionStatus.NeedsConfirmation, destructive.Status);
         Assert.Null(destructive.Data);
         Assert.Empty(chatClient.Requests);

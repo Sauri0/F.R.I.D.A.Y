@@ -8,13 +8,18 @@ namespace Viernes.Core.Tests.Tools;
 
 public sealed class PcActionExecutionTests
 {
+    /// <remarks>
+    /// Antes esto afirmaba lo contrario: sin ejecutor devolvía <c>Succeeded</c> con el mensaje
+    /// «Acción aprobada y simulada». El estado es lo que viaja al modelo, y un éxito sobre algo que
+    /// no pasó lo lleva a contestarle al usuario que lo hizo. La prueba estaba fijando la mentira.
+    /// </remarks>
     [Fact]
-    public async Task ExecuteAsync_WithoutExecutor_StaysASimulation()
+    public async Task ExecuteAsync_WithoutExecutor_FallaEnVezDeSimularUnExito()
     {
         var result = await RunAsync(new PcActionTool(), "open_settings", confirmed: true);
 
-        Assert.Equal(ToolExecutionStatus.Succeeded, result.Status);
-        Assert.True(result.Data!.Value.GetProperty("simulated").GetBoolean());
+        Assert.Equal(ToolExecutionStatus.Failed, result.Status);
+        Assert.DoesNotContain("simulada", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -53,7 +58,9 @@ public sealed class PcActionExecutionTests
 
         var result = await RunAsync(new PcActionTool(executor), "open_settings", confirmed: true);
 
-        Assert.True(result.Data!.Value.GetProperty("simulated").GetBoolean());
+        // Las dos listas de acciones permitidas se mantienen a mano por separado. Cuando se
+        // desincronizan cae justo acá, así que tiene que notarse como error y no como acción hecha.
+        Assert.Equal(ToolExecutionStatus.Failed, result.Status);
         Assert.Empty(executor.Calls);
     }
 
