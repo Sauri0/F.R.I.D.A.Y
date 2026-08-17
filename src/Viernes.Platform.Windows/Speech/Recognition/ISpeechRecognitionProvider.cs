@@ -14,6 +14,9 @@ public interface ISpeechRecognitionProvider : IAsyncDisposable
 
     event EventHandler<MicrophoneActivityChangedEventArgs>? MicrophoneActivityChanged;
 
+    /// <summary>Nivel del micrófono mientras captura, para que la interfaz reaccione a la voz.</summary>
+    event EventHandler<AudioLevelEventArgs>? AudioLevelChanged;
+
     event EventHandler<SpeechTranscriptionEventArgs>? TranscriptionUpdated;
 
     event EventHandler<SpeechServiceErrorEventArgs>? ServiceError;

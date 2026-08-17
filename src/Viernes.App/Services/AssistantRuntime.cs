@@ -1575,8 +1575,19 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
+    /// <summary>
+    /// Reenvía el nivel del micrófono a la interfaz sin pasar por el estado: llega decenas de veces
+    /// por segundo y tiene que mover la forma, no reescribir la burbuja.
+    /// </summary>
+    private void RecognitionOnAudioLevel(object? sender, AudioLevelEventArgs e) =>
+        Updated?.Invoke(this, new AssistantRuntimeUpdate(
+            _lastVisualState,
+            CurrentStateLabel(_lastVisualState),
+            AudioLevel: e.Level));
+
     private void SubscribeRecognition(ISpeechRecognitionProvider recognition)
     {
+        recognition.AudioLevelChanged += RecognitionOnAudioLevel;
         recognition.TranscriptionUpdated += RecognitionOnSpeechStarted;
         recognition.MicrophoneActivityChanged += RecognitionOnMicrophoneActivityChanged;
         recognition.TranscriptionUpdated += RecognitionOnTranscriptionUpdated;
@@ -1730,6 +1741,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         if (_recognition is not null)
         {
+            _recognition.AudioLevelChanged -= RecognitionOnAudioLevel;
             _recognition.TranscriptionUpdated -= RecognitionOnSpeechStarted;
             _recognition.MicrophoneActivityChanged -= RecognitionOnMicrophoneActivityChanged;
             _recognition.TranscriptionUpdated -= RecognitionOnTranscriptionUpdated;

@@ -22,6 +22,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isListeningWhileHidden = true;
     private Controls.OrbShape _orbShape = Controls.OrbShape.Gota;
     private bool _isConversationActive;
+    private double _audioLevel;
     private string _confirmationTitle = "Confirmación necesaria";
     private string _confirmationDetail = string.Empty;
     private bool _isPresentingResult;
@@ -134,6 +135,13 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         get => _orbShape;
         private set => SetProperty(ref _orbShape, value);
+    }
+
+    /// <summary>Nivel instantáneo del micrófono. La gota lo usa para crecer con tu voz.</summary>
+    public double AudioLevel
+    {
+        get => _audioLevel;
+        private set => SetProperty(ref _audioLevel, value);
     }
 
     public bool IsConversationActive
@@ -400,6 +408,13 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
+            // El nivel llega decenas de veces por segundo: mueve la forma y no toca nada más.
+            if (update.AudioLevel is { } level)
+            {
+                AudioLevel = level;
+                return;
+            }
+
             var previousState = State;
             State = update.State;
             StatusText = update.Status;

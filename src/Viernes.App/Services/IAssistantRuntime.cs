@@ -13,6 +13,7 @@ internal sealed record AssistantRuntimeUpdate(
     bool ClearConfirmation = false,
     IReadOnlyList<TurnStep>? Steps = null,
     bool ClearSteps = false,
+    double? AudioLevel = null,
     IReadOnlyList<BubbleListItem>? Items = null,
     bool ClearItems = false);
 

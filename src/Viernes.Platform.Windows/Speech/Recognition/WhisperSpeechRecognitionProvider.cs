@@ -75,6 +75,8 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
     public event EventHandler<MicrophoneActivityChangedEventArgs>? MicrophoneActivityChanged;
 
+    public event EventHandler<AudioLevelEventArgs>? AudioLevelChanged;
+
     public event EventHandler<SpeechTranscriptionEventArgs>? TranscriptionUpdated;
 
     public event EventHandler<SpeechServiceErrorEventArgs>? ServiceError;
@@ -177,6 +179,8 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
                 var maximumAudioBytes = checked(
                     (long)(CaptureFormat.AverageBytesPerSecond * _options.MaximumRecordingDuration.TotalSeconds));
                 session = new CaptureSession(capture, maximumAudioBytes);
+                session.LevelObserver = (level, isVoice) =>
+                    AudioLevelChanged?.Invoke(this, new AudioLevelEventArgs(level, isVoice));
                 session.DataHandler = (_, eventArgs) => OnDataAvailable(session, eventArgs);
                 session.StoppedHandler = (_, eventArgs) => OnRecordingStopped(session, eventArgs);
                 capture.DataAvailable += session.DataHandler;
@@ -900,6 +904,9 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         private TimeSpan _voiceEnergy;
         private TimeSpan _trailingSilence;
 
+        /// <summary>Puente hacia el evento público; la sesión no conoce al proveedor.</summary>
+        public Action<double, bool>? LevelObserver { get; set; }
+
         public CaptureSession(WaveInEvent capture, long maximumAudioBytes)
         {
             Capture = capture;
@@ -1046,6 +1053,11 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             }
 
             var rootMeanSquare = Math.Sqrt(squareSum / samples);
+
+            // Se publica siempre, aunque no llegue al umbral: la interfaz tiene que poder mostrar
+            // que hay algo entrando por el micrófono incluso cuando todavía no es voz sostenida.
+            LevelObserver?.Invoke(rootMeanSquare, _voiceDetected);
+
             var bufferDuration = TimeSpan.FromSeconds((double)bytesRecorded / Capture.WaveFormat.AverageBytesPerSecond);
             _singleUtteranceBytes += bytesRecorded;
             var totalDuration = TimeSpan.FromSeconds(

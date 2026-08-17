@@ -63,6 +63,9 @@ public partial class MainWindow : Window
         gota.SetBinding(
             LiquidOrb.IsMicrophoneArmedProperty,
             new Binding(nameof(MainViewModel.IsMicrophoneActive)) { Source = _viewModel });
+        gota.SetBinding(
+            LiquidOrb.AudioLevelProperty,
+            new Binding(nameof(MainViewModel.AudioLevel)) { Source = _viewModel });
         OrbHost.Children.Add(gota);
     }
 

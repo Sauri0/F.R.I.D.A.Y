@@ -42,6 +42,11 @@ public sealed class SapiSpeechRecognitionProvider : ISpeechRecognitionProvider
 
     public event EventHandler<MicrophoneActivityChangedEventArgs>? MicrophoneActivityChanged;
 
+    /// <summary>SAPI no expone el nivel de la señal, así que este respaldo nunca lo emite.</summary>
+#pragma warning disable CS0067
+    public event EventHandler<AudioLevelEventArgs>? AudioLevelChanged;
+#pragma warning restore CS0067
+
     public event EventHandler<SpeechTranscriptionEventArgs>? TranscriptionUpdated;
 
     public event EventHandler<SpeechServiceErrorEventArgs>? ServiceError;

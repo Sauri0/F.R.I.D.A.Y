@@ -43,6 +43,7 @@ internal partial class LiquidOrb : UserControl
     private double _transition = 1.0;
     private double _phase;
     private double _clock;
+    private double _levelSmoothed;
     private long _lastTicks;
     private bool _isRunning;
 
@@ -92,6 +93,26 @@ internal partial class LiquidOrb : UserControl
     {
         get => (bool)GetValue(IsMicrophoneActiveProperty);
         set => SetValue(IsMicrophoneActiveProperty, value);
+    }
+
+    /// <summary>
+    /// Nivel del micrófono, de 0 a 1. Mientras escucha, la gota crece con tu voz.
+    /// </summary>
+    /// <remarks>
+    /// Es lo que vuelve inequívoco el «te escucho»: un color fijo no distingue atender de estar
+    /// colgado, pero una forma que se mueve cuando hablás sí. Es la misma señal que usa la burbuja
+    /// de ChatGPT y la razón por la que ahí nunca dudás de si te está oyendo.
+    /// </remarks>
+    public static readonly DependencyProperty AudioLevelProperty = DependencyProperty.Register(
+        nameof(AudioLevel),
+        typeof(double),
+        typeof(LiquidOrb),
+        new PropertyMetadata(0.0));
+
+    internal double AudioLevel
+    {
+        get => (double)GetValue(AudioLevelProperty);
+        set => SetValue(AudioLevelProperty, value);
     }
 
     private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -162,6 +183,14 @@ internal partial class LiquidOrb : UserControl
     {
         var (bias, excursionFactor) = profile.Character.Evaluate(_clock);
         var excursion = profile.Excursion * excursionFactor;
+
+        // La voz del usuario entra como crecimiento del radio, no como agitación del contorno:
+        // hablarle más fuerte la hincha, y eso se lee de inmediato como «me está oyendo».
+        // El seguimiento es asimétrico —sube rápido, baja lento— porque una caída instantánea
+        // parpadea con cada sílaba en vez de acompañar la frase.
+        var target = State == AssistantVisualState.Listening ? Math.Clamp(AudioLevel * 7.0, 0, 1) : 0;
+        _levelSmoothed += (target - _levelSmoothed) * (target > _levelSmoothed ? 0.45 : 0.08);
+        bias += _levelSmoothed * 3.2;
 
         for (var i = 0; i < Points; i++)
         {
