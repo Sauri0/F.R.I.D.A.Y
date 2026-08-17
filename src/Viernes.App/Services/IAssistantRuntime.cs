@@ -55,6 +55,11 @@ internal interface IAssistantRuntime : IAsyncDisposable
     /// <summary>Si la activación por voz sigue viva cuando el orbe está oculto.</summary>
     bool IsListeningWhileHidden { get; }
 
+    /// <summary>Cuerpo elegido para el orbe. Preferencia del usuario, se persiste local.</summary>
+    Controls.OrbShape OrbShape { get; }
+
+    Task SetOrbShapeAsync(Controls.OrbShape shape, CancellationToken cancellationToken);
+
     bool IsWakeWordDemo { get; }
 
     string RecognitionProviderName { get; }

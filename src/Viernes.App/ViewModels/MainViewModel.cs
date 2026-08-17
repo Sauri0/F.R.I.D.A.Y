@@ -20,6 +20,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isExpanded;
     private bool _isConfirmationVisible;
     private bool _isListeningWhileHidden = true;
+    private Controls.OrbShape _orbShape = Controls.OrbShape.Gota;
     private string _confirmationTitle = "Confirmación necesaria";
     private string _confirmationDetail = string.Empty;
     private bool _isPresentingResult;
@@ -126,6 +127,18 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(WakeWordToolTip));
             }
         }
+    }
+
+    public Controls.OrbShape OrbShape
+    {
+        get => _orbShape;
+        private set => SetProperty(ref _orbShape, value);
+    }
+
+    public async Task SetOrbShapeAsync(Controls.OrbShape shape, CancellationToken cancellationToken)
+    {
+        await _runtime.SetOrbShapeAsync(shape, cancellationToken);
+        OrbShape = _runtime.OrbShape;
     }
 
     public bool IsListeningWhileHidden
@@ -267,6 +280,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         IsMuted = _runtime.IsMuted;
         IsWakeWordEnabled = _runtime.IsWakeWordEnabled;
         IsListeningWhileHidden = _runtime.IsListeningWhileHidden;
+        OrbShape = _runtime.OrbShape;
         OnPropertyChanged(nameof(IsCloudConfigured));
         OnPropertyChanged(nameof(ModeLabel));
     }

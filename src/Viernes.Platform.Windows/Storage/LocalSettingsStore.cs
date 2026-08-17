@@ -150,6 +150,9 @@ public sealed class LocalSettingsStore : ILocalSettingsStore
             PreferredRecognitionProvider = Enum.IsDefined(settings.PreferredRecognitionProvider)
                 ? settings.PreferredRecognitionProvider
                 : SpeechRecognitionProviderKind.WhisperLocal,
+            OrbShape = string.Equals(settings.OrbShape?.Trim(), "Nube", StringComparison.OrdinalIgnoreCase)
+                ? "Nube"
+                : "Gota",
             WhisperModelPath = NormalizeWhisperModelPath(settings.WhisperModelPath),
             PreferredOpenRouterModel = NormalizeOptionalText(settings.PreferredOpenRouterModel, 200),
             WidgetLeft = NormalizeCoordinate(settings.WidgetLeft),

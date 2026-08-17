@@ -26,6 +26,12 @@ public sealed record ViernesLocalSettings
     /// </summary>
     public bool ListenWhileHidden { get; init; } = true;
 
+    /// <summary>
+    /// Cuerpo del orbe elegido por el usuario: <c>Gota</c> o <c>Nube</c>. Es preferencia, no
+    /// configuración del sistema: cambiarla no altera ninguna capacidad ni ningún permiso.
+    /// </summary>
+    public string OrbShape { get; init; } = "Gota";
+
     public string RecognitionCulture { get; init; } = "es-AR";
 
     public string? PreferredVoiceName { get; init; }

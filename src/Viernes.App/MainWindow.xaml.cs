@@ -31,8 +31,6 @@ public partial class MainWindow : Window
     private double _appliedWidgetHeight = 108;
     private bool _expandsLeft;
 
-    private readonly LiquidOrb _orb = new();
-
     internal MainWindow(MainViewModel viewModel, WindowPlacementStore placementStore)
     {
         InitializeComponent();
@@ -40,13 +38,32 @@ public partial class MainWindow : Window
         _placementStore = placementStore;
         DataContext = viewModel;
 
-        OrbHost.Children.Add(_orb);
-        _orb.SetBinding(LiquidOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = viewModel });
-        _orb.SetBinding(
-            LiquidOrb.IsMicrophoneActiveProperty,
-            new Binding(nameof(MainViewModel.IsMicrophoneActive)) { Source = viewModel });
-
+        ApplyOrbShape(viewModel.OrbShape);
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
+    }
+
+    /// <summary>
+    /// Cambia el cuerpo en vivo. Los dos leen el mismo estado, así que la elección no altera nada
+    /// del comportamiento: es puramente cómo se ve.
+    /// </summary>
+    private void ApplyOrbShape(OrbShape shape)
+    {
+        OrbHost.Children.Clear();
+
+        if (shape == OrbShape.Nube)
+        {
+            var nube = new NubeOrb { Width = 96, Height = 96 };
+            nube.SetBinding(NubeOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
+            OrbHost.Children.Add(nube);
+            return;
+        }
+
+        var gota = new LiquidOrb();
+        gota.SetBinding(LiquidOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
+        gota.SetBinding(
+            LiquidOrb.IsMicrophoneArmedProperty,
+            new Binding(nameof(MainViewModel.IsMicrophoneActive)) { Source = _viewModel });
+        OrbHost.Children.Add(gota);
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -87,6 +104,10 @@ public partial class MainWindow : Window
         else if (e.PropertyName == nameof(MainViewModel.WidgetHeight))
         {
             ApplyWidgetHeight(_viewModel.WidgetHeight);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.OrbShape))
+        {
+            ApplyOrbShape(_viewModel.OrbShape);
         }
     }
 

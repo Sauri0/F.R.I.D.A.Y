@@ -13,6 +13,8 @@ internal sealed class TrayIconService : IDisposable
     private readonly Forms.ToolStripMenuItem _wakeWordItem;
     private readonly Forms.ToolStripMenuItem _listenWhileHiddenItem;
     private readonly Forms.ToolStripMenuItem _autoStartItem;
+    private readonly Forms.ToolStripMenuItem _gotaItem;
+    private readonly Forms.ToolStripMenuItem _nubeItem;
     private readonly Icon _icon;
 
     public TrayIconService(
@@ -21,8 +23,15 @@ internal sealed class TrayIconService : IDisposable
         Action toggleWakeWord,
         Action toggleListenWhileHidden,
         Action toggleAutoStart,
+        Action<string> chooseShape,
         Action exit)
     {
+        // Elegir el cuerpo es preferencia, no configuración: no cambia ninguna capacidad.
+        _gotaItem = new Forms.ToolStripMenuItem("Gota", null, (_, _) => chooseShape("Gota"));
+        _nubeItem = new Forms.ToolStripMenuItem("Nube", null, (_, _) => chooseShape("Nube"));
+        var shapeMenu = new Forms.ToolStripMenuItem("Cómo se ve");
+        shapeMenu.DropDownItems.AddRange([_gotaItem, _nubeItem]);
+
         _icon = CreateIcon();
         _showItem = new Forms.ToolStripMenuItem("Ocultar widget", null, (_, _) => toggleVisibility());
         _muteItem = new Forms.ToolStripMenuItem("Silenciar voz", null, (_, _) => toggleMute());
@@ -36,6 +45,8 @@ internal sealed class TrayIconService : IDisposable
         var menu = new Forms.ContextMenuStrip();
         menu.Items.AddRange([
             _showItem,
+            new Forms.ToolStripSeparator(),
+            shapeMenu,
             new Forms.ToolStripSeparator(),
             _muteItem,
             _wakeWordItem,
@@ -78,6 +89,13 @@ internal sealed class TrayIconService : IDisposable
         _listenWhileHiddenItem.Text = enabled
             ? "Escuchar aunque esté oculto · sí"
             : "Escuchar aunque esté oculto · no";
+    }
+
+    public void SetOrbShape(string shape)
+    {
+        var isNube = string.Equals(shape, "Nube", StringComparison.OrdinalIgnoreCase);
+        _gotaItem.Checked = !isNube;
+        _nubeItem.Checked = isNube;
     }
 
     public void SetAutoStart(bool enabled) => _autoStartItem.Checked = enabled;

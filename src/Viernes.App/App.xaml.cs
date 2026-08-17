@@ -59,11 +59,13 @@ public partial class App : System.Windows.Application
             ToggleWakeWord,
             ToggleListenWhileHidden,
             ToggleAutoStart,
+            ChooseOrbShape,
             RequestExit);
 
         var autoStartStatus = _autoStartService.GetStatus();
         _trayIcon.SetAutoStart(autoStartStatus.IsConfiguredForCurrentExecutable);
         _trayIcon.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
+        _trayIcon.SetOrbShape(_viewModel.OrbShape.ToString());
         _window.Show();
         _window.Activate();
     }
@@ -129,6 +131,14 @@ public partial class App : System.Windows.Application
         {
             _viewModel.ToggleWakeWordCommand.Execute(null);
         }
+    }
+
+    private void ChooseOrbShape(string shape)
+    {
+        var parsed = string.Equals(shape, "Nube", StringComparison.OrdinalIgnoreCase)
+            ? Controls.OrbShape.Nube
+            : Controls.OrbShape.Gota;
+        _ = _viewModel?.SetOrbShapeAsync(parsed, CancellationToken.None);
     }
 
     private void ToggleListenWhileHidden()
@@ -233,6 +243,10 @@ public partial class App : System.Windows.Application
         else if (e.PropertyName == nameof(MainViewModel.IsListeningWhileHidden))
         {
             _trayIcon?.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.OrbShape))
+        {
+            _trayIcon?.SetOrbShape(_viewModel.OrbShape.ToString());
         }
         else if (e.PropertyName == nameof(MainViewModel.StatusText))
         {

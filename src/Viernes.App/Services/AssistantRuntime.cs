@@ -1,4 +1,5 @@
 using System.Net.Http;
+using Viernes.App.Controls;
 using Viernes.App.ViewModels;
 using Viernes.Core;
 using Viernes.Core.Configuration;
@@ -131,6 +132,23 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     public bool IsListeningWhileHidden => _listenWhileHidden;
 
+    public OrbShape OrbShape { get; private set; } = OrbShape.Gota;
+
+    public async Task SetOrbShapeAsync(OrbShape shape, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        if (OrbShape == shape)
+        {
+            return;
+        }
+
+        OrbShape = shape;
+        await PersistVoiceSettingsAsync(cancellationToken).ConfigureAwait(false);
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            shape == OrbShape.Nube ? "Ahora soy una nube" : "Ahora soy una gota"));
+    }
+
     public bool IsWakeWordDemo => _wakeWord?.IsDemoOnly ?? true;
 
     public string RecognitionProviderName => _recognitionProviderName;
@@ -148,6 +166,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _isMuted = _settings.MicrophoneMuted;
         _isWakeWordEnabled = ResolveWakeEnabled(_settings.VoiceActivation);
         _listenWhileHidden = ResolveListenWhileHidden(_settings.ListenWhileHidden);
+        OrbShape = string.Equals(_settings.OrbShape, "Nube", StringComparison.OrdinalIgnoreCase)
+            ? OrbShape.Nube
+            : OrbShape.Gota;
 
         var selection = CreateRecognitionSelection(_settings);
         _recognition = selection.Provider;
@@ -1084,6 +1105,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 : VoiceActivationMode.PushToTalk,
             WakeWordPhrases = _wakeWord?.Phrases.ToArray() ?? _settings.WakeWordPhrases,
             ListenWhileHidden = _listenWhileHidden,
+            OrbShape = OrbShape.ToString(),
             PreferredRecognitionProvider = _recognition?.Info.Kind ?? _settings.PreferredRecognitionProvider
         };
         await _settingsStore.SaveAsync(_settings, cancellationToken).ConfigureAwait(false);

@@ -148,6 +148,12 @@
         </Grid>
 
         <!-- La burbuja aparece sólo durante interacción o cuando el usuario abre texto. -->
+        <!--
+            Vidrio dibujado a mano: sin backdrop-filter no hay vidrio real, hay que pintarlo.
+            Cinco capas — cuerpo, canto de luz, brillo, contorno y sombra. Lo que se fue es el
+            borde cian: un contorno de color decía «encendido» todo el tiempo. Ahora los estados
+            tiñen el cuerpo, no el contorno.
+        -->
         <Border x:Name="AssistantBubble"
                 Grid.Column="1"
                 Margin="-1,2,2,2"
@@ -155,16 +161,17 @@
                 VerticalAlignment="Stretch"
                 CornerRadius="5,24,24,5"
                 BorderThickness="1"
-                BorderBrush="#4072D9FF"
+                BorderBrush="#1CFFFFFF"
                 Visibility="{Binding IsAssistantShellVisible, Converter={StaticResource BoolVisibility}}">
             <Border.Background>
-                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                    <GradientStop Color="#F31A242E" Offset="0" />
-                    <GradientStop Color="#F5202832" Offset="1" />
+                <LinearGradientBrush StartPoint="0.28,0" EndPoint="0.72,1">
+                    <GradientStop Color="#F2283442" Offset="0" />
+                    <GradientStop Color="#F620212B" Offset="0.46" />
+                    <GradientStop Color="#FA121922" Offset="1" />
                 </LinearGradientBrush>
             </Border.Background>
             <Border.Effect>
-                <DropShadowEffect Color="#B0000000" BlurRadius="18" Direction="270" ShadowDepth="5" Opacity="0.55" />
+                <DropShadowEffect Color="#FF000000" BlurRadius="38" Direction="270" ShadowDepth="14" Opacity="0.58" />
             </Border.Effect>
 
             <Grid>
@@ -173,6 +180,40 @@
                     <RowDefinition Height="26" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
+
+                <!-- Canto de luz arriba y sombra abajo: lo que da el espesor del cristal. -->
+                <Border Grid.Row="0"
+                        Grid.RowSpan="3"
+                        VerticalAlignment="Top"
+                        Height="1"
+                        Margin="-13,-9,-7,0"
+                        Background="#14FFFFFF"
+                        IsHitTestVisible="False"
+                        Panel.ZIndex="9" />
+                <Border Grid.Row="0"
+                        Grid.RowSpan="3"
+                        VerticalAlignment="Bottom"
+                        Height="1"
+                        Margin="-13,0,-7,-7"
+                        Background="#66000000"
+                        IsHitTestVisible="False"
+                        Panel.ZIndex="9" />
+
+                <!-- Brillo del 46 % superior. Muy poco a propósito: si se ve, es plástico. -->
+                <Border Grid.Row="0"
+                        Grid.RowSpan="3"
+                        VerticalAlignment="Top"
+                        Height="52"
+                        Margin="-13,-9,-7,0"
+                        IsHitTestVisible="False"
+                        Panel.ZIndex="8">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                            <GradientStop Color="#0EFFFFFF" Offset="0" />
+                            <GradientStop Color="#00FFFFFF" Offset="1" />
+                        </LinearGradientBrush>
+                    </Border.Background>
+                </Border>
 
                 <TextBlock Grid.Row="0"
                            Margin="0,0,5,2"
