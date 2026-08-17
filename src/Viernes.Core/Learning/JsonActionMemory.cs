@@ -23,11 +23,23 @@ public sealed class JsonActionMemory : IActionMemory
     private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = true };
 
     /// <summary>Palabras que aparecen en todo pedido y no distinguen nada al comparar.</summary>
+    /// <remarks>
+    /// La segunda tanda salió de contar las palabras de las 58 recetas reales, no de imaginar cuáles
+    /// sobran: «no» aparecía 10 veces, «pero» 6, «puedes» 5. Como la mitad del puntaje la aporta la
+    /// primera palabra del pedido, una muletilla al principio —y hablando siempre hay una— alcanzaba
+    /// para emparejar dos pedidos que no tienen nada que ver.
+    /// </remarks>
     private static readonly HashSet<string> StopWords = new(StringComparer.Ordinal)
     {
         "el", "la", "los", "las", "un", "una", "de", "del", "en", "a", "por", "para", "con", "que",
         "me", "te", "se", "lo", "mi", "tu", "y", "o", "al", "es", "esta", "este", "eso", "esto",
-        "porfavor", "favor", "dale", "che", "viernes"
+        "porfavor", "favor", "dale", "che", "viernes",
+
+        // Muletillas y arranques de frase hablada.
+        "no", "si", "pero", "bueno", "ok", "okey", "listo", "ahora", "ya", "bien", "ah", "eh", "mmm",
+        "perfecto", "gracias", "vamos", "ver", "vos", "yo", "puedes", "podes", "podés", "puedo",
+        "quiero", "queria", "quería", "necesito", "hace", "hacé", "haceme", "hacéme", "dame",
+        "decime", "mira", "mirá", "vamo", "todo", "toda", "algo", "cosa", "vez", "tambien", "también"
     };
 
     private readonly string _path;
@@ -78,17 +90,14 @@ public sealed class JsonActionMemory : IActionMemory
             // Spotify y me pongas la canción de Radiohead de Crip»—: dos formas del mismo pedido que
             // no comparten casi ninguna palabra. Exigir parecido entre transcripciones ruidosas es
             // pedirle al azar que coincida dos veces.
-            if (relevant.Length == 0)
-            {
-                relevant = entries
-                    .Where(entry => entry.Succeeded)
-                    .OrderByDescending(entry => entry.Times)
-                    .ThenByDescending(entry => entry.LastUsed)
-                    .Take(5)
-                    .Select(entry => (Entry: entry, Score: 0d))
-                    .ToArray();
-            }
-
+            // Si nada se parece, no se inyecta nada.
+            //
+            // Antes acá se metían las cinco recetas más usadas bajo el encabezado «Lo que ya
+            // aprendiste haciendo esto antes», cerrando con «repetí lo que funcionó». Como el
+            // parecido casi nunca disparaba, ese camino era el normal: pedías «poné el aire
+            // acondicionado» y el contexto te empujaba a poner música, porque música era lo más
+            // usado. Un recuerdo que no viene al caso no es neutro, es una sugerencia equivocada
+            // con autoridad de experiencia.
             if (relevant.Length == 0)
             {
                 return null;
@@ -143,10 +152,15 @@ public sealed class JsonActionMemory : IActionMemory
             var trimmedRequest = Shorten(request);
             var trimmedTarget = string.IsNullOrWhiteSpace(target) ? null : Shorten(target);
 
-            // Repetir el mismo pedido no agrega una fila: sube el contador, que es lo que después
-            // ordena qué método se recuerda primero.
+            // La identidad de una receta es qué se hizo, no cómo se pidió.
+            //
+            // Antes se comparaba también el texto del pedido, palabra por palabra. Hablando, la misma
+            // intención nunca se transcribe dos veces igual —«Poné Creep de Radiohead» contra «Quiero
+            // que abras Spotify y me pongas Crip»—, así que cada pedido abría una fila nueva con el
+            // contador en uno. Medido sobre el archivo real: 58 recetas, 56 usadas una sola vez. El
+            // contador nunca subía, y como es el contador el que ordena qué se recuerda primero, el
+            // recetario no aprendía nada: sólo crecía.
             var existing = entries.FirstOrDefault(entry =>
-                string.Equals(entry.Request, trimmedRequest, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(entry.Action, action, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(entry.Target, trimmedTarget, StringComparison.OrdinalIgnoreCase));
 
@@ -156,6 +170,10 @@ public sealed class JsonActionMemory : IActionMemory
                 existing.Succeeded = succeeded;
                 existing.Outcome = Shorten(outcome);
                 existing.LastUsed = DateTimeOffset.Now;
+
+                // Se guarda la forma más reciente de pedirlo: es la que más se parece a cómo lo va a
+                // pedir la próxima vez, y es contra ésta que se compara al recordar.
+                existing.Request = trimmedRequest;
             }
             else
             {

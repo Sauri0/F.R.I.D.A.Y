@@ -24,7 +24,8 @@ public static class ViernesCoreFactory
         IReadOnlyList<IAssistantTool>? extraTools = null,
         IEnvironmentObserver? environment = null,
         RuleBook? rules = null,
-        GoalBook? goals = null)
+        GoalBook? goals = null,
+        Func<CancellationToken, Task<string?>>? personalContext = null)
     {
         rules ??= new RuleBook();
         goals ??= new GoalBook();
@@ -61,7 +62,8 @@ public static class ViernesCoreFactory
             actionMemory ?? new JsonActionMemory(),
             environment,
             rules,
-            goals);
+            goals,
+            personalContext);
     }
 
     /// <summary>

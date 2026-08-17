@@ -31,7 +31,9 @@ public sealed class AssistantNameInPromptTests
 
         await orchestrator.ProcessAsync("hola");
 
-        var system = Assert.Single(client.Seen, message => message.Role == ConversationRole.System);
+        // El primero: por turno se suman otros mensajes de sistema —la fecha, lo aprendido, la
+        // situación del equipo—, y el contrato con el modelo es el que abre la conversación.
+        var system = client.Seen.First(message => message.Role == ConversationRole.System);
         Assert.StartsWith($"Sos {name},", system.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("{NOMBRE}", system.Content, StringComparison.Ordinal);
     }
@@ -47,7 +49,9 @@ public sealed class AssistantNameInPromptTests
 
         await orchestrator.ProcessAsync("hola");
 
-        var system = Assert.Single(client.Seen, message => message.Role == ConversationRole.System);
+        // El primero: por turno se suman otros mensajes de sistema —la fecha, lo aprendido, la
+        // situación del equipo—, y el contrato con el modelo es el que abre la conversación.
+        var system = client.Seen.First(message => message.Role == ConversationRole.System);
         Assert.StartsWith("Sos Viernes,", system.Content, StringComparison.Ordinal);
     }
 
