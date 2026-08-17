@@ -676,9 +676,14 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
                 : opened;
         }
 
+        // El mensaje dice que NO está sonando, en la primera frase. Antes empezaba con «Abrí Spotify
+        // buscando…» y el modelo lo leía como que la música ya estaba puesta: contestaba «listo, ahí
+        // va» sobre un buscador abierto en silencio.
         return Launch(
             $"spotify:search:{Uri.EscapeDataString(query)}",
-            $"Abrí Spotify buscando «{query}»; dale play a la primera.");
+            $"NO puse la música: sólo abrí Spotify con la búsqueda de «{query}». " +
+            "Si tenés herramientas de Spotify, usá ésas para reproducirla de verdad; " +
+            "si no, decile al usuario que le dé play él.");
     }
 
     /// <summary>

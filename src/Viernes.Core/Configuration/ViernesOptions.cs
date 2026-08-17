@@ -73,6 +73,26 @@ public sealed class ViernesOptions
     /// <c>gpt-4.1-nano</c>, por ejemplo, inventaba la acción. Los carriles pesados siguen con el
     /// router, donde pensar mejor vale más que contestar rápido.
     /// </remarks>
+    /// <summary>
+    /// Cuántas vueltas de herramientas puede dar un turno antes de rendirse.
+    /// </summary>
+    /// <remarks>
+    /// Eran tres, y tres es menos que la vía que la propia herramienta de acciones recomienda:
+    /// <c>read_controls</c> → <c>click_control</c> → <c>set_text</c> son exactamente tres, así que
+    /// operar dentro de una aplicación agotaba el límite antes de terminar. Lo mismo con Spotify:
+    /// buscar, reproducir y contestar también son tres. Quedó registrado en el uso real un turno que
+    /// agotó el tope, contestó «no realicé más acciones» y la canción efectivamente arrancó.
+    /// <para>
+    /// Ocho no es un número mágico: es el tope duro que ya existía, y ahora es también el valor de
+    /// fábrica porque el riesgo de una vuelta de más es gastar unos centavos, mientras que el de una
+    /// de menos es dejar el equipo a mitad de camino sin decirlo.
+    /// </para>
+    /// </remarks>
+    public const int DefaultToolIterations = 8;
+
+    /// <summary>Tope duro. Más que esto deja de ser una tarea y pasa a ser un bucle.</summary>
+    public const int MaximumToolIterations = 8;
+
     public const string DefaultModel = "google/gemini-3.5-flash-lite";
     public const string DefaultAgentModel = AutoRouterOptions.AutoModelSlug;
     public const string DefaultPlanningModel = DefaultAgentModel;
@@ -87,7 +107,7 @@ public sealed class ViernesOptions
         IEnumerable<string>? fallbackModels = null,
         Uri? openRouterEndpoint = null,
         string applicationName = "Viernes",
-        int maxToolIterations = 3,
+        int maxToolIterations = DefaultToolIterations,
         string? planningModel = null,
         decimal? dailyBudgetUsd = null,
         decimal? monthlyBudgetUsd = null,
@@ -139,9 +159,11 @@ public sealed class ViernesOptions
             : throw new ArgumentOutOfRangeException(
                 nameof(maxDeepTasksPerDay),
                 "Use between 0 and 100 deep tasks per day.");
-        MaxToolIterations = maxToolIterations is >= 1 and <= 8
+        MaxToolIterations = maxToolIterations is >= 1 and <= MaximumToolIterations
             ? maxToolIterations
-            : throw new ArgumentOutOfRangeException(nameof(maxToolIterations), "Use between 1 and 8 tool iterations.");
+            : throw new ArgumentOutOfRangeException(
+                nameof(maxToolIterations),
+                $"Use between 1 and {MaximumToolIterations} tool iterations.");
         Portfolio = new ModelPortfolio(
             Model,
             _fallbackModels,

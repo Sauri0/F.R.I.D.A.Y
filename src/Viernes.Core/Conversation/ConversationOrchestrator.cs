@@ -53,9 +53,12 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         está reproduciendo, subir o bajar el volumen, abrir Configuración, mostrar el escritorio.
         Nunca respondas «podés abrir X» ni «para hacerlo tenés que»: abrilo vos.
 
-        Música: un pedido con nombre —«poné Creep de Radiohead», «poné algo de Spinetta»— va con
-        play_music y el nombre como target. «Pausá», «siguiente», «subile» van con media_control o
-        volume. Nunca uses search_web para música: buscar una canción en Google no la hace sonar.
+        Música: si tenés herramientas de Spotify —empiezan con spotify_—, ésas son las que hacen
+        sonar la música y son las que usás para cualquier pedido con nombre. Buscá y reproducí, en
+        dos pasos si hace falta. play_music es el último recurso: sólo abre un buscador y no
+        reproduce nada, así que no lo uses si tenés Spotify conectado. «Pausá», «siguiente»,
+        «subile» van con media_control o volume. Nunca uses search_web para música: buscar una
+        canción en Google no la hace sonar.
 
         Si te falta un dato para actuar —qué aplicación, qué canción— preguntá una sola cosa, corta.
 
@@ -103,6 +106,16 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
     private readonly IEnvironmentObserver? _environment;
     private readonly RuleBook? _rules;
     private readonly GoalBook? _goals;
+
+    /// <summary>
+    /// Lo que se sabe del usuario, provisto desde afuera.
+    /// </summary>
+    /// <remarks>
+    /// Llega como delegado y no como dependencia para que este proyecto siga sin saber nada del
+    /// almacenamiento: la memoria personal vive en otro ensamblado y quien los conoce a los dos es
+    /// la aplicación.
+    /// </remarks>
+    private readonly Func<CancellationToken, Task<string?>>? _personalContext;
     private readonly int _maxToolIterations;
     private readonly string _systemPrompt;
     private readonly SemaphoreSlim _turnGate = new(1, 1);
@@ -120,15 +133,17 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         IActionMemory? actionMemory = null,
         IEnvironmentObserver? environment = null,
         RuleBook? rules = null,
-        GoalBook? goals = null)
+        GoalBook? goals = null,
+        Func<CancellationToken, Task<string?>>? personalContext = null)
     {
         _environment = environment;
         _rules = rules;
         _goals = goals;
+        _personalContext = personalContext;
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _toolExecutor = toolExecutor ?? throw new ArgumentNullException(nameof(toolExecutor));
         _actionMemory = actionMemory;
-        _maxToolIterations = options?.MaxToolIterations ?? 3;
+        _maxToolIterations = options?.MaxToolIterations ?? ViernesOptions.DefaultToolIterations;
         _systemPrompt = string.IsNullOrWhiteSpace(systemPrompt)
             ? BuildDefaultPrompt(options?.ApplicationName)
             : systemPrompt.Trim();
@@ -208,6 +223,13 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 ? null
                 : await _goals.DescribeOpenAsync(cancellationToken).ConfigureAwait(false);
 
+            // Lo que sabe del usuario. Se guardaba desde hacía tiempo —con pruebas que verifican el
+            // archivo en disco— y no se leía en ningún lado: el orquestador ni conocía el tipo. Una
+            // memoria que sólo escribe es un archivo, no una memoria.
+            var personal = _personalContext is null
+                ? null
+                : await SafePersonalAsync(cancellationToken).ConfigureAwait(false);
+
             var results = new List<ToolExecutionResult>();
             for (var iteration = 0; iteration < _maxToolIterations; iteration++)
             {
@@ -236,6 +258,19 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 {
                     extras.Add(ConversationMessage.System(open));
                 }
+
+                if (personal is not null)
+                {
+                    extras.Add(ConversationMessage.System(personal));
+                }
+
+                // La fecha va en cada turno porque el modelo no la tiene. Sin esto, «recordame el
+                // martes» se resolvía contra la fecha de corte del entrenamiento: el recordatorio se
+                // guardaba con un año equivocado y nunca vencía. Es una línea y arregla toda la
+                // agenda hablada.
+                extras.Add(ConversationMessage.System(
+                    $"Ahora es {DateTimeOffset.Now:dddd d 'de' MMMM 'de' yyyy, HH:mm}. " +
+                    "Usá esta fecha para resolver «mañana», «el martes», «en dos horas»."));
 
                 var turn = extras.Count == 0
                     ? _history.ToArray()
@@ -323,9 +358,18 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
                 TrimHistory();
             }
 
+            // Agotar el límite no es lo mismo que no haber hecho nada, y decir lo segundo cuando pasó
+            // lo primero es la peor forma de equivocarse: quedó registrado en el uso real una cadena
+            // de Spotify que agotó las iteraciones, contestó «no realicé más acciones» y la canción
+            // efectivamente arrancó. El usuario queda sin saber qué estado tiene su equipo.
+            var ejecutadas = results.Count(result => result.Status == ToolExecutionStatus.Succeeded);
             var finalText = results.Any(result => result.Status == ToolExecutionStatus.NeedsConfirmation)
                 ? "La acción quedó pendiente de tu confirmación y no se ejecutó."
-                : "Alcancé el límite seguro de pasos con herramientas. No realicé más acciones.";
+                : ejecutadas == 0
+                    ? "Llegué al límite de pasos sin poder completarlo. No quedó nada hecho."
+                    : $"Llegué al límite de pasos. Alcancé a hacer {ejecutadas} " +
+                      $"{(ejecutadas == 1 ? "cosa" : "cosas")} antes de parar; " +
+                      "decime si seguimos desde ahí.";
             _history.Add(ConversationMessage.Assistant(finalText));
             return Finish(finalText, isLocalMode: false, results, lastModel, totalUsage, totalCost);
         }
@@ -698,6 +742,25 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         }
     }
 
+    /// <summary>
+    /// Trae la memoria personal sin poder tumbar el turno.
+    /// </summary>
+    /// <remarks>
+    /// Es contexto, no un requisito: que el archivo esté corrupto o el disco ocupado tiene que
+    /// costar una respuesta menos informada, nunca una conversación caída.
+    /// </remarks>
+    private async Task<string?> SafePersonalAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _personalContext!(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
     private static string? TryReadArgument(JsonElement arguments, string name) =>
         arguments.ValueKind == JsonValueKind.Object &&
         arguments.TryGetProperty(name, out var value) &&
@@ -717,6 +780,16 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         }
     }
 
+    /// <summary>
+    /// Recorta el historial sin partir un par de herramienta al medio.
+    /// </summary>
+    /// <remarks>
+    /// Cortaba por posición y sin mirar roles, así que el primer mensaje conservado podía ser un
+    /// <c>tool</c> cuyo <c>assistant</c> con <c>tool_calls</c> ya se había ido. Ése es exactamente el
+    /// mensaje que la API rechaza con 400 —y un 400 no es elegible para la cadena de respaldo, así
+    /// que la conversación moría del todo—. Se manifestaba sólo en charlas largas, que es cuando
+    /// menos ganas hay de perderla.
+    /// </remarks>
     private void TrimHistory()
     {
         if (_history.Count <= MaximumHistoryMessages)
@@ -724,8 +797,16 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
             return;
         }
 
-        // Preserve the system contract and the newest complete context window.
-        _history.RemoveRange(1, _history.Count - MaximumHistoryMessages);
+        var cut = _history.Count - MaximumHistoryMessages;
+
+        // Se avanza el corte hasta que lo que quede arranque en algo que puede abrir un turno.
+        // Preferible tirar de más que dejar una referencia colgada.
+        while (cut + 1 < _history.Count && _history[cut + 1].Role == ConversationRole.Tool)
+        {
+            cut++;
+        }
+
+        _history.RemoveRange(1, cut);
     }
 
     private static void ValidateInput(string input)

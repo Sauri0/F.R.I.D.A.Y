@@ -60,6 +60,12 @@ public sealed class McpBridgedTool : IAssistantTool
                     .Select(block => block.Text)
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
 
+            // Muchos servidores MCP no marcan IsError y devuelven el fallo escrito adentro del texto.
+            // Confiar sólo en la bandera hacía que un «NO_ACTIVE_DEVICE» de Spotify entrara como
+            // éxito, y de ahí al recetario: la próxima vez se le sugería al modelo ese mismo camino
+            // muerto como algo que había funcionado.
+            var falloEnElTexto = LooksLikeAnError(text);
+
             if (string.IsNullOrWhiteSpace(text))
             {
                 text = response.IsError == true
@@ -67,7 +73,7 @@ public sealed class McpBridgedTool : IAssistantTool
                     : "Listo.";
             }
 
-            return response.IsError == true
+            return response.IsError == true || falloEnElTexto
                 ? ToolExecutionResult.Failure(context.ToolCallId, Definition.Name, text)
                 : ToolExecutionResult.Success(context.ToolCallId, Definition.Name, text);
         }
@@ -83,6 +89,39 @@ public sealed class McpBridgedTool : IAssistantTool
                 Definition.Name,
                 $"El servidor MCP no respondió: {exception.GetType().Name}.");
         }
+    }
+
+    /// <summary>
+    /// Reconoce un fallo escrito en la respuesta cuando el servidor no lo marcó como tal.
+    /// </summary>
+    /// <remarks>
+    /// Deliberadamente conservador: sólo marcas que aparecen al principio del texto o códigos en
+    /// mayúsculas con guiones bajos, que es como los servidores reales devuelven sus errores. Buscar
+    /// la palabra «error» en cualquier lado convertiría en fallo a cualquier respuesta que hable de
+    /// errores —un archivo de registro, una canción que se llame así—, y equivocarse para este lado
+    /// es peor: descarta trabajo que sí se hizo.
+    /// </remarks>
+    private static bool LooksLikeAnError(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var head = text.TrimStart();
+        var firstLine = head.Split('\n', 2)[0].Trim();
+
+        string[] prefixes = ["error:", "error ", "failed", "failure", "exception:", "unauthorized"];
+        if (prefixes.Any(prefix => firstLine.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        // Códigos tipo NO_ACTIVE_DEVICE, PREMIUM_REQUIRED, RATE_LIMITED: mayúsculas y guión bajo.
+        return firstLine.Length <= 80 &&
+            firstLine.Contains('_') &&
+            firstLine.Any(char.IsUpper) &&
+            !firstLine.Any(char.IsLower);
     }
 
     /// <summary>Los nombres de herramienta viajan a la API con un alfabeto acotado.</summary>
