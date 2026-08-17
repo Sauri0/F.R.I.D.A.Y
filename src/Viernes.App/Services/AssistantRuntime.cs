@@ -249,7 +249,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             WakeWordEnabled: _isWakeWordEnabled));
     }
 
-    public async Task<string> SendAsync(string text, CancellationToken cancellationToken)
+    public Task<string> SendAsync(string text, CancellationToken cancellationToken) =>
+        SendAsync(text, spoken: false, cancellationToken);
+
+    /// <summary><paramref name="spoken"/> pide una respuesta para decir, no para leer.</summary>
+    public async Task<string> SendAsync(string text, bool spoken, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
@@ -267,7 +271,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _speechCancellation?.Cancel();
             _neuralPlayer.Stop();
             await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
-            return await ProcessRequestAsync(text, cancellationToken).ConfigureAwait(false);
+            return await ProcessRequestAsync(text, spoken, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -276,7 +280,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
-    private async Task<string> ProcessRequestAsync(string text, CancellationToken cancellationToken)
+    private async Task<string> ProcessRequestAsync(string text, bool spoken, CancellationToken cancellationToken)
     {
         DismissPending(publish: false);
         Publish(new AssistantRuntimeUpdate(
@@ -304,7 +308,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             }
         }
 
-        var result = await _orchestrator.ProcessAsync(text, cancellationToken).ConfigureAwait(false);
+        var result = await _orchestrator.ProcessAsync(text, spoken, cancellationToken).ConfigureAwait(false);
         var pending = result.ToolResults.FirstOrDefault(tool =>
             tool.Status == ToolExecutionStatus.NeedsConfirmation);
 
@@ -956,7 +960,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         if (!string.IsNullOrWhiteSpace(input))
         {
-            await ProcessRequestAsync(input, cancellationToken).ConfigureAwait(false);
+            await ProcessRequestAsync(input, _conversationActive, cancellationToken).ConfigureAwait(false);
         }
 
         return true;
@@ -1046,6 +1050,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         var consecutiveDeviceFailures = 0;
+        var consecutiveSilences = 0;
 
         try
         {
@@ -1069,14 +1074,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 RuntimeTrace.Write("captura.inicio");
                 var clock = System.Diagnostics.Stopwatch.StartNew();
-                // La duración máxima tiene que superar a la ventana inicial o la validación tira.
-                // Subir sólo la inicial rompía cada captura a los pocos milisegundos.
+                // Ritmo de charla, no de dictado: corta 600 ms después de que dejás de hablar y
+                // no se queda veinte segundos mirándote si no decís nada. La duración máxima
+                // siempre tiene que superar a la ventana inicial o la validación tira.
                 var capture = await _recognition
                     .RecognizeSingleUtteranceAsync(
                         new SingleUtteranceRecognitionOptions
                         {
-                            InitialSilenceTimeout = TimeSpan.FromSeconds(20),
-                            MaximumDuration = TimeSpan.FromSeconds(30)
+                            InitialSilenceTimeout = TimeSpan.FromSeconds(6),
+                            EndSilenceTimeout = TimeSpan.FromMilliseconds(600),
+                            MaximumDuration = TimeSpan.FromSeconds(20)
                         },
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -1116,13 +1123,22 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 var transcript = capture.Text?.Trim();
                 if (string.IsNullOrWhiteSpace(transcript))
                 {
-                    // El silencio no cierra nada: sigue esperando, que es lo que se le pidió.
+                    // El silencio no cierra nada: sigue esperando, que es lo que se le pidió. Pero
+                    // tampoco se queda mudo: a los tres silencios seguidos pregunta, como haría
+                    // cualquiera al que dejaste hablando solo.
+                    if (++consecutiveSilences == 3)
+                    {
+                        await SpeakIfEnabledAsync("¿Seguís ahí?", cancellationToken).ConfigureAwait(false);
+                    }
+
                     Publish(new AssistantRuntimeUpdate(
                         AssistantVisualState.Listening,
                         "Sigo escuchando · decime «listo» para cortar",
                         MicrophoneActive: true));
                     continue;
                 }
+
+                consecutiveSilences = 0;
 
                 if (IsClosingPhrase(transcript))
                 {
@@ -1132,7 +1148,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     return;
                 }
 
-                await SendAsync(transcript, cancellationToken).ConfigureAwait(false);
+                await SendAsync(transcript, spoken: true, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)

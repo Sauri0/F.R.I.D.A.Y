@@ -24,6 +24,18 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         sensibles o destructivas no están habilitadas en este MVP.
         """;
 
+    /// <summary>
+    /// Instrucción del turno hablado. Se agrega sólo mientras hay conversación por voz: una
+    /// respuesta que se lee bien escrita puede ser insoportable dicha en voz alta, y contestar
+    /// largo es lo que más rompe la sensación de estar charlando.
+    /// </summary>
+    private const string SpokenTurnDirective = """
+        Este turno se responde EN VOZ. Contestá en una o dos frases, como en una charla.
+        Nada de listas, viñetas, encabezados ni markdown: se va a leer en voz alta.
+        Si la respuesta completa es larga, decí lo esencial y ofrecé ampliar.
+        Usá español rioplatense natural, con vos y sin solemnidad.
+        """;
+
     private readonly IChatCompletionClient _chatClient;
     private readonly IToolExecutor _toolExecutor;
     private readonly int _maxToolIterations;
@@ -67,8 +79,18 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
     /// </summary>
     public event EventHandler<TurnProgressEventArgs>? ProgressChanged;
 
+    public Task<ConversationTurnResult> ProcessAsync(
+        string input,
+        CancellationToken cancellationToken = default) =>
+        ProcessAsync(input, spoken: false, cancellationToken);
+
+    /// <summary>
+    /// <paramref name="spoken"/> marca que la respuesta se va a decir en voz alta, no leer.
+    /// La directiva se agrega al turno y no al historial: no debe contaminar los turnos escritos.
+    /// </summary>
     public async Task<ConversationTurnResult> ProcessAsync(
         string input,
+        bool spoken,
         CancellationToken cancellationToken = default)
     {
         ValidateInput(input);
@@ -89,8 +111,12 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
             var results = new List<ToolExecutionResult>();
             for (var iteration = 0; iteration < _maxToolIterations; iteration++)
             {
+                var turn = spoken
+                    ? _history.Append(ConversationMessage.System(SpokenTurnDirective)).ToArray()
+                    : _history.ToArray();
+
                 var completion = await _chatClient.CompleteAsync(
-                    _history.ToArray(),
+                    turn,
                     _toolExecutor.Definitions,
                     cancellationToken).ConfigureAwait(false);
                 totalUsage += completion.Usage;

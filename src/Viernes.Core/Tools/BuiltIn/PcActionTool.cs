@@ -16,7 +16,11 @@ public sealed class PcActionTool : IAssistantTool
     /// Sin ejecutor la herramienta previsualiza y nada más. Con ejecutor, las acciones previsualizables
     /// se ejecutan de verdad —pero recién después de que la política las haya dejado pasar.
     /// </summary>
-    public PcActionTool(IPcActionExecutor? executor = null) => _executor = executor;
+    public PcActionTool(IPcActionExecutor? executor = null)
+    {
+        _executor = executor;
+        Definition = BuildDefinition();
+    }
 
     private static readonly HashSet<string> DestructiveActions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -33,14 +37,27 @@ public sealed class PcActionTool : IAssistantTool
         "open_settings", "open_application", "show_desktop"
     };
 
-    public ToolDefinition Definition { get; } = ToolDefinition.Create(
+    public ToolDefinition Definition { get; }
+
+    /// <summary>
+    /// La descripción tiene que decir la verdad de lo que la herramienta hace hoy: mientras dijo
+    /// «previsualiza, no ejecuta», el modelo asumía que no podía actuar y ni siquiera la ofrecía.
+    /// </summary>
+    private ToolDefinition BuildDefinition() => ToolDefinition.Create(
         ToolName,
-        "Previsualiza una acción de PC. No ejecuta comandos ni cambios reales en este MVP.",
+        _executor is null
+            ? "Previsualiza una acción de PC. No ejecuta comandos ni cambios reales."
+            : "Ejecuta acciones de Windows permitidas, tras confirmación del usuario. " +
+              "open_settings abre Configuración —target: sonido, pantalla, bluetooth, red, wifi, " +
+              "batería, micrófono, privacidad, aplicaciones, notificaciones, inicio—. " +
+              "open_application abre una app —target: calculadora, bloc de notas, explorador, " +
+              "terminal, configuración—. show_desktop muestra el escritorio. " +
+              "No hay shell, borrado, apagado ni cambios de configuración.",
         ToolSchemas.Object(
             new Dictionary<string, object>
             {
-                ["action"] = ToolSchemas.String("Acción solicitada."),
-                ["target"] = ToolSchemas.String("Destino opcional de la acción.")
+                ["action"] = ToolSchemas.String("open_settings, open_application o show_desktop."),
+                ["target"] = ToolSchemas.String("Destino, de la lista permitida en la descripción.")
             },
             ["action"]),
         ToolRiskLevel.RequiresConfirmation);
