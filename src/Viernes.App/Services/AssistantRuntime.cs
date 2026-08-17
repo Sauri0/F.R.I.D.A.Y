@@ -1069,9 +1069,15 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                 RuntimeTrace.Write("captura.inicio");
                 var clock = System.Diagnostics.Stopwatch.StartNew();
+                // La duración máxima tiene que superar a la ventana inicial o la validación tira.
+                // Subir sólo la inicial rompía cada captura a los pocos milisegundos.
                 var capture = await _recognition
                     .RecognizeSingleUtteranceAsync(
-                        new SingleUtteranceRecognitionOptions { InitialSilenceTimeout = TimeSpan.FromSeconds(20) },
+                        new SingleUtteranceRecognitionOptions
+                        {
+                            InitialSilenceTimeout = TimeSpan.FromSeconds(20),
+                            MaximumDuration = TimeSpan.FromSeconds(30)
+                        },
                         cancellationToken)
                     .ConfigureAwait(false);
                 clock.Stop();
@@ -1133,8 +1139,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             // Cerrar la conversación cancela el bucle; no es un error.
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            // Tragarse el motivo convertía un error de configuración en «se apaga sola».
+            RuntimeTrace.Write("conversacion.excepcion", $"{exception.GetType().Name} · {exception.Message}");
             await EndConversationAsync("La conversación se interrumpió", CancellationToken.None)
                 .ConfigureAwait(false);
         }
