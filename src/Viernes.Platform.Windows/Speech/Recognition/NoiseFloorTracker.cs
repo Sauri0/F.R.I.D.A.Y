@@ -21,8 +21,26 @@ internal static class NoiseFloorTracker
     /// <summary>Cuánto tiene que superar al ambiente para contar como voz.</summary>
     private const double Multiplier = 8;
 
-    /// <summary>Piso absoluto, por si el ambiente es un estudio y el piso medido da casi cero.</summary>
-    private const double MinimumThreshold = 0.0012;
+    /// <summary>
+    /// Piso absoluto, por si el ambiente es un estudio y el piso medido da casi cero.
+    /// </summary>
+    /// <remarks>
+    /// Era 0,0012 y en el equipo del usuario eso significaba <em>no detectar nunca</em>. Medido con
+    /// el diagnóstico propio: su micrófono entrega la voz a 0,0005 de mediana y 0,0011 de pico, o
+    /// sea que el mínimo absoluto quedaba <b>por encima del pico de su voz</b>. El 0 % de sus
+    /// buffers cruzaba el umbral, con el micrófono funcionando perfectamente y entregando audio.
+    /// <para>
+    /// El número viejo daba por sentado un micrófono de ganancia normal. Con un enrutador virtual de
+    /// por medio —Sonar, NVIDIA Broadcast, Voicemod— o con la ganancia de Windows baja, la señal
+    /// llega uno o dos órdenes de magnitud más chica, y un piso fijo elegido para el caso normal se
+    /// vuelve un techo insalvable para el caso raro.
+    /// <para>
+    /// Bajarlo no reabre la puerta al ruido: lo que descarta un golpe o un teclado no es este piso
+    /// sino la banda de cruces por cero y los 150 ms de energía sostenida, que siguen igual. Este
+    /// número sólo existe para que un cuarto silencioso no ponga el umbral en cero.
+    /// </para>
+    /// </remarks>
+    private const double MinimumThreshold = 0.00008;
 
     /// <summary>Baja rápido: el ambiente es el nivel más bajo reciente, no el promedio.</summary>
     private const double FallRate = 0.10;
