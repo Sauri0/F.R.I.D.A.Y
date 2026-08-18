@@ -336,6 +336,16 @@ public partial class MainWindow : Window
 
         _pressPending = false;
 
+        // La captura se suelta ANTES, no después. Un Button de WPF toma el mouse al presionarlo, y
+        // con el mouse capturado por otro elemento DragMove no arranca: tira InvalidOperationException
+        // y el orbe queda clavado. Era exactamente eso —«no puedo arrastrarla manteniendo apretada»—
+        // y lo introdujo el arreglo que hizo que el clic llegara al botón: el botón empezó a recibir
+        // el clic y, con él, la captura.
+        if (Mouse.Captured is not null)
+        {
+            Mouse.Capture(null);
+        }
+
         try
         {
             // DragMove no vuelve hasta que se suelta el botón.
@@ -344,13 +354,6 @@ public partial class MainWindow : Window
         catch (InvalidOperationException)
         {
             // El botón se soltó antes de que arrancara el arrastre; no hay nada que guardar distinto.
-        }
-
-        // Windows se queda con el mouse durante su bucle de movimiento, así que el botón nunca ve el
-        // MouseUp: sin devolverle la captura queda hundido después de cada arrastre.
-        if (OrbButton.IsMouseCaptured)
-        {
-            OrbButton.ReleaseMouseCapture();
         }
 
         SaveOrbPlacement();

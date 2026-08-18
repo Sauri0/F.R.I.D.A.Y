@@ -41,6 +41,18 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        // Banco de micrófono: una ventana con tres mediciones y un botón cada una. Existe porque
+        // cada arreglo de voz de este proyecto salió de medir, y hasta ahora la medición había que
+        // armarla a mano y se tiraba después.
+        if (e.Args.Contains("--medir"))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var lab = new Diagnostics.MicrophoneLab();
+            lab.Closed += (_, _) => Shutdown();
+            lab.Show();
+            return;
+        }
+
         if (e.Args.Contains("--check-voice") ||
             e.Args.Contains("--check-listen") ||
             e.Args.Contains("--check-whisper") ||

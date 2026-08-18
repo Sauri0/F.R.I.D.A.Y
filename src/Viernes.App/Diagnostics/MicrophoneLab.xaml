@@ -1,0 +1,123 @@
+<Window x:Class="Viernes.App.Diagnostics.MicrophoneLab"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Viernes · banco de micrófono"
+        Width="880" Height="720"
+        WindowStartupLocation="CenterScreen"
+        Background="#0C1014"
+        Foreground="#E8EDF2"
+        FontFamily="Segoe UI Variable Text, Segoe UI">
+
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#E8EDF2"/>
+        </Style>
+        <Style x:Key="Etiqueta" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#8695A2"/>
+            <Setter Property="FontSize" Value="11"/>
+        </Style>
+        <Style x:Key="Dato" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#E8EDF2"/>
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas"/>
+            <Setter Property="FontSize" Value="20"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,18">
+            <TextBlock Text="BANCO DE MICRÓFONO" Style="{StaticResource Etiqueta}"/>
+            <TextBlock x:Name="DispositivoTexto" FontSize="15" Margin="0,4,0,0"
+                       Text="buscando dispositivo…" TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <!-- Medidor en vivo -->
+        <Border Grid.Row="1" Background="#141A20" CornerRadius="10" Padding="18" Margin="0,0,0,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="NIVEL DE ENTRADA" Style="{StaticResource Etiqueta}"/>
+                    <Grid Height="26" Margin="0,8,16,0">
+                        <Border Background="#1B232B" CornerRadius="4"/>
+                        <Border x:Name="BarraNivel" Background="#4FBEC6" CornerRadius="4"
+                                HorizontalAlignment="Left" Width="0"/>
+                        <Border x:Name="MarcaUmbral" Background="#E0AE52" Width="2"
+                                HorizontalAlignment="Left" Margin="0"/>
+                    </Grid>
+                    <TextBlock x:Name="LeyendaNivel" Style="{StaticResource Etiqueta}" Margin="0,6,0,0"
+                               Text="la barra es tu voz · la línea amarilla es el umbral que hay que superar"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" MinWidth="130">
+                    <TextBlock Text="VOZ" Style="{StaticResource Etiqueta}"/>
+                    <TextBlock x:Name="EstadoVoz" Style="{StaticResource Dato}" Text="—"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Números -->
+        <UniformGrid Grid.Row="2" Columns="4" Margin="0,0,0,12">
+            <Border Background="#141A20" CornerRadius="10" Padding="16" Margin="0,0,8,0">
+                <StackPanel>
+                    <TextBlock Text="PISO DE RUIDO" Style="{StaticResource Etiqueta}"/>
+                    <TextBlock x:Name="PisoTexto" Style="{StaticResource Dato}" Text="—"/>
+                </StackPanel>
+            </Border>
+            <Border Background="#141A20" CornerRadius="10" Padding="16" Margin="4,0">
+                <StackPanel>
+                    <TextBlock Text="UMBRAL" Style="{StaticResource Etiqueta}"/>
+                    <TextBlock x:Name="UmbralTexto" Style="{StaticResource Dato}" Text="—"/>
+                </StackPanel>
+            </Border>
+            <Border Background="#141A20" CornerRadius="10" Padding="16" Margin="4,0">
+                <StackPanel>
+                    <TextBlock Text="PICO" Style="{StaticResource Etiqueta}"/>
+                    <TextBlock x:Name="PicoTexto" Style="{StaticResource Dato}" Text="—"/>
+                </StackPanel>
+            </Border>
+            <Border Background="#141A20" CornerRadius="10" Padding="16" Margin="8,0,0,0">
+                <StackPanel>
+                    <TextBlock Text="MARGEN" Style="{StaticResource Etiqueta}"/>
+                    <TextBlock x:Name="MargenTexto" Style="{StaticResource Dato}" Text="—"/>
+                </StackPanel>
+            </Border>
+        </UniformGrid>
+
+        <!-- Botones -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,14">
+            <Button x:Name="BotonRuido" Content="1 · Medir tu silencio (5 s)" Padding="18,11"
+                    Margin="0,0,10,0" Click="MedirRuido_Click"/>
+            <Button x:Name="BotonHablar" Content="2 · Grabar una frase" Padding="18,11"
+                    Margin="0,0,10,0" Click="Grabar_Click"/>
+            <Button x:Name="BotonWake" Content="3 · Probar «Hola Viernes» (30 s)" Padding="18,11"
+                    Margin="0,0,10,0" Click="ProbarWake_Click"/>
+            <Button x:Name="BotonInforme" Content="Guardar informe" Padding="18,11"
+                    Click="Informe_Click"/>
+        </StackPanel>
+
+        <!-- Bitácora -->
+        <Border Grid.Row="4" Background="#141A20" CornerRadius="10" Padding="4">
+            <ScrollViewer x:Name="Scroll" VerticalScrollBarVisibility="Auto">
+                <TextBox x:Name="Bitacora" IsReadOnly="True" Background="Transparent"
+                         Foreground="#B9C4CE" BorderThickness="0"
+                         FontFamily="Cascadia Mono, Consolas" FontSize="12.5"
+                         TextWrapping="Wrap" Padding="14"/>
+            </ScrollViewer>
+        </Border>
+
+        <TextBlock Grid.Row="5" Style="{StaticResource Etiqueta}" Margin="0,12,0,0" TextWrapping="Wrap"
+                   Text="Hacé los tres en orden. El 1 mide tu cuarto callado; el 2, tu voz normal; el 3 cuenta cuántas veces te reconoce el nombre y con cuánta confianza. El informe queda en el escritorio."/>
+    </Grid>
+</Window>
