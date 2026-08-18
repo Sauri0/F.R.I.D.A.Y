@@ -22,6 +22,26 @@ namespace Viernes.Platform.Windows.Speech.Recognition;
 // la formula con lo que mide no mide: adivina.
 public static class NoiseFloorTracker
 {
+    // PERFIL DE REFERENCIA — medido con el banco (--medir) el 18/08/2026, en el equipo real donde
+    // corre esto: micrófono Realtek a través de SteelSeries Sonar, fader al 100%, que es como el
+    // usuario lo usa siempre. Estas constantes están calibradas CONTRA ESTOS NÚMEROS y no contra un
+    // cuarto ideal:
+    //
+    //     piso de ruido en silencio ... 0,1129   (mediana de 167 muestras)
+    //     percentil 90 del silencio ... 0,1722
+    //     voz, nivel medio ............ 0,8951
+    //     voz, pico ................... 1,0000   (satura: el conversor recorta)
+    //     margen voz/ruido ............ 7,9×
+    //
+    // Con Multiplier = 4 el umbral cae en 0,45: entre el ruido y la voz, con 2× de aire de cada
+    // lado. Resultado medido: 271 de 500 buffers cruzan el umbral y la transcripción sale con texto.
+    // Con el 8 anterior el umbral daba 0,90 —por encima del nivel medio de la voz— y cruzaban 20 de
+    // 267: Whisper recibía casi puro silencio y devolvía vacío.
+    //
+    // Antes de mover cualquiera de estos números, corré el banco y compará contra este perfil. Toda
+    // esta calibración salió de medir tres veces con la misma configuración; las dos primeras vueltas
+    // se perdieron por decidir sobre una sola medición.
+
     /// <summary>
     /// Cuánto tiene que superar al ambiente para contar como voz.
     /// </summary>
