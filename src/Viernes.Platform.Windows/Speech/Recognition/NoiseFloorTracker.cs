@@ -25,22 +25,27 @@ internal static class NoiseFloorTracker
     /// Piso absoluto, por si el ambiente es un estudio y el piso medido da casi cero.
     /// </summary>
     /// <remarks>
-    /// Era 0,0012 y en el equipo del usuario eso significaba <em>no detectar nunca</em>. Medido con
-    /// el diagnóstico propio: su micrófono entrega la voz a 0,0005 de mediana y 0,0011 de pico, o
-    /// sea que el mínimo absoluto quedaba <b>por encima del pico de su voz</b>. El 0 % de sus
-    /// buffers cruzaba el umbral, con el micrófono funcionando perfectamente y entregando audio.
+    /// Este número tiene historia y conviene contarla, porque se movió dos veces en un día y la
+    /// segunda fue para corregir la primera.
     /// <para>
-    /// El número viejo daba por sentado un micrófono de ganancia normal. Con un enrutador virtual de
-    /// por medio —Sonar, NVIDIA Broadcast, Voicemod— o con la ganancia de Windows baja, la señal
-    /// llega uno o dos órdenes de magnitud más chica, y un piso fijo elegido para el caso normal se
-    /// vuelve un techo insalvable para el caso raro.
+    /// Era 0,0012. Una medición del equipo del usuario dio voz con pico 0,0011 —o sea, el mínimo
+    /// quedaba <em>por encima</em> del pico de su voz, y el 0 % de sus buffers cruzaba el umbral— así
+    /// que se bajó a 0,00008. Pero una segunda medición del mismo equipo, minutos después, dio pico
+    /// 1,0 y media 0,48: cuatrocientas veces más. Entre las dos, la ganancia del micrófono había
+    /// cambiado. La primera medición era real pero describía una configuración transitoria, y
+    /// calibrar contra ella dejó el piso prácticamente en cero, que es una invitación al ruido.
     /// <para>
-    /// Bajarlo no reabre la puerta al ruido: lo que descarta un golpe o un teclado no es este piso
-    /// sino la banda de cruces por cero y los 150 ms de energía sostenida, que siguen igual. Este
-    /// número sólo existe para que un cuarto silencioso no ponga el umbral en cero.
+    /// 0,0004 es el compromiso: un tercio del valor original —así un micrófono de ganancia baja
+    /// sigue entrando— y varias veces mayor que cero —así un cuarto en silencio no pone el umbral a
+    /// ras del piso—. La adaptación real la sigue haciendo el multiplicador sobre el ruido medido;
+    /// esto es sólo el suelo.
+    /// </para>
+    /// <para>
+    /// La lección para la próxima: un solo número medido una sola vez no alcanza para mover una
+    /// constante. Hacen falta dos mediciones que coincidan, o saber qué cambió entre ellas.
     /// </para>
     /// </remarks>
-    private const double MinimumThreshold = 0.00008;
+    private const double MinimumThreshold = 0.0004;
 
     /// <summary>Baja rápido: el ambiente es el nivel más bajo reciente, no el promedio.</summary>
     private const double FallRate = 0.10;

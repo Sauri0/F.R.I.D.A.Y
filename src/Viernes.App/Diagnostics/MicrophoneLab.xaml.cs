@@ -97,7 +97,23 @@ public partial class MicrophoneLab : Window
 
         _muestras.Clear();
         _midiendo = true;
-        await Task.Delay(TimeSpan.FromSeconds(5));
+
+        // Se abre una captura de verdad en vez de escuchar el push-to-talk. El push-to-talk no
+        // emite niveles hasta que arranca una sesión, así que el botón 1 medía cero mientras el 2
+        // —que sí abre sesión— medía 259 muestras del mismo micrófono. No era el micrófono: era que
+        // los dos botones medían cosas distintas.
+        if (_recognition is not null)
+        {
+            await _recognition.RecognizeSingleUtteranceAsync(
+                new SingleUtteranceRecognitionOptions
+                {
+                    InitialSilenceTimeout = TimeSpan.FromSeconds(5),
+                    EndSilenceTimeout = TimeSpan.FromSeconds(5),
+                    MaximumDuration = TimeSpan.FromSeconds(5)
+                },
+                CancellationToken.None);
+        }
+
         _midiendo = false;
 
         if (_muestras.Count == 0)
@@ -169,9 +185,11 @@ public partial class MicrophoneLab : Window
 
         var conVoz = _muestras.Count == 0 ? 0 : _muestras.Count(v => v > _umbral);
         var medioHablando = _muestras.Where(v => v > _umbral).DefaultIfEmpty(0).Average();
-        var margen = _piso <= 0 ? 0 : medioHablando / _piso;
+        // Sin piso medido no hay margen que calcular, y mostrar 0,0× hacía parecer que el micrófono
+        // estaba mudo cuando en realidad faltaba correr el botón 1.
+        var margen = _piso <= 0 ? -1 : medioHablando / _piso;
 
-        MargenTexto.Text = margen > 0 ? $"{margen:0.0}×" : "—";
+        MargenTexto.Text = margen > 0 ? $"{margen:0.0}×" : "correr 1";
 
         Escribir($"  duración            {reloj.ElapsedMilliseconds} ms");
         Escribir($"  transcripción       «{resultado.Text}»");
@@ -179,12 +197,30 @@ public partial class MicrophoneLab : Window
         Escribir($"  pico                {_pico:0.0000}");
         Escribir($"  nivel medio hablando {medioHablando:0.0000}");
         Escribir($"  buffers sobre umbral {conVoz} de {_muestras.Count}");
-        Escribir($"  MARGEN sobre el piso {margen:0.0}×");
-        Escribir(margen switch
+        if (margen < 0)
         {
-            >= 6 => "  Margen holgado: el detector no debería perderte.",
-            >= 3 => "  Margen justo. Palabras cortas pueden perderse.",
-            _ => "  ⚠ Margen insuficiente. O el micrófono está lejos, o su ganancia está baja: subila en Sonido → Entrada."
+            Escribir("  MARGEN               no calculado · corré primero el botón 1");
+        }
+        else
+        {
+            Escribir($"  MARGEN sobre el piso {margen:0.0}×");
+            Escribir(margen switch
+            {
+                >= 6 => "  Margen holgado: el detector no debería perderte.",
+                >= 3 => "  Margen justo. Palabras cortas pueden perderse.",
+                _ => "  ⚠ Margen chico: el micrófono está lejos o su ganancia está baja."
+            });
+        }
+
+        // La saturación es el problema opuesto y se confunde con «buena señal»: un pico clavado en
+        // 1,0 significa que la onda se recortó arriba, y lo que se recorta no se puede transcribir.
+        Escribir(_pico switch
+        {
+            >= 0.99 => "  ⚠ SATURA. El pico llega a 1,0: la onda se recorta y la transcripción empeora. " +
+                       "Bajá la ganancia en Sonido → Entrada hasta que el pico quede cerca de 0,7.",
+            >= 0.8 => "  Nivel alto, cerca de saturar. Bajá un poco la ganancia.",
+            >= 0.25 => "  Nivel de entrada correcto.",
+            _ => "  Nivel bajo. Subí la ganancia en Sonido → Entrada."
         });
 
         BotonHablar.IsEnabled = true;
