@@ -18,8 +18,27 @@ namespace Viernes.Platform.Windows.Speech.Recognition;
 /// </remarks>
 internal static class NoiseFloorTracker
 {
-    /// <summary>Cuánto tiene que superar al ambiente para contar como voz.</summary>
-    private const double Multiplier = 8;
+    /// <summary>
+    /// Cuánto tiene que superar al ambiente para contar como voz.
+    /// </summary>
+    /// <remarks>
+    /// Era 8, elegido para un cuarto silencioso. Medido en el equipo del usuario con la ganancia ya
+    /// corregida: el ruido de fondo queda en 0,049 y la voz en 0,466 —un margen de 9,5×— así que un
+    /// umbral de 8× se planta casi pegado a la voz y sólo la cruzan los picos: <b>20 de 267 buffers</b>.
+    /// La transcripción salía vacía porque a Whisper le llegaba casi puro silencio.
+    /// <para>
+    /// El umbral tiene que caer <em>entre</em> el ruido y la voz, no al borde de la voz. Con un
+    /// margen real de 9,5×, la media geométrica está cerca de 3×; 4 deja lugar para cuartos algo
+    /// mejores sin volver a pegarse. Lo que sigue descartando golpes y teclas no es este número sino
+    /// la banda de cruces por cero y los 150 ms de energía sostenida.
+    /// </para>
+    /// <para>
+    /// Vale la pena decir por qué 8 sobrevivió tanto: en un cuarto callado el piso es tan chico que
+    /// gana el mínimo absoluto y el multiplicador ni participa. Sólo aparece cuando hay ruido real,
+    /// que es justo cuando más falta hace acertarlo.
+    /// </para>
+    /// </remarks>
+    private const double Multiplier = 4;
 
     /// <summary>
     /// Piso absoluto, por si el ambiente es un estudio y el piso medido da casi cero.
