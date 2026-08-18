@@ -72,6 +72,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private LocalCommandRouter _localCommands;
     private readonly ISpeechService _speechSynthesizer;
     private readonly OpenRouterSpeechClient _neuralVoice;
+
+    /// <summary>
+    /// La voz de Google. Es la principal desde que el usuario eligió Aoede escuchando las catorce.
+    /// </summary>
+    /// <remarks>
+    /// Convive con la de OpenRouter en vez de reemplazarla de cuajo: si falta la clave de Google o
+    /// el modelo está saturado, se cae a la anterior y recién después a la del sistema. Quedarse
+    /// mudo por un proveedor es exactamente el fallo que costó una tarde encontrar.
+    /// </remarks>
+    private readonly GeminiSpeechClient _googleVoice;
     private readonly NeuralSpeechPlayer _neuralPlayer = new();
     private CancellationTokenSource? _speechCancellation;
 
@@ -188,6 +198,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _httpClient,
             _options,
             SpeechSynthesisOptions.FromEnvironment());
+        _googleVoice = new GeminiSpeechClient(
+            _httpClient,
+            () => LocalCredentials.Get("GOOGLE_API_KEY"));
         // La voz elegida se lee de las preferencias más adelante, cuando ya se cargó el archivo:
         // acá todavía no se sabe. SpeechService la leía de sus opciones y nadie se la pasaba nunca,
         // así que ponerla en settings.json no hacía absolutamente nada.
@@ -1251,9 +1264,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return false;
         }
 
+        // El registro se decide una vez para toda la frase, con el texto entero: partirlo por
+        // oraciones y juzgar cada tramo por separado haría que una misma respuesta cambiara de humor
+        // en el medio, que es peor que no variar nunca.
+        var moment = VoiceRegister.Guess(text);
+
         try
         {
-            var pending = _neuralVoice.SynthesizeAsync(chunks[0], cancellationToken);
+            var pending = SpeakChunkAsync(chunks[0], moment, cancellationToken);
             for (var index = 0; index < chunks.Count; index++)
             {
                 var audio = await pending.ConfigureAwait(false);
@@ -1264,7 +1282,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 }
 
                 pending = index + 1 < chunks.Count
-                    ? _neuralVoice.SynthesizeAsync(chunks[index + 1], cancellationToken)
+                    ? SpeakChunkAsync(chunks[index + 1], moment, cancellationToken)
                     : Task.FromResult<SynthesizedSpeech?>(null);
 
                 if (!await _neuralPlayer
@@ -1296,6 +1314,37 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Sintetiza un tramo con la voz de Google, y cae a la de OpenRouter si no se puede.
+    /// </summary>
+    /// <remarks>
+    /// El orden importa: Google es la elegida —Aoede, y con registro que cambia según el momento—
+    /// pero su modelo devuelve 503 por demanda cada tanto. Caer al proveedor anterior en vez de
+    /// quedarse muda convierte un pico de demanda ajeno en una frase que suena un poco distinta,
+    /// que es infinitamente mejor que silencio.
+    /// </remarks>
+    private async Task<SynthesizedSpeech?> SpeakChunkAsync(
+        string chunk,
+        VoiceMoment moment,
+        CancellationToken cancellationToken)
+    {
+        if (_googleVoice.IsConfigured)
+        {
+            var google = await _googleVoice
+                .SynthesizeAsync(chunk, moment, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (google is not null)
+            {
+                return google;
+            }
+
+            RuntimeTrace.Write("voz.google.fallo", _googleVoice.LastFailure ?? "sin detalle");
+        }
+
+        return await _neuralVoice.SynthesizeAsync(chunk, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
