@@ -1,12 +1,30 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      Pasó de net10.0 a net10.0-windows para poder probar la lógica pura de la voz, que vive en
+      Viernes.Platform.Windows y no puede mudarse a Core sin que Core empiece a saber de audio. El
+      proyecto entero ya era de Windows —la interfaz es WPF—, así que esto no restringe nada que
+      antes anduviera en otro lado.
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Viernes.Platform.Windows usa el codificador PNG de WPF; sin esto no resuelve sus referencias. -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Habilitar WPF cambia el conjunto de using implícitos y deja afuera estos dos, que las pruebas
+      que ya estaban usan a mano llena. Reponerlos acá evita tocar veinte archivos de pruebas por un
+      cambio de configuración del proyecto.
+    -->
+    <Using Include="System.Net.Http" />
+    <Using Include="System.IO" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
@@ -19,6 +37,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Viernes.Core\Viernes.Core.csproj" />
+    <ProjectReference Include="..\..\src\Viernes.Platform.Windows\Viernes.Platform.Windows.csproj" />
   </ItemGroup>
 
 </Project>

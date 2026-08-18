@@ -1,5 +1,4 @@
 using System.Text.Json;
-using ModelContextProtocol.Client;
 using Viernes.Core.Tools;
 
 namespace Viernes.Core.Mcp;
@@ -13,29 +12,37 @@ namespace Viernes.Core.Mcp;
 /// —escribir, clickear, mandar mensajes— y lo que Viernes lee de la web puede intentar dispararlo.
 /// Si estas herramientas esquivaran la política, conectar un servidor equivaldría a entregar la
 /// máquina; pasando por ella, conectar un servidor sólo agrega capacidades que se siguen confirmando.
+/// <para>
+/// Guarda la <see cref="McpServerConnection"/> y no una sesión: la sesión cambia cada vez que el
+/// servidor se cae y vuelve, y la herramienta tiene que sobrevivir a eso. Antes guardaba el cliente
+/// que le tocó al arrancar, así que cuando ese proceso moría la herramienta quedaba apuntando a un
+/// muerto para siempre.
+/// </para>
 /// </remarks>
 public sealed class McpBridgedTool : IAssistantTool
 {
-    private readonly McpClient _client;
+    private readonly McpServerConnection _connection;
     private readonly string _remoteName;
 
-    public McpBridgedTool(McpClient client, McpClientTool tool, string serverName, bool confirmActions = false)
+    public McpBridgedTool(
+        McpServerConnection connection,
+        McpToolDescriptor tool,
+        bool confirmActions = false)
     {
-        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(tool);
-        ArgumentException.ThrowIfNullOrWhiteSpace(serverName);
 
-        _client = client;
+        _connection = connection;
         _remoteName = tool.Name;
 
         // El nombre se prefija con el del servidor: dos servidores pueden traer una herramienta
         // llamada «search» y el modelo tiene que poder distinguirlas.
         Definition = ToolDefinition.Create(
-            Sanitize($"{serverName}_{tool.Name}"),
+            Sanitize($"{connection.Name}_{tool.Name}"),
             string.IsNullOrWhiteSpace(tool.Description)
-                ? $"Herramienta «{tool.Name}» del servidor {serverName}."
+                ? $"Herramienta «{tool.Name}» del servidor {connection.Name}."
                 : tool.Description,
-            ConvertSchema(tool.JsonSchema),
+            ConvertSchema(tool.Schema),
             confirmActions ? ToolRiskLevel.RequiresConfirmation : ToolRiskLevel.Safe);
     }
 
@@ -49,16 +56,11 @@ public sealed class McpBridgedTool : IAssistantTool
         try
         {
             var payload = ToArgumentDictionary(arguments);
-            var response = await _client
-                .CallToolAsync(_remoteName, payload, cancellationToken: cancellationToken)
+            var response = await _connection
+                .CallToolAsync(_remoteName, payload, cancellationToken)
                 .ConfigureAwait(false);
 
-            var text = string.Join(
-                Environment.NewLine,
-                response.Content
-                    .OfType<ModelContextProtocol.Protocol.TextContentBlock>()
-                    .Select(block => block.Text)
-                    .Where(value => !string.IsNullOrWhiteSpace(value)));
+            var text = response.Text;
 
             // Muchos servidores MCP no marcan IsError y devuelven el fallo escrito adentro del texto.
             // Confiar sólo en la bandera hacía que un «NO_ACTIVE_DEVICE» de Spotify entrara como
@@ -68,18 +70,29 @@ public sealed class McpBridgedTool : IAssistantTool
 
             if (string.IsNullOrWhiteSpace(text))
             {
-                text = response.IsError == true
+                text = response.IsError
                     ? "El servidor informó un error sin detalle."
                     : "Listo.";
             }
 
-            return response.IsError == true || falloEnElTexto
+            return response.IsError || falloEnElTexto
                 ? ToolExecutionResult.Failure(context.ToolCallId, Definition.Name, text)
                 : ToolExecutionResult.Success(context.ToolCallId, Definition.Name, text);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (McpServerUnavailableException exception)
+        {
+            // Decir cuál se cayó y que se está reintentando le da al modelo algo que contestar que
+            // es cierto. «No respondió» a secas se parece demasiado a «no sé hacer eso», y de ahí
+            // sale el asistente que se disculpa por una capacidad que en realidad tiene.
+            return ToolExecutionResult.Failure(
+                context.ToolCallId,
+                Definition.Name,
+                $"{exception.Message} Decile al usuario que ese servicio está caído y que se " +
+                "reconecta solo; no le pidas que reinicie nada.");
         }
         catch (Exception exception)
         {

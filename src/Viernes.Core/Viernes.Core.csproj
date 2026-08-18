@@ -21,4 +21,14 @@
     <PackageReference Include="ModelContextProtocol.Core" Version="2.2.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      La memoria personal sigue siendo una biblioteca aparte que no sabe nada de conversaciones ni
+      de herramientas: la referencia apunta de acá hacia allá y nunca al revés. Hace falta porque
+      lo que se destila al cerrar una charla no tenía ninguna forma de aprobarse, y aprobar es un
+      pedido que llega hablando —o sea, una herramienta— y las herramientas viven acá.
+    -->
+    <ProjectReference Include="..\Viernes.Memory\Viernes.Memory.csproj" />
+  </ItemGroup>
+
 </Project>
