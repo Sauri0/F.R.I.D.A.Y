@@ -56,6 +56,19 @@ public sealed class ClosingPhraseTests
     public void NoCierra_CuandoLaPalabraEsParteDeUnaInstruccion(string text) =>
         Assert.False(ClosingPhrase.IsClosing(text));
 
+    /// <remarks>
+    /// «pará» pierde el acento al normalizar y queda «para». La lista tenía «pare» y «para ya», así
+    /// que la forma más natural de decirlo en rioplatense caía afuera de la vía rápida y tenía que
+    /// dar la vuelta por el modelo antes de cortar.
+    /// </remarks>
+    [Theory]
+    [InlineData("pará")]
+    [InlineData("para")]
+    [InlineData("frená")]
+    [InlineData("desactivate")]
+    public void Cierra_ConLasFormasQueFaltaban(string text) =>
+        Assert.True(ClosingPhrase.IsClosing(text));
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]

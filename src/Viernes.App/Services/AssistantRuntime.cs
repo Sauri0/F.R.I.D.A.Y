@@ -91,6 +91,23 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// <summary>Distinto de cero cuando el usuario pidió parar y el turno todavía no terminó.</summary>
     private int _restRequested;
 
+    /// <summary>
+    /// Distinto de cero mientras destila lo aprendido de la charla que acaba de cerrar.
+    /// </summary>
+    /// <remarks>
+    /// La destilación corre un turno entero contra el modelo, sobre el mismo orquestador cuyos
+    /// eventos alimentan la interfaz. Sin esta bandera, después de despedirse el orbe volvía a
+    /// «Pensando…» y mostraba como pasos el prompt interno de la destilación —y ahí se quedaba,
+    /// porque el puente hacia la interfaz sólo reenvía Thinking y Error, nunca Idle: puede subir el
+    /// orbe pero no bajarlo. En un turno normal eso está bien porque el reposo lo publica el cierre
+    /// del pedido; la destilación no pasa por ahí.
+    /// <para>
+    /// Es trabajo interno y no tiene por qué verse. Que se vea es peor que que no se vea: el usuario
+    /// pidió que pare y lo que ve es que arranca a pensar.
+    /// </para>
+    /// </remarks>
+    private int _distilling;
+
     private int _conversationLoopRunning;
 
     /// <summary>Lo que dijo el usuario en la charla, para destilar al cerrarla. No se persiste.</summary>
@@ -1620,7 +1637,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     {
                         await SpeakIfEnabledAsync("Cualquier cosa me avisás.", CancellationToken.None)
                             .ConfigureAwait(false);
-                        await EndConversationAsync("Cerré por silencio", CancellationToken.None)
+                        await EndConversationAsync("Cerré por silencio", quiet: true, CancellationToken.None)
                             .ConfigureAwait(false);
                         await LearnFromConversationAsync().ConfigureAwait(false);
                         return;
@@ -1786,7 +1803,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 "Si no hay nada duradero, respondé exactamente: NADA.\n\n" +
                 string.Join("\n", turns.TakeLast(12));
 
-            var distilled = await _orchestrator.ProcessAsync(prompt, CancellationToken.None).ConfigureAwait(false);
+            ConversationTurnResult distilled;
+            Volatile.Write(ref _distilling, 1);
+            try
+            {
+                distilled = await _orchestrator.ProcessAsync(prompt, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                // Se baja pase lo que pase. Si quedara arriba, el turno siguiente del usuario
+                // tampoco mostraría que está pensando: el remedio sería peor que la enfermedad.
+                Volatile.Write(ref _distilling, 0);
+            }
+
             if (distilled.IsLocalMode || string.IsNullOrWhiteSpace(distilled.Text))
             {
                 return;
@@ -2221,14 +2251,28 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: false));
 
-    private void OrchestratorOnProgressChanged(object? sender, TurnProgressEventArgs e) =>
+    private void OrchestratorOnProgressChanged(object? sender, TurnProgressEventArgs e)
+    {
+        // La destilación no se muestra: es trabajo interno sobre el mismo orquestador, y sus pasos
+        // son el prompt que se le da al modelo para resumir la charla.
+        if (Volatile.Read(ref _distilling) != 0)
+        {
+            return;
+        }
+
         Publish(new AssistantRuntimeUpdate(
             _lastVisualState,
             CurrentStateLabel(_lastVisualState),
             Steps: e.Steps));
+    }
 
     private void OrchestratorOnStateChanged(object? sender, AssistantStateChangedEventArgs e)
     {
+        if (Volatile.Read(ref _distilling) != 0)
+        {
+            return;
+        }
+
         if (e.CurrentState is AssistantState.Thinking or AssistantState.Error)
         {
             Publish(new AssistantRuntimeUpdate(

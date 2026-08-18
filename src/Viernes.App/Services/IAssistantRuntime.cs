@@ -101,6 +101,12 @@ internal interface IAssistantRuntime : IAsyncDisposable
 
     Task EndConversationAsync(string reason, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Cierra la conversación. Con <paramref name="quiet"/> vuelve al reposo sin dejar nada en
+    /// pantalla, que es lo que corresponde cuando el cierre lo pidió el usuario.
+    /// </summary>
+    Task EndConversationAsync(string reason, bool quiet, CancellationToken cancellationToken);
+
     Task SetShellVisibilityAsync(bool visible, CancellationToken cancellationToken);
 
     /// <summary>Hay autorización de gasto viva para hoy.</summary>

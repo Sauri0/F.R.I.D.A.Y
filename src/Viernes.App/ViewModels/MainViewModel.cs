@@ -371,15 +371,19 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     public void OpenTextInput()
     {
-        IsExpanded = true;
-
+        // Cerrar es el gesto inverso de abrir, así que tiene que encoger, no desplegar. Antes esta
+        // línea estaba arriba del todo y valía para los dos casos: tocar el orbe para terminar la
+        // charla abría el panel de golpe y lo dejaba abierto, porque nada volvía a cerrarlo.
         if (_runtime.IsConversationActive)
         {
+            IsExpanded = false;
             MessageText = "Listo.";
             StatusText = "Conversación cerrada";
-            _ = _runtime.EndConversationAsync("Conversación cerrada", CancellationToken.None);
+            _ = _runtime.EndConversationAsync("Conversación cerrada", quiet: true, CancellationToken.None);
             return;
         }
+
+        IsExpanded = true;
 
         MessageText = "¿Qué necesitás?";
         StatusText = "Te escucho · escribí, o hablá y decime «listo» para cortar";

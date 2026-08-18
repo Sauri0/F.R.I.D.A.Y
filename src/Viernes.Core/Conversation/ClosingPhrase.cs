@@ -67,7 +67,11 @@ public static class ClosingPhrase
         // es la solución: la lista siempre va a ir atrás del idioma. Lo que cubre el resto es la
         // herramienta descansar, donde el modelo entiende la intención en vez de reconocer la
         // palabra. Esto queda sólo para que lo literal corte al instante, sin ida y vuelta.
-        "desactivate", "desactivarte", "apagarte", "apaga", "desconectate"
+        "desactivate", "desactivarte", "apagarte", "apaga", "desconectate",
+
+        // «pará» pierde el acento al normalizar y queda «para», que no estaba: la lista tenía
+        // «pare» y «para ya», así que la forma más natural de decirlo caía afuera de la vía rápida.
+        "para", "para la", "frena", "frenate"
     ];
 
     /// <summary>Cuántas palabras puede tener una frase para que lo ambiguo cuente como despedida.</summary>
