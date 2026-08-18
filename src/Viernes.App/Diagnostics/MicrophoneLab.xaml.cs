@@ -63,7 +63,11 @@ public partial class MicrophoneLab : Window
 
     private void OnLevel(object? sender, AudioLevelEventArgs e)
     {
-        Dispatcher.Invoke(() =>
+        // BeginInvoke y no Invoke. Invoke es bloqueante: el hilo del audio queda esperando a que el
+        // de la interfaz lo atienda, treinta y tres veces por segundo. Mientras un boton ocupa el
+        // hilo de interfaz esperando a que termine una medicion, cada uno espera al otro y la
+        // ventana se congela. Era exactamente eso: apretar el boton 1 trababa el programa.
+        Dispatcher.BeginInvoke(() =>
         {
             var nivel = Math.Clamp(e.Level, 0, 1);
             BarraNivel.Width = nivel * 640;
@@ -78,11 +82,19 @@ public partial class MicrophoneLab : Window
                 PicoTexto.Text = _pico.ToString("0.000");
             }
 
-            if (_midiendo)
-            {
-                _muestras.Add(nivel);
-            }
         });
+
+        // La muestra se guarda en el hilo del audio, fuera del despacho a la interfaz. Antes se
+        // guardaba adentro, asi que medir dependia de que la ventana llegara a atender cada buffer:
+        // con la interfaz ocupada se perdian muestras, y con la interfaz trabada no llegaba ninguna
+        // —que es como el boton 1 podia informar cero con el microfono entregando audio—.
+        if (_midiendo)
+        {
+            lock (_muestras)
+            {
+                _muestras.Add(Math.Clamp(e.Level, 0, 1));
+            }
+        }
     }
 
     /// <summary>
@@ -95,7 +107,11 @@ public partial class MicrophoneLab : Window
         Escribir("── 1 · SILENCIO ──");
         Escribir("No hables durante cinco segundos.");
 
-        _muestras.Clear();
+        lock (_muestras)
+        {
+            _muestras.Clear();
+        }
+
         _midiendo = true;
 
         // Se abre una captura de verdad en vez de escuchar el push-to-talk. El push-to-talk no
@@ -116,14 +132,18 @@ public partial class MicrophoneLab : Window
 
         _midiendo = false;
 
-        if (_muestras.Count == 0)
+        double[] orden;
+        lock (_muestras)
+        {
+            orden = _muestras.OrderBy(v => v).ToArray();
+        }
+
+        if (orden.Length == 0)
         {
             Escribir("⚠ No llegó una sola muestra. El micrófono no está entregando audio.");
             BotonRuido.IsEnabled = true;
             return;
         }
-
-        var orden = _muestras.OrderBy(v => v).ToArray();
         _piso = orden[orden.Length / 2];
         var p90 = orden[(int)(orden.Length * 0.9)];
         // La fórmula del umbral vive en NoiseFloorTracker, que es internal en el otro ensamblado.
@@ -137,7 +157,7 @@ public partial class MicrophoneLab : Window
         UmbralTexto.Text = _umbral.ToString("0.000");
         MarcaUmbral.Margin = new Thickness(Math.Clamp(_umbral, 0, 1) * 640, 0, 0, 0);
 
-        Escribir($"  muestras            {_muestras.Count}");
+        Escribir($"  muestras            {orden.Length}");
         Escribir($"  piso (mediana)      {_piso:0.0000}");
         Escribir($"  percentil 90        {p90:0.0000}");
         Escribir($"  máximo del silencio {orden[^1]:0.0000}");
@@ -167,7 +187,11 @@ public partial class MicrophoneLab : Window
         Escribir("── 2 · TU VOZ ──");
         Escribir("Decí, con tu volumen normal: «Viernes, creame una carpeta en el escritorio».");
 
-        _muestras.Clear();
+        lock (_muestras)
+        {
+            _muestras.Clear();
+        }
+
         _pico = 0;
         _midiendo = true;
 
@@ -183,8 +207,14 @@ public partial class MicrophoneLab : Window
         reloj.Stop();
         _midiendo = false;
 
-        var conVoz = _muestras.Count == 0 ? 0 : _muestras.Count(v => v > _umbral);
-        var medioHablando = _muestras.Where(v => v > _umbral).DefaultIfEmpty(0).Average();
+        double[] tomadas;
+        lock (_muestras)
+        {
+            tomadas = [.. _muestras];
+        }
+
+        var conVoz = tomadas.Length == 0 ? 0 : tomadas.Count(v => v > _umbral);
+        var medioHablando = tomadas.Where(v => v > _umbral).DefaultIfEmpty(0).Average();
         // Sin piso medido no hay margen que calcular, y mostrar 0,0× hacía parecer que el micrófono
         // estaba mudo cuando en realidad faltaba correr el botón 1.
         var margen = _piso <= 0 ? -1 : medioHablando / _piso;
@@ -196,7 +226,7 @@ public partial class MicrophoneLab : Window
         Escribir($"  estado              {(resultado.Succeeded ? "ok" : resultado.ErrorCode.ToString())}");
         Escribir($"  pico                {_pico:0.0000}");
         Escribir($"  nivel medio hablando {medioHablando:0.0000}");
-        Escribir($"  buffers sobre umbral {conVoz} de {_muestras.Count}");
+        Escribir($"  buffers sobre umbral {conVoz} de {tomadas.Length}");
         if (margen < 0)
         {
             Escribir("  MARGEN               no calculado · corré primero el botón 1");
