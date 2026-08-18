@@ -532,7 +532,19 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 IsExpanded = true;
             }
 
-            if (update.State == AssistantVisualState.Idle &&
+            if (update.Quiet)
+            {
+                // Se lo pidió el usuario: nada de mostrar la respuesta unos segundos. Se corta la
+                // presentación que estuviera corriendo y se encoge ya, que es lo que se ve como
+                // «me callé». Dejarla abierta contando lo que hizo se lee como que sigue trabajando.
+                _resultPresentationCancellation?.Cancel();
+                _isPresentingResult = false;
+                IsExpanded = false;
+                Steps.Clear();
+                ListItems.Clear();
+                NotifyContentProperties();
+            }
+            else if (update.State == AssistantVisualState.Idle &&
                 previousState == AssistantVisualState.Thinking &&
                 !string.IsNullOrWhiteSpace(update.Message))
             {

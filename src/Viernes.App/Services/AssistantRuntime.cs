@@ -88,6 +88,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// <summary>Lo que el freno corta: el turno en curso, venga de la voz o del teclado.</summary>
     private CancellationTokenSource? _turnCancellation;
 
+    /// <summary>Distinto de cero cuando el usuario pidió parar y el turno todavía no terminó.</summary>
+    private int _restRequested;
+
     private int _conversationLoopRunning;
 
     /// <summary>Lo que dijo el usuario en la charla, para destilar al cerrarla. No se persiste.</summary>
@@ -198,8 +201,15 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return;
         }
 
-        await EndConversationAsync("Se lo pidió el usuario", CancellationToken.None)
+        await EndConversationAsync("Se lo pidió el usuario", quiet: true, CancellationToken.None)
             .ConfigureAwait(false);
+
+        // El turno sigue vivo después de que la herramienta devuelve: el modelo recibe el resultado,
+        // contesta, y esa respuesta vuelve a publicar «pensando» y a hablar. Eso es exactamente lo
+        // que el usuario ve como que quedó penando con la burbuja abierta después de pedirle que
+        // pare. La bandera hace que al terminar el turno se vuelva al reposo y se calle, pase lo que
+        // pase con lo que el modelo haya contestado.
+        Volatile.Write(ref _restRequested, 1);
 
         if (depth == RestDepth.Apagar)
         {
@@ -491,6 +501,28 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             Interlocked.CompareExchange(ref _turnCancellation, null, turn);
             Interlocked.Exchange(ref _requestActive, 0);
             await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+
+            // La última palabra del turno tiene que ser el reposo. Si en el medio el usuario pidió
+            // parar, el turno igual siguió —el modelo contestó al resultado de la herramienta— y esa
+            // respuesta dejó el orbe pensando y la burbuja abierta. Acá se corrige al final, cuando
+            // ya no queda nadie que pueda volver a pisarlo.
+            if (Interlocked.Exchange(ref _restRequested, 0) == 1)
+            {
+                CancelSpeechSafely();
+                _neuralPlayer.Stop();
+                await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+
+                Publish(new AssistantRuntimeUpdate(
+                    AssistantVisualState.Idle,
+                    IsMuted
+                        ? "Micrófono apagado"
+                        : $"Atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”",
+                    MicrophoneActive: IsAnyMicrophoneActive(),
+                    WakeWordEnabled: _isWakeWordEnabled,
+                    ClearSteps: true,
+                    ClearItems: true,
+                    Quiet: true));
+            }
         }
     }
 
@@ -1421,7 +1453,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
-    public async Task EndConversationAsync(string reason, CancellationToken cancellationToken)
+    public Task EndConversationAsync(string reason, CancellationToken cancellationToken) =>
+        EndConversationAsync(reason, quiet: false, cancellationToken);
+
+    /// <summary>
+    /// Cierra la conversación. Con <paramref name="quiet"/> vuelve al reposo sin dejar nada en
+    /// pantalla, que es lo que corresponde cuando el cierre lo pidió el usuario.
+    /// </summary>
+    public async Task EndConversationAsync(string reason, bool quiet, CancellationToken cancellationToken)
     {
         if (!_conversationActive)
         {
@@ -1441,7 +1480,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             AssistantVisualState.Idle,
             reason,
             MicrophoneActive: IsAnyMicrophoneActive(),
-            WakeWordEnabled: _isWakeWordEnabled));
+            WakeWordEnabled: _isWakeWordEnabled,
+            ClearSteps: true,
+            ClearItems: true,
+            Quiet: quiet));
 
         await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
     }
@@ -1615,7 +1657,12 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 {
                     await SpeakIfEnabledAsync("Cualquier cosa me avisás.", CancellationToken.None)
                         .ConfigureAwait(false);
-                    await EndConversationAsync("Conversación cerrada", CancellationToken.None).ConfigureAwait(false);
+
+                    // En modo silencioso: se despide y se encoge. Antes cerraba dejando la despedida
+                    // en la burbuja siete segundos, y esos siete segundos con el desplegable abierto
+                    // después de pedirle que pare se leen como que no hizo caso.
+                    await EndConversationAsync("Conversación cerrada", quiet: true, CancellationToken.None)
+                        .ConfigureAwait(false);
                     await LearnFromConversationAsync().ConfigureAwait(false);
                     return;
                 }

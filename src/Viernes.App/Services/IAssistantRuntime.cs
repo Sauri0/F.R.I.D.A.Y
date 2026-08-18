@@ -16,7 +16,18 @@ internal sealed record AssistantRuntimeUpdate(
     double? AudioLevel = null,
     IReadOnlyList<BubbleListItem>? Items = null,
     bool ClearItems = false,
-    BubbleListKind ListKind = BubbleListKind.Agenda);
+    BubbleListKind ListKind = BubbleListKind.Agenda,
+
+    /// <summary>
+    /// Volver al reposo del todo, sin dejar nada en pantalla.
+    /// </summary>
+    /// <remarks>
+    /// El cierre normal de un turno muestra la respuesta unos segundos antes de encogerse, que es
+    /// lo que se quiere casi siempre. Pero cuando el usuario pidió que pare, dejar la burbuja
+    /// abierta contando lo que hizo es lo contrario de lo que pidió: se ve como si siguiera
+    /// trabajando. Esta bandera dice «esto no es una respuesta que mostrar, es un apagarse».
+    /// </remarks>
+    bool Quiet = false);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,
