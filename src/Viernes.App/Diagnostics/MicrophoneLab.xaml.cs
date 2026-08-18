@@ -102,6 +102,11 @@ public partial class MicrophoneLab : Window
     /// </summary>
     private async void MedirRuido_Click(object sender, RoutedEventArgs e)
     {
+        // Un handler async void que lanza cierra el proceso: la excepcion no tiene a donde
+        // ir. Un banco de pruebas que se cierra al medir no sirve para medir nada, y ademas
+        // esconde justo el dato que uno vino a buscar.
+        try
+        {
         BotonRuido.IsEnabled = false;
         Escribir("");
         Escribir("── 1 · SILENCIO ──");
@@ -123,9 +128,13 @@ public partial class MicrophoneLab : Window
             await _recognition.RecognizeSingleUtteranceAsync(
                 new SingleUtteranceRecognitionOptions
                 {
+                    // La duracion maxima tiene que ser MAYOR que los timeouts, no igual: la
+                    // validacion del proveedor lo exige y tirarle tres cincos hacia que lanzara
+                    // ArgumentException. Como el handler es async void, esa excepcion no la
+                    // atrapaba nadie y cerraba la aplicacion entera.
                     InitialSilenceTimeout = TimeSpan.FromSeconds(5),
-                    EndSilenceTimeout = TimeSpan.FromSeconds(5),
-                    MaximumDuration = TimeSpan.FromSeconds(5)
+                    EndSilenceTimeout = TimeSpan.FromSeconds(2),
+                    MaximumDuration = TimeSpan.FromSeconds(20)
                 },
                 CancellationToken.None);
         }
@@ -169,7 +178,13 @@ public partial class MicrophoneLab : Window
             _ => "  Cuarto tranquilo. Buen punto de partida."
         });
 
-        BotonRuido.IsEnabled = true;
+            BotonRuido.IsEnabled = true;
+        }
+        catch (Exception exception)
+        {
+            Escribir($"⚠ Se rompio la medicion: {exception.GetType().Name} · {exception.Message}");
+            BotonRuido.IsEnabled = true;
+        }
     }
 
     /// <summary>
@@ -177,6 +192,11 @@ public partial class MicrophoneLab : Window
     /// </summary>
     private async void Grabar_Click(object sender, RoutedEventArgs e)
     {
+        // Un handler async void que lanza cierra el proceso: la excepcion no tiene a donde
+        // ir. Un banco de pruebas que se cierra al medir no sirve para medir nada, y ademas
+        // esconde justo el dato que uno vino a buscar.
+        try
+        {
         if (_recognition is null)
         {
             return;
@@ -253,7 +273,13 @@ public partial class MicrophoneLab : Window
             _ => "  Nivel bajo. Subí la ganancia en Sonido → Entrada."
         });
 
-        BotonHablar.IsEnabled = true;
+            BotonHablar.IsEnabled = true;
+        }
+        catch (Exception exception)
+        {
+            Escribir($"⚠ Se rompio la medicion: {exception.GetType().Name} · {exception.Message}");
+            BotonHablar.IsEnabled = true;
+        }
     }
 
     /// <summary>
@@ -265,6 +291,11 @@ public partial class MicrophoneLab : Window
     /// </remarks>
     private async void ProbarWake_Click(object sender, RoutedEventArgs e)
     {
+        // Un handler async void que lanza cierra el proceso: la excepcion no tiene a donde
+        // ir. Un banco de pruebas que se cierra al medir no sirve para medir nada, y ademas
+        // esconde justo el dato que uno vino a buscar.
+        try
+        {
         BotonWake.IsEnabled = false;
         Escribir("");
         Escribir("── 3 · LA PALABRA CLAVE ──");
@@ -329,7 +360,13 @@ public partial class MicrophoneLab : Window
             await _recognition.StartPushToTalkAsync(CancellationToken.None);
         }
 
-        BotonWake.IsEnabled = true;
+            BotonWake.IsEnabled = true;
+        }
+        catch (Exception exception)
+        {
+            Escribir($"⚠ Se rompio la medicion: {exception.GetType().Name} · {exception.Message}");
+            BotonWake.IsEnabled = true;
+        }
     }
 
     private void OnWake(object? sender, WakeWordDetectedEventArgs e) =>
