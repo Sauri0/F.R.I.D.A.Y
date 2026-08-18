@@ -155,12 +155,7 @@ public partial class MicrophoneLab : Window
         }
         _piso = orden[orden.Length / 2];
         var p90 = orden[(int)(orden.Length * 0.9)];
-        // La fórmula del umbral vive en NoiseFloorTracker, que es internal en el otro ensamblado.
-        // Se replica acá en vez de abrir la clase: un banco de pruebas no justifica ampliar la
-        // superficie pública del proyecto, y si algún día divergen, este número deja de coincidir
-        // con el real y la medición miente. Por eso queda dicho: es una copia, y hay que mirarla si
-        // se toca el original.
-        _umbral = Math.Max(_piso * 8, 0.012);
+        _umbral = NoiseFloorTracker.ThresholdFor(_piso);
 
         PisoTexto.Text = _piso.ToString("0.000");
         UmbralTexto.Text = _umbral.ToString("0.000");

@@ -16,7 +16,11 @@ namespace Viernes.Platform.Windows.Speech.Recognition;
 /// tener bien elegido un número.
 /// </para>
 /// </remarks>
-internal static class NoiseFloorTracker
+// Publica y no internal: el banco de medicion necesita el umbral REAL. Mientras fue internal el
+// banco llevaba una copia de la formula, y a la primera que se toco el original la copia quedo vieja
+// y el banco mostro 0,436 donde el sistema usaba 0,218. Una herramienta de medicion que no comparte
+// la formula con lo que mide no mide: adivina.
+public static class NoiseFloorTracker
 {
     /// <summary>
     /// Cuánto tiene que superar al ambiente para contar como voz.
