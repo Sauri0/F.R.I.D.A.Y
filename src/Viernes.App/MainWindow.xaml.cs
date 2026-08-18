@@ -31,6 +31,21 @@ public partial class MainWindow : Window
     private double _appliedWidgetHeight = 108;
     private bool _expandsLeft;
 
+    /// <summary>
+    /// Memoria de dónde va el orbe en cada monitor, y el vigía que lo lleva al que estás usando.
+    /// </summary>
+    /// <remarks>
+    /// Con dos pantallas el orbe se quedaba clavado en la que le tocó al arrancar. Trabajás en una y
+    /// el asistente vive en la otra: para hablarle hay que girar la cabeza, y lo que muestra —los
+    /// pasos, la respuesta— pasa en un monitor que no estás mirando. La clase que resuelve esto
+    /// estaba escrita hace tiempo y no la llamaba nadie.
+    /// </remarks>
+    private readonly Services.MonitorSlots _monitors = new();
+
+    private System.Windows.Threading.DispatcherTimer? _followTimer;
+    private string _currentMonitor = string.Empty;
+    private int _stableTicks;
+
     internal MainWindow(MainViewModel viewModel, WindowPlacementStore placementStore)
     {
         InitializeComponent();
@@ -80,6 +95,7 @@ public partial class MainWindow : Window
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         _placementStore.Restore(this);
+        StartFollowingActiveMonitor();
 
         try
         {
@@ -89,6 +105,70 @@ public partial class MainWindow : Window
         {
             System.Diagnostics.Debug.WriteLine($"Viernes initialization failed: {exception.GetType().Name}");
         }
+    }
+
+
+    /// <summary>
+    /// Lleva el orbe al monitor donde estás trabajando, sin perseguir el mouse.
+    /// </summary>
+    /// <remarks>
+    /// Se mide el monitor bajo el cursor, pero no se salta apenas cambia: hay que quedarse ahí un
+    /// rato. Cruzar la pantalla para llegar a un botón no es «me mudé de monitor», y un orbe que
+    /// sigue al mouse en tiempo real es un moscardón.
+    /// <para>
+    /// La posición de cada monitor se recuerda por separado, así que si en la pantalla de la derecha
+    /// lo dejaste arriba y en la izquierda abajo, cada una lo recibe donde lo dejaste. Y no se mueve
+    /// mientras la ventana está desplegada: sería sacarle de las manos algo que estás leyendo.
+    /// </para>
+    /// </remarks>
+    private void StartFollowingActiveMonitor()
+    {
+        _currentMonitor = Services.MonitorSlots.MonitorAt(new System.Windows.Point(Left, Top)).Key;
+
+        _followTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(700)
+        };
+
+        _followTimer.Tick += (_, _) =>
+        {
+            if (_viewModel.IsExpanded || _viewModel.IsConfirmationVisible || !IsVisible)
+            {
+                _stableTicks = 0;
+                return;
+            }
+
+            var (key, workArea) = Services.MonitorSlots.MonitorUnderCursor();
+            if (key == _currentMonitor)
+            {
+                _stableTicks = 0;
+                return;
+            }
+
+            // Tres tics seguidos en el otro monitor: unos dos segundos. Menos que eso y se muda al
+            // pasar el mouse de largo.
+            if (++_stableTicks < 3)
+            {
+                return;
+            }
+
+            _stableTicks = 0;
+
+            // Dónde estaba en el monitor que se deja, para encontrarlo igual al volver.
+            _monitors.Remember(_currentMonitor, new System.Windows.Point(Left, Top));
+
+            var destino = _monitors.SlotFor(
+                key,
+                workArea,
+                new System.Windows.Size(_appliedWidgetWidth, _appliedWidgetHeight));
+
+            Left = destino.X;
+            Top = destino.Y;
+            _currentMonitor = key;
+            _placementStore.Save(this);
+        };
+
+        _followTimer.Start();
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)

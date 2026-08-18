@@ -108,6 +108,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// </remarks>
     private int _distilling;
 
+    /// <summary>Distinto de cero mientras el vigía está intentando recuperar el micrófono.</summary>
+    private int _watchdogRunning;
+
     private int _conversationLoopRunning;
 
     /// <summary>Lo que dijo el usuario en la charla, para destilar al cerrarla. No se persiste.</summary>
@@ -2008,7 +2011,93 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             var result = await _wakeWord.StartAsync(cancellationToken).ConfigureAwait(false);
             RuntimeTrace.Write("wake.reanudado", $"ok={result.Succeeded}");
+
+            if (!result.Succeeded)
+            {
+                StartListeningWatchdog();
+            }
         }
+    }
+
+    /// <summary>
+    /// Vuelve a intentar recuperar el oído después de que falle el dispositivo, y mientras tanto lo dice.
+    /// </summary>
+    /// <remarks>
+    /// Antes se intentaba una sola vez. Si Windows devolvía un error de dispositivo —otra aplicación
+    /// tomó el micrófono, un virtual como Sonar o NVIDIA Broadcast cambió el predeterminado, se
+    /// desenchufó un auricular— quedaba escrito <c>wake.reanudado ok=False</c> en el registro y el
+    /// asistente se quedaba sordo hasta que alguien lo reiniciara. Sin decir nada: desde afuera es
+    /// indistinguible de estar apagado, que es exactamente lo que terminó preguntando el usuario.
+    /// <para>
+    /// Reintenta con espera creciente porque casi todas estas fallas son pasajeras: la otra
+    /// aplicación suelta el micrófono, el dispositivo vuelve. Y lo anuncia, que es la mitad que más
+    /// importa: un asistente sordo que parece atento es peor que uno que avisa que no oye.
+    /// </para>
+    /// </remarks>
+    private void StartListeningWatchdog()
+    {
+        if (Interlocked.CompareExchange(ref _watchdogRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Error,
+            "Sin micrófono · reintentando",
+            "Windows no me deja acceder al micrófono. Sigo intentando.",
+            MicrophoneActive: false,
+            WakeWordEnabled: _isWakeWordEnabled));
+
+        _ = Task.Run(async () =>
+        {
+            TimeSpan[] esperas =
+            [
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromSeconds(8),
+                TimeSpan.FromSeconds(20),
+                TimeSpan.FromSeconds(45)
+            ];
+
+            try
+            {
+                for (var intento = 0; !_isDisposed; intento++)
+                {
+                    await Task.Delay(esperas[Math.Min(intento, esperas.Length - 1)]).ConfigureAwait(false);
+
+                    if (_isDisposed || IsMuted || !_isWakeWordEnabled || _wakeWord is null)
+                    {
+                        return;
+                    }
+
+                    if (_wakeWord.State == WakeWordServiceState.Listening)
+                    {
+                        return;
+                    }
+
+                    var result = await _wakeWord.StartAsync(CancellationToken.None).ConfigureAwait(false);
+                    RuntimeTrace.Write("wake.reintento", $"intento={intento + 1} ok={result.Succeeded}");
+
+                    if (result.Succeeded)
+                    {
+                        Publish(new AssistantRuntimeUpdate(
+                            AssistantVisualState.Idle,
+                            $"Atento · decí \u201C{_wakeWord.Phrases[0]}\u201D",
+                            "Ya te escucho de nuevo.",
+                            MicrophoneActive: IsAnyMicrophoneActive(),
+                            WakeWordEnabled: _isWakeWordEnabled));
+                        return;
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                RuntimeTrace.Write("wake.reintento.excepcion", exception.GetType().Name);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _watchdogRunning, 0);
+            }
+        });
     }
 
     private async Task PersistVoiceSettingsAsync(CancellationToken cancellationToken)
