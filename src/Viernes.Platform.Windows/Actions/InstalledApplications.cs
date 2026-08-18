@@ -13,9 +13,17 @@ namespace Viernes.Platform.Windows.Actions;
 /// </remarks>
 public sealed class InstalledApplications
 {
-    private readonly Lazy<IReadOnlyDictionary<string, string>> _catalog;
+    /// <summary>Una aplicación del catálogo: cómo se llama en pantalla y cómo se lanza.</summary>
+    /// <remarks>
+    /// El nombre para mostrar se guarda aparte del normalizado porque el catálogo se indexa sin
+    /// acentos y en minúsculas: proponerle al usuario «visual studio code» cuando la aplicación se
+    /// llama «Visual Studio Code» hace que la sugerencia parezca inventada.
+    /// </remarks>
+    private sealed record CatalogEntry(string DisplayName, string Target);
 
-    public InstalledApplications() => _catalog = new Lazy<IReadOnlyDictionary<string, string>>(Discover);
+    private readonly Lazy<IReadOnlyDictionary<string, CatalogEntry>> _catalog;
+
+    public InstalledApplications() => _catalog = new Lazy<IReadOnlyDictionary<string, CatalogEntry>>(Discover);
 
     /// <summary>
     /// Construye el catálogo por adelantado, en segundo plano.
@@ -37,7 +45,11 @@ public sealed class InstalledApplications
         }
     });
 
-    public IReadOnlyCollection<string> Names => _catalog.Value.Keys.ToArray();
+    /// <summary>Nombres tal como se ven en el menú Inicio, en orden alfabético.</summary>
+    public IReadOnlyCollection<string> Names => _catalog.Value.Values
+        .Select(entry => entry.DisplayName)
+        .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+        .ToArray();
 
     /// <summary>
     /// Resuelve un nombre hablado al acceso directo instalado. Tolera acentos y coincidencias
@@ -55,14 +67,14 @@ public sealed class InstalledApplications
 
         if (catalog.TryGetValue(needle, out var exact))
         {
-            return exact;
+            return exact.Target;
         }
 
         // Primero lo que empieza igual, después lo que lo contiene: «word» antes que «wordpad».
         var byPrefix = catalog
             .Where(entry => entry.Key.StartsWith(needle, StringComparison.Ordinal))
             .OrderBy(entry => entry.Key.Length)
-            .Select(entry => entry.Value)
+            .Select(entry => entry.Value.Target)
             .FirstOrDefault();
         if (byPrefix is not null)
         {
@@ -72,8 +84,95 @@ public sealed class InstalledApplications
         return catalog
             .Where(entry => entry.Key.Contains(needle, StringComparison.Ordinal))
             .OrderBy(entry => entry.Key.Length)
-            .Select(entry => entry.Value)
+            .Select(entry => entry.Value.Target)
             .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Nombres instalados parecidos a uno que no se pudo resolver.
+    /// </summary>
+    /// <remarks>
+    /// Existe porque «no encontré ninguna aplicación que se llame X» es una respuesta que no lleva a
+    /// ningún lado: el modelo no ve el catálogo, así que reintenta con otra invención. Ofrecerle los
+    /// nombres reales más parecidos convierte el fracaso en el dato que le faltaba. Se mezclan dos
+    /// criterios porque fallan en casos distintos: la distancia de edición atrapa el error de tipeo
+    /// —«escel» por «Excel»— y la coincidencia por palabra atrapa el nombre incompleto o cambiado de
+    /// orden —«code» por «Visual Studio Code»—.
+    /// </remarks>
+    public IReadOnlyList<string> Suggest(string spokenName, int maximum = 6)
+    {
+        if (string.IsNullOrWhiteSpace(spokenName) || maximum <= 0)
+        {
+            return [];
+        }
+
+        var needle = Normalize(spokenName);
+        var words = needle.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        return _catalog.Value
+            .Select(entry => (entry.Value.DisplayName, Score: Similarity(needle, words, entry.Key)))
+            .Where(candidate => candidate.Score > 0.45)
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.DisplayName.Length)
+            .Take(maximum)
+            .Select(candidate => candidate.DisplayName)
+            .ToArray();
+    }
+
+    private static double Similarity(string needle, string[] needleWords, string candidate)
+    {
+        if (candidate.Contains(needle, StringComparison.Ordinal))
+        {
+            return 1;
+        }
+
+        var candidateWords = candidate.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var matched = needleWords.Count(word =>
+            word.Length >= 3 &&
+            candidateWords.Any(other => other.StartsWith(word, StringComparison.Ordinal)));
+        var byWord = needleWords.Length == 0 ? 0 : (double)matched / needleWords.Length;
+
+        var longest = Math.Max(needle.Length, candidate.Length);
+        var byEdit = longest == 0 ? 0 : 1 - ((double)EditDistance(needle, candidate) / longest);
+
+        return Math.Max(byWord, byEdit);
+    }
+
+    /// <summary>
+    /// Distancia de Levenshtein, con dos filas en vez de la matriz entera.
+    /// </summary>
+    /// <remarks>
+    /// Se recorre el catálogo completo —varios cientos de aplicaciones— y sólo cuando algo ya falló,
+    /// así que el costo no se nota; guardar la matriz sí se notaría en memoria y no aporta nada,
+    /// porque acá sólo interesa el número final y no el camino.
+    /// </remarks>
+    private static int EditDistance(string left, string right)
+    {
+        if (left.Length == 0 || right.Length == 0)
+        {
+            return Math.Max(left.Length, right.Length);
+        }
+
+        var previous = new int[right.Length + 1];
+        var current = new int[right.Length + 1];
+        for (var column = 0; column <= right.Length; column++)
+        {
+            previous[column] = column;
+        }
+
+        for (var row = 1; row <= left.Length; row++)
+        {
+            current[0] = row;
+            for (var column = 1; column <= right.Length; column++)
+            {
+                var substitution = previous[column - 1] + (left[row - 1] == right[column - 1] ? 0 : 1);
+                current[column] = Math.Min(Math.Min(current[column - 1] + 1, previous[column] + 1), substitution);
+            }
+
+            (previous, current) = (current, previous);
+        }
+
+        return previous[right.Length];
     }
 
     /// <summary>
@@ -90,9 +189,9 @@ public sealed class InstalledApplications
     public static bool IsLaunchableFile(string target) =>
         Path.IsPathRooted(target) && File.Exists(target);
 
-    private static Dictionary<string, string> Discover()
+    private static Dictionary<string, CatalogEntry> Discover()
     {
-        var catalog = new Dictionary<string, string>(StringComparer.Ordinal);
+        var catalog = new Dictionary<string, CatalogEntry>(StringComparer.Ordinal);
 
         // Primero el catálogo real de Windows. Escanear accesos directos deja afuera todo lo que
         // venga de la Store —Spotify, WhatsApp, Netflix—, porque esas aplicaciones no instalan
@@ -129,7 +228,7 @@ public sealed class InstalledApplications
         return catalog;
     }
 
-    private static void AddCandidate(Dictionary<string, string> catalog, string displayName, string target)
+    private static void AddCandidate(Dictionary<string, CatalogEntry> catalog, string displayName, string target)
     {
         var name = Normalize(displayName);
 
@@ -141,7 +240,7 @@ public sealed class InstalledApplications
             return;
         }
 
-        catalog.TryAdd(name, target);
+        catalog.TryAdd(name, new CatalogEntry(displayName.Trim(), target));
     }
 
     /// <summary>

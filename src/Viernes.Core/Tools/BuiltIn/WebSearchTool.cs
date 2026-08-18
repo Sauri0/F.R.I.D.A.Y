@@ -31,6 +31,20 @@ public sealed class WebSearchTool : IAssistantTool
 
     public ToolDefinition Definition { get; }
 
+    /// <summary>
+    /// Devuelve la herramienta sólo cuando sirve de algo: con la búsqueda del proveedor encendida,
+    /// no devuelve ninguna.
+    /// </summary>
+    /// <remarks>
+    /// Con la búsqueda del proveedor encendida esta herramienta no busca nada —los resultados ya
+    /// vienen inyectados en el turno— y lo único que hace es contestar que no hace falta llamarla.
+    /// Igual su esquema viajaba en el pedido de cada turno, pagándose en tokens, y encima invitaba
+    /// al modelo a gastar una vuelta entera llamándola para no obtener nada. Una herramienta que en
+    /// ese modo no puede hacer nada no tiene por qué estar declarada.
+    /// </remarks>
+    public static IEnumerable<IAssistantTool> CreateIfUseful(bool providerSearchEnabled) =>
+        providerSearchEnabled ? [] : [new WebSearchTool(false)];
+
     public Task<ToolExecutionResult> ExecuteAsync(
         JsonElement arguments,
         ToolExecutionContext context,

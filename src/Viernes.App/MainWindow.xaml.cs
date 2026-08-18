@@ -12,6 +12,7 @@ using Viernes.App.Services;
 using Viernes.App.ViewModels;
 using Binding = System.Windows.Data.Binding;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 
 namespace Viernes.App;
 
@@ -30,6 +31,9 @@ public partial class MainWindow : Window
     private double _appliedWidgetWidth = 108;
     private double _appliedWidgetHeight = 108;
     private bool _expandsLeft;
+    private System.Windows.Point _pressOrigin;
+    private bool _pressPending;
+    private bool _pressStartedOnButton;
 
     /// <summary>
     /// Memoria de dónde va el orbe en cada monitor, y el vigía que lo lleva al que estás usando.
@@ -284,6 +288,14 @@ public partial class MainWindow : Window
     /// toque y abre el panel. Antes había que apuntar al aro exterior, que a 96 px es una franja
     /// de pocos píxeles y volvía tedioso algo que se hace todo el tiempo.
     /// </summary>
+    /// <remarks>
+    /// Acá sólo se anota dónde empezó la presión: el evento sigue viaje. Antes este handler marcaba
+    /// <c>e.Handled</c> y llamaba a <c>DragMove</c> en un evento de túnel colgado del contenedor, así
+    /// que el clic moría antes de llegar a <c>OrbButton</c>: el botón nunca tomaba foco de teclado
+    /// —que es la precondición del push-to-talk— y el trigger <c>IsPressed</c> de su plantilla era
+    /// código muerto. El arrastre no puede compartirse desde acá porque <c>DragMove</c> no vuelve
+    /// hasta que soltás el botón; por eso arranca recién cuando el mouse se movió de verdad.
+    /// </remarks>
     private void Orb_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.LeftButton != MouseButtonState.Pressed)
@@ -291,8 +303,38 @@ public partial class MainWindow : Window
             return;
         }
 
-        e.Handled = true;
-        var origin = PointToScreen(e.GetPosition(this));
+        _pressPending = true;
+        _pressStartedOnButton = IsWithin(e.OriginalSource as DependencyObject, OrbButton);
+        _pressOrigin = PointToScreen(e.GetPosition(this));
+    }
+
+    /// <summary>
+    /// El arrastre empieza cuando el mouse se movió lo suficiente, no al presionar.
+    /// </summary>
+    /// <remarks>
+    /// Los cuatro píxeles de tolerancia son los mismos que antes decidían «esto fue un toque»: si no
+    /// se llegan a recorrer, nadie mueve nada y el toque lo resuelve el botón.
+    /// </remarks>
+    private void Orb_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_pressPending)
+        {
+            return;
+        }
+
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            // Se soltó fuera de la ventana y el MouseUp nunca llegó: la presión ya no existe.
+            _pressPending = false;
+            return;
+        }
+
+        if ((PointToScreen(e.GetPosition(this)) - _pressOrigin).Length <= 4)
+        {
+            return;
+        }
+
+        _pressPending = false;
 
         try
         {
@@ -301,19 +343,76 @@ public partial class MainWindow : Window
         }
         catch (InvalidOperationException)
         {
-            // El botón se soltó antes de que arrancara el arrastre; sigue contando como toque.
+            // El botón se soltó antes de que arrancara el arrastre; no hay nada que guardar distinto.
         }
 
-        var travelled = (PointToScreen(Mouse.GetPosition(this)) - origin).Length;
-        if (travelled <= 4)
+        // Windows se queda con el mouse durante su bucle de movimiento, así que el botón nunca ve el
+        // MouseUp: sin devolverle la captura queda hundido después de cada arrastre.
+        if (OrbButton.IsMouseCaptured)
         {
-            _viewModel.OpenTextInput();
-            PromptTextBox.Focus();
-            Keyboard.Focus(PromptTextBox);
-            return;
+            OrbButton.ReleaseMouseCapture();
         }
 
         SaveOrbPlacement();
+    }
+
+    /// <summary>
+    /// Soltar sin haber arrastrado es un toque. Sobre el botón lo resuelve su propio Click.
+    /// </summary>
+    private void Orb_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_pressPending)
+        {
+            return;
+        }
+
+        _pressPending = false;
+
+        // Adelantarse al Click del botón abriría el panel dos veces, y dos veces es abrir y cerrar.
+        if (_pressStartedOnButton)
+        {
+            return;
+        }
+
+        HandleOrbTap();
+    }
+
+    private void OrbButton_Click(object sender, RoutedEventArgs e) => HandleOrbTap();
+
+    /// <summary>
+    /// Un toque en el orbe abre la conversación y el campo de texto, o la cierra si ya estaba.
+    /// </summary>
+    /// <remarks>
+    /// Al cerrar, el foco se queda en el orbe a propósito: el push-to-talk por barra espaciadora
+    /// exige que <c>OrbButton</c> tenga el foco de teclado, y mandarlo a un campo de texto invisible
+    /// lo dejaba inalcanzable. Al abrir sí se va al campo, que es donde vas a escribir.
+    /// </remarks>
+    private void HandleOrbTap()
+    {
+        Keyboard.Focus(OrbButton);
+        _viewModel.OpenTextInput();
+
+        if (_viewModel.IsExpanded)
+        {
+            PromptTextBox.Focus();
+            Keyboard.Focus(PromptTextBox);
+        }
+    }
+
+    /// <summary>Si el clic nació dentro del botón, para no resolver el toque dos veces.</summary>
+    private static bool IsWithin(DependencyObject? source, DependencyObject ancestor)
+    {
+        while (source is not null)
+        {
+            if (ReferenceEquals(source, ancestor))
+            {
+                return true;
+            }
+
+            source = source is Visual ? VisualTreeHelper.GetParent(source) : LogicalTreeHelper.GetParent(source);
+        }
+
+        return false;
     }
 
     private void HideButton_Click(object sender, RoutedEventArgs e)

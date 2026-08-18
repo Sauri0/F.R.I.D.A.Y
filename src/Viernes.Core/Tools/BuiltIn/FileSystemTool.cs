@@ -25,6 +25,27 @@ public sealed class FileSystemTool : IAssistantTool
 
     private const int MaximumListed = 200;
 
+    /// <summary>Cuántos resultados de búsqueda se muestran; el total informado es el real.</summary>
+    private const int MaximumShownInSearch = 40;
+
+    /// <summary>
+    /// Tope de coincidencias que se cuentan antes de contestar «más de N».
+    /// </summary>
+    /// <remarks>
+    /// Contar el total exige recorrer todo el árbol. Bajo una carpeta enorme eso puede tardar
+    /// minutos, y una respuesta lenta es tan inútil como una mentirosa: pasado este tope se dice
+    /// «más de N» —que es cierto— en vez de seguir contando.
+    /// </remarks>
+    private const int MaximumCountedInSearch = 5_000;
+
+    /// <summary>Cuántos bytes se miran para decidir si un archivo es binario.</summary>
+    private const int BinarySniffBytes = 4_096;
+
+    /// <summary>Días que algo sobrevive en la papelera propia antes de que se lo pode.</summary>
+    private const int RecycleRetentionDays = 30;
+
+    private const string RecycleStampFormat = "yyyyMMdd-HHmmss-fff";
+
     public ToolDefinition Definition { get; } = ToolDefinition.Create(
         ToolName,
         "Trabaja con archivos y carpetas del equipo. " +
@@ -66,6 +87,20 @@ public sealed class FileSystemTool : IAssistantTool
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Viernes",
         "papelera");
+
+    private readonly string _recycleRoot;
+
+    /// <summary>
+    /// Usa la papelera de siempre, o una propia para probar sin tocar la del usuario.
+    /// </summary>
+    /// <remarks>
+    /// La poda borra definitivamente lo que pasó los treinta días. Una prueba que se apoyara en la
+    /// papelera real destruiría archivos verdaderos del usuario al correr la suite: no hoy —hoy
+    /// está toda reciente— sino dentro de unos meses, en silencio y sin que nadie relacione una cosa
+    /// con la otra. Que la raíz se pueda inyectar es lo que saca esa mina del camino.
+    /// </remarks>
+    public FileSystemTool(string? recycleRoot = null) =>
+        _recycleRoot = recycleRoot ?? RecycleRoot;
 
     public Task<ToolExecutionResult> ExecuteAsync(
         JsonElement arguments,
@@ -264,6 +299,18 @@ public sealed class FileSystemTool : IAssistantTool
         }
 
         var info = new FileInfo(path);
+
+        // Antes se leía cualquier cosa con ReadAllText sin mirar qué era: un PDF o un .docx entraba
+        // como texto, la respuesta salía Succeeded, y el modelo resumía el ruido del binario como si
+        // fuera el contenido del documento. Un fallo claro es mucho mejor que un resumen inventado.
+        if (LooksBinary(path))
+        {
+            return Fail(
+                context,
+                $"«{info.Name}» no es texto: parece un archivo binario (PDF, imagen, Word, un " +
+                "ejecutable). Leerlo devolvería ruido. Si querés verlo, pedime accion=abrir.");
+        }
+
         if (info.Length > MaximumReadBytes)
         {
             using var reader = new StreamReader(path);
@@ -277,7 +324,46 @@ public sealed class FileSystemTool : IAssistantTool
         return Ok(context, File.ReadAllText(path));
     }
 
-    private static ToolExecutionResult Write(
+    /// <summary>
+    /// Decide si un archivo es binario mirando si hay bytes nulos en los primeros KB.
+    /// </summary>
+    /// <remarks>
+    /// No hay forma exacta de saberlo, pero el byte cero no aparece en texto real y sí en casi todo
+    /// binario: PDF, imágenes, Office, ejecutables. La excepción es UTF-16, que está lleno de ceros
+    /// y sí es texto, así que su BOM se reconoce antes de mirar nada más.
+    /// </remarks>
+    private static bool LooksBinary(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            Span<byte> buffer = stackalloc byte[BinarySniffBytes];
+            var read = stream.Read(buffer);
+            if (read == 0)
+            {
+                return false;
+            }
+
+            var sample = buffer[..read];
+
+            // UTF-16 con marca de orden: es texto aunque tenga ceros de sobra, y ReadAllText lo
+            // decodifica bien porque detecta el BOM.
+            if (read >= 2 &&
+                ((sample[0] == 0xFF && sample[1] == 0xFE) || (sample[0] == 0xFE && sample[1] == 0xFF)))
+            {
+                return false;
+            }
+
+            return sample.IndexOf((byte)0) >= 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Si no se puede ni mirar, que falle más adelante la lectura de verdad y con su mensaje.
+            return false;
+        }
+    }
+
+    private ToolExecutionResult Write(
         ToolExecutionContext context,
         string path,
         string content,
@@ -308,7 +394,26 @@ public sealed class FileSystemTool : IAssistantTool
 
         if (append)
         {
-            File.AppendAllText(path, content);
+            // El modelo manda «\n- pan» para que el ítem caiga en un renglón nuevo, pero
+            // JsonToolArguments le hace Trim() al contenido y se come exactamente ese salto; encima
+            // AppendAllText no pone separador. La lista terminaba «3. leche- comprar pan», todo
+            // pegado en la misma línea. El salto lo pone acá quien sabe cómo termina el archivo.
+            var separator = File.Exists(path) && !EndsWithNewLine(path)
+                ? Environment.NewLine
+                : string.Empty;
+
+            File.AppendAllText(path, separator + content);
+
+            // Comprobar y no suponer: si el final del archivo no es lo que se pidió agregar, algo
+            // salió mal —encoding raro, disco lleno— y decir «Agregué» sería mentir.
+            var tail = ReadTail(path, content.Length);
+            if (tail is null || !tail.EndsWith(content, StringComparison.Ordinal))
+            {
+                return Fail(
+                    context,
+                    $"Agregué a «{Path.GetFileName(path)}» pero el final del archivo no quedó como pediste.");
+            }
+
             return Ok(context, $"Agregué al final de «{Path.GetFileName(path)}».");
         }
 
@@ -329,9 +434,83 @@ public sealed class FileSystemTool : IAssistantTool
             return Fail(context, $"Escribí «{path}» pero no aparece en el disco.");
         }
 
+        // Que el archivo exista no dice nada de lo que tiene adentro: podía quedar vacío o truncado
+        // —disco lleno, un antivirus que lo corta— y la respuesta cantaba «Creé el archivo» igual.
+        // Se relee y se compara con lo pedido: eso es comprobar, lo otro era suponer.
+        var saved = SafeReadAllText(path);
+        if (saved is null)
+        {
+            return Fail(context, $"Escribí «{Path.GetFileName(path)}» pero no pude releerlo para comprobarlo.");
+        }
+
+        if (!string.Equals(saved, content, StringComparison.Ordinal))
+        {
+            return Fail(
+                context,
+                $"Escribí «{Path.GetFileName(path)}» pero lo que quedó adentro no es lo que pediste " +
+                $"({saved.Length} caracteres de {content.Length}).");
+        }
+
         return Ok(context, replaced
             ? $"Reescribí el archivo «{Path.GetFileName(path)}». Guardé la versión anterior por si acaso."
             : $"Creé el archivo «{path}».");
+    }
+
+    /// <summary>Mira si el archivo ya termina en salto de línea, para no pegar el texto que sigue.</summary>
+    private static bool EndsWithNewLine(string path)
+    {
+        using var stream = File.OpenRead(path);
+        if (stream.Length == 0)
+        {
+            // Un archivo vacío no necesita separador: el salto dejaría un renglón en blanco arriba.
+            return true;
+        }
+
+        stream.Seek(-1, SeekOrigin.End);
+        var last = stream.ReadByte();
+        return last is '\n' or '\r';
+    }
+
+    /// <summary>
+    /// Lee sólo el final del archivo, lo justo para comprobar qué se agregó.
+    /// </summary>
+    /// <remarks>
+    /// Releer entero un archivo grande sólo para mirar su última línea es caro y no hace falta: con
+    /// los últimos bytes alcanza. Se piden cuatro por carácter porque en UTF-8 uno puede ocupar
+    /// hasta cuatro, y si el recorte parte un carácter al principio no molesta —lo que se compara
+    /// es el final—.
+    /// </remarks>
+    private static string? ReadTail(string path, int characters)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var wanted = Math.Max(16L, ((long)characters * 4) + 8);
+            if (stream.Length > wanted)
+            {
+                stream.Seek(-wanted, SeekOrigin.End);
+            }
+
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            return reader.ReadToEnd();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Relee un archivo para comprobar lo escrito; devuelve <c>null</c> si no se puede.</summary>
+    private static string? SafeReadAllText(string path)
+    {
+        try
+        {
+            return File.ReadAllText(path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static ToolExecutionResult List(ToolExecutionContext context, string path)
@@ -341,26 +520,48 @@ public sealed class FileSystemTool : IAssistantTool
             return Fail(context, $"«{path}» no es una carpeta.");
         }
 
-        var builder = new StringBuilder($"En «{path}»:");
-        var count = 0;
+        var directories = Directory.EnumerateDirectories(path).ToArray();
+        var files = Directory.EnumerateFiles(path).ToArray();
 
-        foreach (var directory in Directory.EnumerateDirectories(path).Take(MaximumListed))
+        if (directories.Length == 0 && files.Length == 0)
         {
-            builder.AppendLine().Append("  [carpeta] ").Append(Path.GetFileName(directory));
-            count++;
+            return Ok(context, $"«{path}» está vacía.");
         }
 
-        foreach (var file in Directory.EnumerateFiles(path).Take(MaximumListed - count))
+        // El cupo se repartía por orden de llegada: Take(MaximumListed) para las carpetas y
+        // Take(MaximumListed - count) para los archivos. Con 200 subcarpetas el segundo Take quedaba
+        // en cero y la respuesta no mostraba ni un archivo —sin decir que había recortado—, así que
+        // «no hay archivos acá» y «no entraban» se leían igual. Ahora cada mitad tiene su cupo, lo
+        // que una no usa se lo lleva la otra, y lo que quedó afuera se dice siempre.
+        var folderQuota = Math.Min(directories.Length, MaximumListed / 2);
+        var fileQuota = Math.Min(files.Length, MaximumListed - folderQuota);
+        folderQuota = Math.Min(directories.Length, MaximumListed - fileQuota);
+
+        var builder = new StringBuilder($"En «{path}»:");
+
+        foreach (var directory in directories.Take(folderQuota))
+        {
+            builder.AppendLine().Append("  [carpeta] ").Append(Path.GetFileName(directory));
+        }
+
+        foreach (var file in files.Take(fileQuota))
         {
             var info = new FileInfo(file);
             builder.AppendLine().Append("  ").Append(info.Name)
                 .Append(" · ").Append(info.Length / 1024).Append(" KB");
-            count++;
         }
 
-        return count == 0
-            ? Ok(context, $"«{path}» está vacía.")
-            : Ok(context, builder.ToString());
+        var total = directories.Length + files.Length;
+        var shown = folderQuota + fileQuota;
+        if (shown < total)
+        {
+            builder.AppendLine()
+                .Append("  … y ").Append(total - shown)
+                .Append(" más que no entran: te muestro ").Append(shown)
+                .Append(" de ").Append(total).Append('.');
+        }
+
+        return Ok(context, builder.ToString());
     }
 
     private static ToolExecutionResult Search(ToolExecutionContext context, string path, string? pattern)
@@ -371,22 +572,52 @@ public sealed class FileSystemTool : IAssistantTool
         }
 
         var needle = string.IsNullOrWhiteSpace(pattern) ? "*" : $"*{pattern.Trim('*')}*";
-        var found = Directory
-            .EnumerateFileSystemEntries(path, needle, new EnumerationOptions
-            {
-                RecurseSubdirectories = true,
-                IgnoreInaccessible = true,
-                MaxRecursionDepth = 6
-            })
-            .Take(40)
-            .ToArray();
 
-        return found.Length == 0
-            ? Ok(context, $"No encontré nada que coincida con «{pattern}» bajo «{path}».")
-            : Ok(context, $"Encontré {found.Length}:\n" + string.Join("\n", found));
+        // EnumerateFiles y no EnumerateFileSystemEntries: la acción dice «busca archivos por nombre»
+        // y la otra devolvía también carpetas, así que la lista traía cosas que no se podían leer.
+        var matches = Directory.EnumerateFiles(path, needle, new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            MaxRecursionDepth = 6
+        });
+
+        // Antes se cortaba con Take(40) y después se contaba lo cortado: con 300 coincidencias la
+        // respuesta decía «Encontré 40» —falso, y encima el modelo lo repetía como si fuera el
+        // total—. Ahora se cuenta lo que hay y se avisa que se muestran los primeros.
+        var found = new List<string>(MaximumShownInSearch);
+        var total = 0;
+        var capped = false;
+        foreach (var entry in matches)
+        {
+            total++;
+            if (found.Count < MaximumShownInSearch)
+            {
+                found.Add(entry);
+            }
+
+            if (total >= MaximumCountedInSearch)
+            {
+                capped = true;
+                break;
+            }
+        }
+
+        if (total == 0)
+        {
+            return Ok(context, $"No encontré nada que coincida con «{pattern}» bajo «{path}».");
+        }
+
+        var header = total > found.Count
+            ? capped
+                ? $"Encontré más de {MaximumCountedInSearch} archivos; te muestro los primeros {found.Count}:"
+                : $"Encontré {total} archivos; te muestro los primeros {found.Count}:"
+            : $"Encontré {total}:";
+
+        return Ok(context, header + "\n" + string.Join("\n", found));
     }
 
-    private static ToolExecutionResult Transfer(
+    private ToolExecutionResult Transfer(
         ToolExecutionContext context,
         string path,
         string? destination,
@@ -477,7 +708,7 @@ public sealed class FileSystemTool : IAssistantTool
     private static bool LooksLikeAFolder(string target) =>
         Path.GetExtension(target).Length == 0;
 
-    private static ToolExecutionResult Recycle(ToolExecutionContext context, string path)
+    private ToolExecutionResult Recycle(ToolExecutionContext context, string path)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
         {
@@ -494,15 +725,24 @@ public sealed class FileSystemTool : IAssistantTool
     /// <summary>
     /// Mueve —o copia— a la papelera propia, con la fecha adelante para no pisar versiones.
     /// </summary>
-    private static string? MoveToRecycle(string path, bool copy)
+    private string? MoveToRecycle(string path, bool copy)
     {
+        var root = _recycleRoot;
+
         try
         {
+            // La papelera crecía para siempre: cada borrado y cada reemplazo dejaban una copia y
+            // nada las sacaba nunca. Se poda acá y no con un temporizador, porque un temporizador
+            // borra archivos mientras nadie mira —y esto no debería correr si Viernes no está
+            // haciendo nada—. Podar justo antes de guardar algo nuevo mantiene el costo donde se
+            // genera y no requiere ningún proceso de fondo.
+            PruneRecycle(root, DateTime.Now);
+
             // Milisegundos, no segundos. Con resolución de segundo, dos borrados del mismo nombre en
             // el mismo segundo caían en la misma carpeta y el segundo pisaba al primero con
             // overwrite —mientras las dos respuestas decían «se puede recuperar»—.
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
-            var folder = Path.Combine(RecycleRoot, stamp);
+            var stamp = DateTime.Now.ToString(RecycleStampFormat);
+            var folder = Path.Combine(root, stamp);
             Directory.CreateDirectory(folder);
             var target = Path.Combine(folder, Path.GetFileName(path));
 
@@ -530,6 +770,66 @@ public sealed class FileSystemTool : IAssistantTool
     }
 
     /// <summary>
+    /// Borra definitivamente lo que lleva más de treinta días en la papelera propia y devuelve
+    /// cuántas carpetas se fueron de verdad.
+    /// </summary>
+    /// <remarks>
+    /// Nada la podaba: cada borrado —y cada reemplazo, que también guarda copia— dejaba una carpeta
+    /// con fecha, y esas carpetas se acumulaban en <c>%LOCALAPPDATA%\Viernes</c> sin techo ni aviso.
+    /// Después de un mes ya nadie va a pedir que se recupere aquello, y el disco no es infinito.
+    /// <para>
+    /// Sólo se tocan las carpetas cuyo nombre es una fecha en el formato que escribe la papelera: si
+    /// alguien dejó otra cosa ahí adentro, no es nuestra y no se borra. El conteo se hace después de
+    /// comprobar que la carpeta efectivamente ya no está, no después de pedir el borrado.
+    /// </para>
+    /// </remarks>
+    public static int PruneRecycle(string root, DateTime now)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        {
+            return 0;
+        }
+
+        var limit = TimeSpan.FromDays(RecycleRetentionDays);
+        var removed = 0;
+
+        foreach (var folder in Directory.EnumerateDirectories(root).ToArray())
+        {
+            if (!DateTime.TryParseExact(
+                    Path.GetFileName(folder),
+                    RecycleStampFormat,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None,
+                    out var stamped))
+            {
+                continue;
+            }
+
+            if (now - stamped <= limit)
+            {
+                continue;
+            }
+
+            try
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // Un archivo en uso no debería frenar la poda del resto.
+                continue;
+            }
+
+            if (!Directory.Exists(folder))
+            {
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    /// <summary>
     /// Devuelve lo borrado desde la papelera propia, lo más reciente primero.
     /// </summary>
     /// <remarks>
@@ -541,14 +841,20 @@ public sealed class FileSystemTool : IAssistantTool
     /// Sin nombre, lista lo que hay. Con nombre, restaura la copia más nueva que coincida.
     /// </para>
     /// </remarks>
-    private static ToolExecutionResult Restore(ToolExecutionContext context, string? name)
+    private ToolExecutionResult Restore(ToolExecutionContext context, string? name)
     {
-        if (!Directory.Exists(RecycleRoot))
+        // Con papelera vacía, la respuesta depende de qué preguntaron. «¿Qué hay para recuperar?»
+        // sobre una papelera vacía es un «nada», y eso es una respuesta válida. Pero «recuperá el
+        // presupuesto» sobre una papelera vacía es un fallo: pidieron algo concreto que no está, y
+        // contestarlo como éxito deja al modelo diciendo que lo recuperó.
+        if (!Directory.Exists(_recycleRoot))
         {
-            return Ok(context, "La papelera está vacía; no borré nada todavía.");
+            return string.IsNullOrWhiteSpace(name)
+                ? Ok(context, "La papelera está vacía; no borré nada todavía.")
+                : Fail(context, $"No tengo nada llamado «{name.Trim()}» en la papelera.");
         }
 
-        var borrados = Directory.EnumerateDirectories(RecycleRoot)
+        var borrados = Directory.EnumerateDirectories(_recycleRoot)
             .OrderByDescending(folder => folder, StringComparer.Ordinal)
             .SelectMany(folder => Directory
                 .EnumerateFileSystemEntries(folder)
@@ -557,7 +863,9 @@ public sealed class FileSystemTool : IAssistantTool
 
         if (borrados.Length == 0)
         {
-            return Ok(context, "La papelera está vacía; no borré nada todavía.");
+            return string.IsNullOrWhiteSpace(name)
+                ? Ok(context, "La papelera está vacía; no borré nada todavía.")
+                : Fail(context, $"No tengo nada llamado «{name.Trim()}» en la papelera.");
         }
 
         if (string.IsNullOrWhiteSpace(name))
@@ -616,7 +924,7 @@ public sealed class FileSystemTool : IAssistantTool
         var raw = Path.GetFileName(folder);
         return DateTime.TryParseExact(
             raw,
-            "yyyyMMdd-HHmmss-fff",
+            RecycleStampFormat,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.None,
             out var parsed)

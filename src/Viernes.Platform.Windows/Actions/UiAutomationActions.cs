@@ -23,12 +23,17 @@ internal static class UiAutomationActions
     private const int MaximumControls = 60;
 
     /// <summary>Enumera los controles utilizables de una ventana, con su nombre tal como los verá el modelo.</summary>
+    /// <remarks>
+    /// Sin destino se leen los controles de la ventana que el usuario tiene delante, que es lo que
+    /// alguien quiere decir con «¿qué hay acá?». Antes fallaba con «no encontré ninguna ventana de
+    /// «»», que no es información: es la falta de una respuesta.
+    /// </remarks>
     public static PcActionOutcome ReadControls(string? target)
     {
-        var window = FindWindowElement(target);
+        var (window, problem) = ResolveScope(target);
         if (window is null)
         {
-            return new PcActionOutcome(false, $"No encontré ninguna ventana de «{target}».");
+            return new PcActionOutcome(false, problem!);
         }
 
         var interesting = new StringBuilder();
@@ -71,12 +76,10 @@ internal static class UiAutomationActions
         var windowName = parts.Length == 2 ? parts[0] : null;
         var controlName = parts.Length == 2 ? parts[1] : parts[0];
 
-        var scope = windowName is null
-            ? AutomationElement.RootElement
-            : FindWindowElement(windowName);
+        var (scope, problem) = ResolveScope(windowName);
         if (scope is null)
         {
-            return new PcActionOutcome(false, $"No encontré ninguna ventana de «{windowName}».");
+            return new PcActionOutcome(false, problem!);
         }
 
         var control = FindByName(scope, controlName);
@@ -110,33 +113,106 @@ internal static class UiAutomationActions
             $"«{SafeName(control)}» no admite activarse por accesibilidad; probá con un clic.");
     }
 
-    /// <summary>Escribe dentro de un campo identificado por nombre, sin depender del foco.</summary>
+    /// <summary>
+    /// Escribe dentro de un campo identificado por nombre, sin depender del foco.
+    /// </summary>
+    /// <remarks>
+    /// Acepta «ventana|campo|texto» además de «campo|texto». La forma larga existe porque la corta no
+    /// alcanza para decidir: con dos aplicaciones abiertas que tengan un campo «Correo», la búsqueda
+    /// desde la raíz del escritorio se quedaba con la primera del recorrido, que es un orden que
+    /// nadie controla. Escribir una dirección personal en la ventana equivocada no es un error
+    /// menor, así que cuando no se nombra la ventana se usa la que el usuario tiene delante y no
+    /// todo el escritorio.
+    /// </remarks>
     public static PcActionOutcome SetText(string? target)
     {
         if (string.IsNullOrWhiteSpace(target))
         {
-            return new PcActionOutcome(false, "Usá «campo|texto».");
+            return new PcActionOutcome(false, "Usá «campo|texto» o «ventana|campo|texto».");
         }
 
-        var parts = target.Split('|', 2, StringSplitOptions.TrimEntries);
-        if (parts.Length != 2)
+        var parts = target.Split('|', 3, StringSplitOptions.TrimEntries);
+        if (parts.Length < 2)
         {
-            return new PcActionOutcome(false, "Usá «campo|texto».");
+            return new PcActionOutcome(false, "Usá «campo|texto» o «ventana|campo|texto».");
         }
 
-        var field = FindByName(AutomationElement.RootElement, parts[0]);
+        var windowName = parts.Length == 3 ? parts[0] : null;
+        var fieldName = parts.Length == 3 ? parts[1] : parts[0];
+        var text = parts.Length == 3 ? parts[2] : parts[1];
+
+        var (scope, problem) = ResolveScope(windowName);
+        if (scope is null)
+        {
+            return new PcActionOutcome(false, problem!);
+        }
+
+        var field = FindByName(scope, fieldName);
         if (field is null)
         {
-            return new PcActionOutcome(false, $"No encontré ningún campo llamado «{parts[0]}».");
+            return new PcActionOutcome(
+                false,
+                $"No encontré ningún campo llamado «{fieldName}» en «{SafeName(scope)}».");
         }
 
         if (!field.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
         {
-            return new PcActionOutcome(false, $"«{parts[0]}» no admite escribirse directamente.");
+            return new PcActionOutcome(false, $"«{fieldName}» no admite escribirse directamente.");
         }
 
-        ((ValuePattern)value).SetValue(parts[1]);
-        return new PcActionOutcome(true, $"Escribí «{parts[1]}» en «{parts[0]}».");
+        ((ValuePattern)value).SetValue(text);
+
+        // Se relee el valor en vez de confiar en que SetValue hizo lo suyo: un campo de sólo lectura
+        // o con máscara acepta la llamada y se queda como estaba.
+        var written = field.TryGetCurrentPattern(ValuePattern.Pattern, out var reread)
+            ? ((ValuePattern)reread).Current.Value
+            : null;
+        if (written is not null && !string.Equals(written, text, StringComparison.Ordinal))
+        {
+            return new PcActionOutcome(
+                false,
+                $"«{fieldName}» no se quedó con lo que le escribí: quedó «{written}».");
+        }
+
+        return new PcActionOutcome(true, $"Escribí «{text}» en «{fieldName}» de «{SafeName(scope)}».");
+    }
+
+    /// <summary>
+    /// Decide sobre qué ventana se busca: la nombrada, o la que el usuario tiene delante.
+    /// </summary>
+    /// <remarks>
+    /// Nunca devuelve la raíz del escritorio, y ése es el punto. Buscar un control desde
+    /// <c>RootElement</c> recorre todas las ventanas de todas las aplicaciones y se queda con la
+    /// primera que coincida por nombre, sin que nadie mande en ese orden.
+    /// </remarks>
+    private static (AutomationElement? Scope, string? Problem) ResolveScope(string? windowName)
+    {
+        if (!string.IsNullOrWhiteSpace(windowName))
+        {
+            var named = FindWindowElement(windowName);
+            return named is null
+                ? (null, $"No encontré ninguna ventana de «{windowName}».")
+                : (named, null);
+        }
+
+        var (handle, title) = WindowsPcActionExecutor.FrontForeignWindow();
+        if (handle == nint.Zero)
+        {
+            return (null, "No hay ninguna ventana ajena adelante; decime en cuál querés que trabaje.");
+        }
+
+        try
+        {
+            var element = AutomationElement.FromHandle(handle);
+            return element is null
+                ? (null, $"«{title}» no publica su árbol de controles.")
+                : (element, null);
+        }
+        catch (Exception exception) when (exception is ElementNotAvailableException or ArgumentException)
+        {
+            // La ventana puede irse entre que se la eligió y que se la consulta.
+            return (null, $"«{title}» dejó de estar disponible antes de que pudiera leerla.");
+        }
     }
 
     private static AutomationElement? FindWindowElement(string? target)
@@ -160,18 +236,32 @@ internal static class UiAutomationActions
         return null;
     }
 
+    /// <summary>
+    /// Busca un control por nombre dentro de <paramref name="scope"/>, y sólo ahí.
+    /// </summary>
     private static AutomationElement? FindByName(AutomationElement scope, string name)
     {
         var needle = name.Trim();
 
         // Primero exacto, después parcial: «Guardar» no debería resolver a «Guardar como…» si el
-        // botón exacto existe.
-        var exact = scope.FindFirst(
+        // botón exacto existe. Entre los exactos gana el que se pueda usar: la etiqueta «Correo» y
+        // la caja que hay al lado se llaman igual, y quedarse con la etiqueta terminaba en «no
+        // admite escribirse», que suena a que no se puede cuando sí se puede.
+        AutomationElement? firstExact = null;
+        foreach (AutomationElement candidate in scope.FindAll(
             TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.NameProperty, needle));
-        if (exact is not null)
+            new PropertyCondition(AutomationElement.NameProperty, needle)))
         {
-            return exact;
+            firstExact ??= candidate;
+            if (IsActionable(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        if (firstExact is not null)
+        {
+            return firstExact;
         }
 
         foreach (AutomationElement element in scope.FindAll(TreeScope.Descendants, Condition.TrueCondition))

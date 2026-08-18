@@ -128,7 +128,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
     // DllImport y no LibraryImport: el generador de LibraryImport emite código no seguro, y
     // habilitar unsafe en todo el ensamblado para cuatro llamadas sin punteros no se paga.
     [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, nuint extraInfo);
+    private static extern uint SendInput(uint count, Input[] inputs, int size);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -246,20 +246,174 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
     private const uint MouseRightDown = 0x0008;
     private const uint MouseRightUp = 0x0010;
 
+    private const uint MouseWheel = 0x0800;
+
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool SetCursorPos(int x, int y);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern void mouse_event(uint flags, int dx, int dy, int data, nuint extraInfo);
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out NativePoint point);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern nint WindowFromPoint(NativePoint point);
+
+    /// <summary>Sube de un control a la ventana de nivel superior que lo contiene.</summary>
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern nint GetAncestor(nint window, uint flags);
+
+    private const uint AncestorRoot = 2;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(nint window, out NativeRectangle rectangle);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int GetClassName(nint window, System.Text.StringBuilder text, int count);
 
     /// <summary>
-    /// Misma función que <c>keybd_event</c>, declarada aparte para escribir Unicode: con el indicador
-    /// correspondiente, el segundo argumento deja de ser un código de rastreo y pasa a ser el
-    /// carácter. Es lo que hace que «ñ» y las tildes salgan sin depender del teclado configurado.
+    /// Pregunta si el compositor tiene la ventana escondida.
     /// </summary>
-    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "keybd_event")]
-    private static extern void keybd_eventUnicode(byte virtualKey, ushort character, uint flags, nuint extraInfo);
+    /// <remarks>
+    /// Las aplicaciones de la Store dejan ventanas fantasma: visibles para <c>IsWindowVisible</c>,
+    /// con título, y sin embargo no dibujadas en ningún lado. Sin esta comprobación, «la ventana de
+    /// adelante» podía resolver a una aplicación cerrada hace media hora.
+    /// </remarks>
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(nint window, int attribute, out int value, int size);
+
+    private const int DwmAttributeCloaked = 14;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct NativeRectangle
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private const uint InputMouse = 0;
+    private const uint InputKeyboard = 1;
+    private const uint KeyEventExtended = 0x0001;
+    private const uint KeyEventUnicode = 0x0004;
+
+    /// <summary>Un evento de entrada sintética, tal como lo espera <c>SendInput</c>.</summary>
+    /// <remarks>
+    /// Se reemplazó a <c>keybd_event</c>, y no por gusto. La declaración anterior tipaba el segundo
+    /// argumento como <c>ushort</c> cuando el nativo es <c>BYTE bScan</c>: al escribir con el
+    /// indicador Unicode, todo carácter por encima de U+00FF se truncaba al byte bajo y salía otra
+    /// cosa —la raya larga U+2014 se convertía en el carácter de control 0x14—. <c>SendInput</c>
+    /// además devuelve cuántos eventos entraron, así que un teclado bloqueado por otra aplicación se
+    /// puede informar en vez de darlo por hecho.
+    /// </remarks>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct Input
+    {
+        public uint Type;
+        public InputData Data;
+    }
+
+    /// <summary>La parte variable de <see cref="Input"/>: teclado o mouse, nunca las dos.</summary>
+    /// <remarks>
+    /// Las dos variantes se declaran superpuestas aunque sólo se lea una, porque el tamaño que
+    /// <c>SendInput</c> exige es el de la unión completa: si faltara la del mouse, la estructura
+    /// mediría menos de lo que el sistema espera y la llamada fallaría entera.
+    /// </remarks>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+    private struct InputData
+    {
+        [System.Runtime.InteropServices.FieldOffset(0)]
+        public MouseInputData Mouse;
+
+        [System.Runtime.InteropServices.FieldOffset(0)]
+        public KeyboardInputData Keyboard;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MouseInputData
+    {
+        public int X;
+        public int Y;
+        public uint Data;
+        public uint Flags;
+        public uint Time;
+        public nint ExtraInfo;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct KeyboardInputData
+    {
+        public ushort VirtualKey;
+        public ushort Character;
+        public uint Flags;
+        public uint Time;
+        public nint ExtraInfo;
+    }
+
+    /// <summary>
+    /// Teclas que el teclado extendido duplica y que hay que marcar como tales.
+    /// </summary>
+    /// <remarks>
+    /// Sin el indicador, varias aplicaciones leen «Suprimir» como el punto del teclado numérico y las
+    /// flechas como sus gemelas numéricas. Es el mismo código virtual para las dos teclas físicas: lo
+    /// único que las distingue es este bit.
+    /// </remarks>
+    private static readonly HashSet<byte> ExtendedKeys =
+    [
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E,
+        0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3
+    ];
+
+    private static Input KeyboardEvent(ushort virtualKey, ushort character, uint flags) => new()
+    {
+        Type = InputKeyboard,
+        Data = new InputData
+        {
+            Keyboard = new KeyboardInputData
+            {
+                VirtualKey = virtualKey,
+                Character = character,
+                Flags = flags,
+                Time = 0,
+                ExtraInfo = nint.Zero
+            }
+        }
+    };
+
+    private static Input MouseEvent(uint flags, int data) => new()
+    {
+        Type = InputMouse,
+        Data = new InputData
+        {
+            Mouse = new MouseInputData
+            {
+                X = 0,
+                Y = 0,
+                // La rueda hacia abajo es un delta negativo, y el campo nativo es sin signo: la
+                // conversión es la que el propio Windows hace del otro lado.
+                Data = unchecked((uint)data),
+                Flags = flags,
+                Time = 0,
+                ExtraInfo = nint.Zero
+            }
+        }
+    };
+
+    /// <summary>Manda eventos de entrada y dice si el sistema los aceptó todos.</summary>
+    private static bool Send(params Input[] inputs) =>
+        SendInput(
+            (uint)inputs.Length,
+            inputs,
+            System.Runtime.InteropServices.Marshal.SizeOf<Input>()) == (uint)inputs.Length;
 
     private readonly InstalledApplications _installed = new();
 
@@ -335,7 +489,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
 
     private PcActionOutcome Undo()
     {
-        var entry = _journal.TakeLastReversible();
+        var entry = _journal.PeekLastReversible();
         if (entry is null)
         {
             return new PcActionOutcome(false, "No hay nada que pueda deshacer.");
@@ -343,9 +497,18 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
 
         var (action, target) = entry.Inverse!.Value;
         var result = Perform(action, target);
-        return result.Executed
-            ? new PcActionOutcome(true, $"Deshice: {entry.Description}")
-            : new PcActionOutcome(false, $"No pude deshacer «{entry.Description}»: {result.Message}");
+        if (!result.Executed)
+        {
+            // La entrada se queda en el diario a propósito: que la inversa haya fallado una vez no
+            // significa que vaya a fallar siempre —la aplicación puede estar preguntando si querés
+            // guardar—, y borrarla convertía un «probá de nuevo» en «no hay nada que deshacer».
+            return new PcActionOutcome(
+                false,
+                $"No pude deshacer «{entry.Description}»: {result.Message} Lo dejo anotado por si querés reintentar.");
+        }
+
+        _journal.Discard(entry);
+        return new PcActionOutcome(true, $"Deshice: {entry.Description}");
     }
 
     private PcActionOutcome Recount()
@@ -405,8 +568,9 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
             return new PcActionOutcome(false, "Puedo reproducir, pausar, pasar a la siguiente o volver a la anterior.");
         }
 
-        PressKey(key.Key);
-        return new PcActionOutcome(true, $"{key.Label}.");
+        return PressKey(key.Key)
+            ? new PcActionOutcome(true, $"{key.Label}.")
+            : new PcActionOutcome(false, "Windows no dejó mandar la tecla multimedia.");
     }
 
     private static PcActionOutcome Volume(string? target)
@@ -418,16 +582,22 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
 
         for (var press = 0; press < key.Repeat; press++)
         {
-            PressKey(key.Key);
+            if (!PressKey(key.Key))
+            {
+                return new PcActionOutcome(false, "Windows no dejó tocar el volumen.");
+            }
         }
 
         return new PcActionOutcome(true, $"{key.Label}.");
     }
 
-    private static void PressKey(byte virtualKey)
+    /// <summary>Aprieta y suelta una tecla por su código virtual; dice si el sistema la aceptó.</summary>
+    private static bool PressKey(byte virtualKey)
     {
-        keybd_event(virtualKey, 0, 0, 0);
-        keybd_event(virtualKey, 0, KeyEventKeyUp, 0);
+        var flags = ExtendedKeys.Contains(virtualKey) ? KeyEventExtended : 0u;
+        return Send(
+            KeyboardEvent(virtualKey, 0, flags),
+            KeyboardEvent(virtualKey, 0, flags | KeyEventKeyUp));
     }
 
     private const int ShowMinimized = 6;
@@ -515,6 +685,126 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         {
             AttachThreadInput(currentThread, foregroundThread, false);
         }
+    }
+
+    /// <summary>Identificador del proceso de Viernes, para no confundir sus ventanas con las ajenas.</summary>
+    private static readonly uint OwnProcessId = (uint)Environment.ProcessId;
+
+    private static bool IsOwnWindow(nint window)
+    {
+        GetWindowThreadProcessId(window, out var processId);
+        return processId == OwnProcessId;
+    }
+
+    private static string TitleOf(nint window)
+    {
+        var length = GetWindowTextLength(window);
+        if (length <= 0)
+        {
+            return string.Empty;
+        }
+
+        var buffer = new System.Text.StringBuilder(length + 1);
+        GetWindowText(window, buffer, buffer.Capacity);
+        return buffer.ToString();
+    }
+
+    private static string ClassNameOf(nint window)
+    {
+        var buffer = new System.Text.StringBuilder(256);
+        var written = GetClassName(window, buffer, buffer.Capacity);
+        return written > 0 ? buffer.ToString() : string.Empty;
+    }
+
+    /// <summary>Clases que son el escritorio o la barra de tareas, no una aplicación con la que operar.</summary>
+    private static readonly HashSet<string> ShellWindowClasses = new(StringComparer.Ordinal)
+    {
+        "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Button",
+        "Windows.UI.Core.CoreWindow"
+    };
+
+    private static bool IsForeignApplicationWindow(nint window)
+    {
+        if (window == nint.Zero || !IsWindowVisible(window) || IsIconic(window) || IsOwnWindow(window))
+        {
+            return false;
+        }
+
+        if (DwmGetWindowAttribute(window, DwmAttributeCloaked, out var cloaked, sizeof(int)) == 0 && cloaked != 0)
+        {
+            return false;
+        }
+
+        return TitleOf(window).Length > 0 && !ShellWindowClasses.Contains(ClassNameOf(window));
+    }
+
+    /// <summary>
+    /// La ventana con la que el usuario estaba trabajando: la de adelante si no es la nuestra, y si
+    /// no, la primera ajena en orden de apilado.
+    /// </summary>
+    /// <remarks>
+    /// Es la pieza que faltaba en todo lo que sigue. La ventana de Viernes es <c>Topmost</c> y tiene
+    /// el foco justo después de que el usuario termina de hablarle, así que <c>GetForegroundWindow</c>
+    /// devuelve el orbe: mirarla era fotografiarse a sí mismo —108×108 píxeles de nada— y escribir
+    /// era meterle el texto a su propia caja. <c>EnumWindows</c> recorre de arriba hacia abajo, con lo
+    /// cual saltear las propias deja arriba de todo exactamente la que el usuario está mirando.
+    /// </remarks>
+    internal static (nint Window, string Title) FrontForeignWindow()
+    {
+        var foreground = GetForegroundWindow();
+        if (IsForeignApplicationWindow(foreground))
+        {
+            return (foreground, TitleOf(foreground));
+        }
+
+        var found = (Window: nint.Zero, Title: string.Empty);
+        EnumWindows((window, _) =>
+        {
+            if (!IsForeignApplicationWindow(window))
+            {
+                return true;
+            }
+
+            found = (window, TitleOf(window));
+            return false;
+        }, nint.Zero);
+
+        return found;
+    }
+
+    /// <summary>
+    /// Deja el teclado apuntando a una ventana que no sea la nuestra, o explica por qué no pudo.
+    /// </summary>
+    /// <remarks>
+    /// Antes no existía: <c>type_text</c> y <c>press_key</c> tecleaban sin enfocar nada, y como el
+    /// foco lo tenía la caja de texto de Viernes —el usuario acababa de escribir ahí— el texto entraba
+    /// en la propia aplicación mientras la acción informaba «Escribí …». Fallar acá es la mitad
+    /// importante: teclear a ciegas no es un éxito parcial, es escribir en el lugar equivocado.
+    /// </remarks>
+    private static (string Title, string? Problem) AcquireKeyboardTarget()
+    {
+        var (window, title) = FrontForeignWindow();
+        if (window == nint.Zero)
+        {
+            return (
+                string.Empty,
+                "No hay ninguna ventana ajena adelante y no voy a teclear sobre la mía. " +
+                "Abrí o traé al frente la aplicación donde querés que escriba.");
+        }
+
+        ForceForeground(window);
+        if (!WaitFor(() => GetForegroundWindow() == window, TimeSpan.FromSeconds(2)))
+        {
+            return (
+                title,
+                $"No pude poner «{title}» al frente, así que no tecleé nada: " +
+                "el texto habría terminado en mi propia ventana.");
+        }
+
+        // Tener el foco de ventana no es tener el foco de control: la aplicación todavía está
+        // decidiendo qué campo lo recibe. Sin esta pausa, los primeros caracteres se pierden.
+        Thread.Sleep(120);
+        return (title, null);
     }
 
     /// <summary>
@@ -696,7 +986,29 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
              target.Contains("activ", StringComparison.OrdinalIgnoreCase) ||
              target.Contains("window", StringComparison.OrdinalIgnoreCase));
 
-        var image = ScreenCapture.CaptureAsDataUrl(activeOnly);
+        string? image;
+        string what;
+        if (activeOnly)
+        {
+            // No la del foreground: ésa es la nuestra. Ver el comentario de FrontForeignWindow.
+            var (window, title) = FrontForeignWindow();
+            if (window == nint.Zero)
+            {
+                return new PcActionOutcome(
+                    false,
+                    "No hay ninguna ventana adelante que no sea la mía, y sacarme una foto a mí " +
+                    "mismo no te sirve. Pedime la pantalla entera o abrí la aplicación primero.");
+            }
+
+            image = ScreenCapture.CaptureWindow(window);
+            what = $"Miré «{title}»";
+        }
+        else
+        {
+            image = ScreenCapture.CaptureScreen();
+            what = "Miré la pantalla completa, con todos los monitores";
+        }
+
         if (image is null)
         {
             return new PcActionOutcome(false, "Windows no dejó capturar la pantalla.");
@@ -705,7 +1017,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         var (width, height) = ScreenCapture.LastImageSize;
         return new PcActionOutcome(
             true,
-            $"{(activeOnly ? "Miré la ventana activa" : "Miré la pantalla")}. " +
+            $"{what}. " +
             $"La imagen mide {width}x{height}: dame las coordenadas leídas sobre ella, no sobre tu " +
             "idea de la resolución de la pantalla.",
             image);
@@ -737,6 +1049,28 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         return true;
     }
 
+    /// <summary>
+    /// Lleva el cursor a un punto y confirma que llegó.
+    /// </summary>
+    /// <remarks>
+    /// <c>SetCursorPos</c> puede recortar el destino a la pantalla virtual, y una aplicación a
+    /// pantalla completa puede tener el cursor confinado a su rectángulo: en los dos casos la llamada
+    /// dice que sí y el cursor queda en otro lado. Preguntar dónde quedó es lo único que distingue
+    /// «lo moví» de «lo pedí». La tolerancia de dos píxeles es por el redondeo del escalado de la
+    /// captura, no por resignación.
+    /// </remarks>
+    private static bool MoveCursorTo(int x, int y)
+    {
+        if (!SetCursorPos(x, y))
+        {
+            return false;
+        }
+
+        return WaitFor(
+            () => GetCursorPos(out var point) && Math.Abs(point.X - x) <= 2 && Math.Abs(point.Y - y) <= 2,
+            TimeSpan.FromMilliseconds(500));
+    }
+
     private static PcActionOutcome MoveCursor(string? target)
     {
         if (!TryParsePoint(target, out var x, out var y))
@@ -744,31 +1078,69 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
             return new PcActionOutcome(false, "Necesito las coordenadas como «x,y».");
         }
 
-        SetCursorPos(x, y);
-        return new PcActionOutcome(true, $"Moví el cursor a {x}, {y}.");
+        return MoveCursorTo(x, y)
+            ? new PcActionOutcome(true, $"Moví el cursor a {x}, {y}.")
+            : new PcActionOutcome(false, $"No pude llevar el cursor a {x}, {y}: Windows no lo dejó ir ahí.");
     }
 
+    /// <summary>
+    /// Hace clic, o dice por qué no.
+    /// </summary>
+    /// <remarks>
+    /// Devolvía éxito pasara lo que pasara. Peor: si el destino no se entendía como coordenadas, el
+    /// <c>if</c> sin <c>else</c> seguía de largo y clickeaba donde el cursor estuviera parado, que
+    /// puede ser cualquier cosa —el escritorio, otra aplicación, un botón de cerrar—. Un clic a
+    /// ciegas informado como clic acertado es la peor combinación posible: ni salió bien ni se sabe
+    /// qué pasó. Ahora, sin coordenadas legibles no hay clic.
+    /// </remarks>
     private static PcActionOutcome ClickAt(string? target, uint down, uint up, int times, string verb)
     {
-        // Sin coordenadas se hace clic donde ya está el cursor: «hacé clic» después de moverlo.
-        if (TryParsePoint(target, out var x, out var y))
+        var where = string.Empty;
+
+        // Sin destino se hace clic donde ya está el cursor: «hacé clic» después de moverlo.
+        if (!string.IsNullOrWhiteSpace(target))
         {
-            SetCursorPos(x, y);
+            if (!TryParsePoint(target, out var x, out var y))
+            {
+                return new PcActionOutcome(
+                    false,
+                    $"No entendí «{target}» como coordenadas y no pienso hacer clic a ciegas. " +
+                    "Necesito «x,y» leídas de la última captura.");
+            }
+
+            if (!MoveCursorTo(x, y))
+            {
+                return new PcActionOutcome(
+                    false,
+                    $"No pude llevar el cursor a {x}, {y}, así que no hice clic: habría caído en otro lado.");
+            }
+
+            where = $" en {x}, {y}";
         }
 
         for (var press = 0; press < times; press++)
         {
-            mouse_event(down, 0, 0, 0, nuint.Zero);
-            mouse_event(up, 0, 0, 0, nuint.Zero);
+            if (!Send(MouseEvent(down, 0), MouseEvent(up, 0)))
+            {
+                return new PcActionOutcome(
+                    false,
+                    press == 0
+                        ? "Windows no aceptó el clic; puede haber una ventana con más privilegios adelante."
+                        : "El clic quedó a medias: Windows dejó de aceptar la entrada.");
+            }
         }
 
-        return new PcActionOutcome(true, $"{verb}.");
+        return new PcActionOutcome(true, $"{verb}{where}.");
     }
 
     /// <summary>
-    /// Escribe texto como si lo tipearas. Va por unidades de UTF-16 y no por códigos de tecla, así
-    /// que las tildes y la ñ salen bien sin depender de la distribución del teclado.
+    /// Escribe texto como si lo tipearas, en la ventana que el usuario tiene delante.
     /// </summary>
+    /// <remarks>
+    /// Va por unidades de UTF-16 y no por códigos de tecla, así que las tildes y la ñ salen bien sin
+    /// depender de la distribución del teclado. Los saltos de línea son la excepción: mandados como
+    /// carácter Unicode no los toma casi ninguna aplicación, hay que mandar la tecla Enter.
+    /// </remarks>
     private static PcActionOutcome TypeText(string? target)
     {
         if (string.IsNullOrEmpty(target))
@@ -776,14 +1148,34 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
             return new PcActionOutcome(false, "Necesito saber qué escribir.");
         }
 
-        foreach (var character in target)
+        var (title, problem) = AcquireKeyboardTarget();
+        if (problem is not null)
         {
-            const uint UnicodeKey = 0x0004;
-            keybd_eventUnicode(0, character, UnicodeKey, 0);
-            keybd_eventUnicode(0, character, UnicodeKey | KeyEventKeyUp, 0);
+            return new PcActionOutcome(false, problem);
         }
 
-        return new PcActionOutcome(true, $"Escribí «{target}».");
+        // «\r\n» son dos caracteres y un solo salto: sin unificarlos, Enter se apretaría dos veces.
+        var text = target.Replace("\r\n", "\n", StringComparison.Ordinal);
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            var sent = character is '\n' or '\r'
+                ? PressKey(0x0D)
+                : Send(
+                    KeyboardEvent(0, character, KeyEventUnicode),
+                    KeyboardEvent(0, character, KeyEventUnicode | KeyEventKeyUp));
+
+            if (!sent)
+            {
+                return new PcActionOutcome(
+                    false,
+                    index == 0
+                        ? $"Windows no dejó escribir en «{title}»."
+                        : $"Escribí sólo «{text[..index]}» en «{title}»: Windows cortó la entrada ahí.");
+            }
+        }
+
+        return new PcActionOutcome(true, $"Escribí «{target}» en «{title}».");
     }
 
     private static PcActionOutcome PressNamedKey(string? target)
@@ -793,17 +1185,92 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
             return new PcActionOutcome(false, $"No conozco la tecla «{target}».");
         }
 
-        PressKey(key);
-        return new PcActionOutcome(true, $"Apreté {target.Trim()}.");
+        var (title, problem) = AcquireKeyboardTarget();
+        if (problem is not null)
+        {
+            return new PcActionOutcome(false, problem);
+        }
+
+        return PressKey(key)
+            ? new PcActionOutcome(true, $"Apreté {target.Trim()} en «{title}».")
+            : new PcActionOutcome(false, $"Windows no dejó mandarle {target.Trim()} a «{title}».");
     }
 
+    /// <summary>
+    /// Desplaza la vista de la ventana que está bajo el cursor, llevándolo ahí si hace falta.
+    /// </summary>
+    /// <remarks>
+    /// La rueda se entrega a la ventana que el cursor tiene encima. Sin mover nada, el cursor suele
+    /// quedar sobre el orbe de Viernes —que está siempre arriba de todo— y la rueda no llega a
+    /// ninguna parte, mientras la acción informaba «Bajé la vista» con un <c>true</c> fijo. Sólo se
+    /// mueve cuando el cursor está sobre una ventana nuestra o sobre nada: si el modelo lo posicionó
+    /// a propósito con <c>move_cursor</c>, ese punto se respeta.
+    /// </remarks>
     private static PcActionOutcome Scroll(string? target)
     {
-        var down = target is null || target.Contains("abajo", StringComparison.OrdinalIgnoreCase) ||
-            target.Contains("down", StringComparison.OrdinalIgnoreCase);
-        const uint MouseWheel = 0x0800;
-        mouse_event(MouseWheel, 0, 0, down ? -360 : 360, nuint.Zero);
-        return new PcActionOutcome(true, down ? "Bajé la vista." : "Subí la vista.");
+        var text = target?.Trim() ?? string.Empty;
+        var up = text.Contains("arriba", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("subir", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("up", StringComparison.OrdinalIgnoreCase);
+        var down = text.Length == 0 ||
+            text.Contains("abajo", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("bajar", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("down", StringComparison.OrdinalIgnoreCase);
+
+        if (up == down)
+        {
+            return new PcActionOutcome(false, $"No entendí «{target}»: puedo desplazar «arriba» o «abajo».");
+        }
+
+        var (title, problem) = PlaceCursorForScroll();
+        if (problem is not null)
+        {
+            return new PcActionOutcome(false, problem);
+        }
+
+        // Tres muescas por pedido: una sola casi no mueve nada y el modelo termina pidiendo diez.
+        const int NotchesPerScroll = 3;
+        const int WheelDelta = 120;
+        if (!Send(MouseEvent(MouseWheel, (up ? 1 : -1) * WheelDelta * NotchesPerScroll)))
+        {
+            return new PcActionOutcome(false, $"Windows no aceptó el desplazamiento sobre «{title}».");
+        }
+
+        return new PcActionOutcome(true, up ? $"Subí la vista en «{title}»." : $"Bajé la vista en «{title}».");
+    }
+
+    /// <summary>Deja el cursor sobre una ventana ajena, o explica por qué no hay ninguna.</summary>
+    private static (string Title, string? Problem) PlaceCursorForScroll()
+    {
+        if (GetCursorPos(out var cursor))
+        {
+            var under = WindowFromPoint(cursor);
+            var root = under == nint.Zero ? nint.Zero : GetAncestor(under, AncestorRoot);
+            if (root != nint.Zero && !IsOwnWindow(root))
+            {
+                var underTitle = TitleOf(root);
+                return (underTitle.Length > 0 ? underTitle : "la ventana bajo el cursor", null);
+            }
+        }
+
+        var (window, title) = FrontForeignWindow();
+        if (window == nint.Zero)
+        {
+            return (
+                string.Empty,
+                "El cursor está sobre mi propia ventana y no hay ninguna otra adelante para desplazar.");
+        }
+
+        if (!GetWindowRect(window, out var bounds))
+        {
+            return (title, $"No pude ubicar «{title}» en pantalla, así que no desplacé nada.");
+        }
+
+        var centerX = bounds.Left + ((bounds.Right - bounds.Left) / 2);
+        var centerY = bounds.Top + ((bounds.Bottom - bounds.Top) / 2);
+        return MoveCursorTo(centerX, centerY)
+            ? (title, null)
+            : (title, $"No pude llevar el cursor sobre «{title}», así que no desplacé nada.");
     }
 
     private static PcActionOutcome LockScreen() => LockWorkStation()
@@ -828,11 +1295,30 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         return Launch(page.Uri, $"Abrí Configuración en {page.Label}.");
     }
 
+    /// <summary>
+    /// Cuántos nombres reales se le muestran al modelo cuando no sabe qué pedir.
+    /// </summary>
+    /// <remarks>
+    /// El catálogo tiene cientos de entradas y mandarlo entero costaría más tokens que la charla.
+    /// Cuarenta alcanzan para que se entienda que hay un catálogo de verdad y para que reconozca las
+    /// que usa todos los días.
+    /// </remarks>
+    private const int NamesToOfferWhenLost = 40;
+
     private PcActionOutcome OpenApplication(string? target)
     {
         if (string.IsNullOrWhiteSpace(target))
         {
-            return new PcActionOutcome(false, "Necesito saber qué aplicación abrir.");
+            // Enumerar es la respuesta útil. Decir sólo «necesito saber qué abrir» deja al modelo
+            // adivinando nombres, que era exactamente lo que pasaba: el catálogo real estaba
+            // calculado y no lo consumía nadie.
+            var catalogue = _installed.Names.Take(NamesToOfferWhenLost).ToArray();
+            return new PcActionOutcome(
+                false,
+                catalogue.Length == 0
+                    ? "Necesito saber qué aplicación abrir."
+                    : "Necesito saber qué aplicación abrir. Tenés instaladas, entre otras: " +
+                      $"{string.Join(", ", catalogue)}.");
         }
 
         var name = target.Trim();
@@ -879,7 +1365,13 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
                     : started;
             }
 
-            return new PcActionOutcome(false, $"No encontré ninguna aplicación instalada que se llame «{name}».");
+            var similar = _installed.Suggest(name);
+            return new PcActionOutcome(
+                false,
+                similar.Count == 0
+                    ? $"No encontré ninguna aplicación instalada que se llame «{name}»."
+                    : $"No encontré «{name}». Lo más parecido que tenés instalado es: {string.Join(", ", similar)}. " +
+                      "Si alguna es la que querías, pedímela con ese nombre.");
         }
 
         // Lo que es un archivo se arranca; todo lo demás es un identificador de aplicación y se lanza
@@ -908,13 +1400,41 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
     /// cuyo título contenía la palabra buscada— y que <em>persista</em>, porque una aplicación
     /// empaquetada crea su marco antes de arrancar y ese marco parpadea. Comparar el antes con el
     /// después, y esperar a que se estabilice, es la verificación entera.
+    /// <para>
+    /// Después se la trae al frente, y no es un adorno. Lo que arranca un proceso en segundo plano no
+    /// recibe el foco: al abrir el Bloc de notas desde acá, la ventana aparecía detrás y adelante
+    /// seguía el navegador. Como las acciones de teclado escriben en la ventana de adelante, «abrí el
+    /// bloc y escribí esto» terminaba tecleando dentro de una página web. Si Windows no deja hacer el
+    /// cambio, se abre igual pero se dice, porque lo que viene después depende de eso.
+    /// </para>
     /// </remarks>
-    private static PcActionOutcome VerifyWindowAppeared(string needle, string label, HashSet<nint> before) =>
-        WaitForStable(() => FindWindows(needle).Except(before).Any(), TimeSpan.FromSeconds(10))
-            ? new PcActionOutcome(true, $"Abrí {label}.")
-            : new PcActionOutcome(
+    private static PcActionOutcome VerifyWindowAppeared(string needle, string label, HashSet<nint> before)
+    {
+        var appeared = nint.Zero;
+        var stable = WaitForStable(
+            () =>
+            {
+                appeared = FindWindows(needle).Except(before).FirstOrDefault();
+                return appeared != nint.Zero;
+            },
+            TimeSpan.FromSeconds(10));
+
+        if (!stable)
+        {
+            return new PcActionOutcome(
                 false,
                 $"Lancé {label} pero no llegué a ver su ventana. Puede estar tardando en cargar.");
+        }
+
+        ShowWindow(appeared, ShowRestore);
+        ForceForeground(appeared);
+        return WaitFor(() => GetForegroundWindow() == appeared, TimeSpan.FromSeconds(3))
+            ? new PcActionOutcome(true, $"Abrí {label} y la puse adelante.")
+            : new PcActionOutcome(
+                true,
+                $"Abrí {label}, pero quedó detrás: Windows no me dejó traerla al frente. " +
+                "Si le vas a escribir, primero usá focus_application.");
+    }
 
     private static PcActionOutcome LaunchPackaged(string applicationId, string spokenName)
     {

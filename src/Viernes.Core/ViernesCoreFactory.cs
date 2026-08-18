@@ -54,7 +54,12 @@ public static class ViernesCoreFactory
             rules,
             goals,
             missions,
-            autonomy);
+            autonomy,
+            // Faltaba, y por eso «descansar» nunca descansaba: el host pasaba su callback a la
+            // fábrica, la fábrica no lo reenviaba, y la herramienta se construía sin nada que
+            // llamar. El modelo entendía perfecto que le pedían parar, invocaba la herramienta y
+            // recibía «no tengo control del micrófono en este contexto».
+            rest);
         var tools = new ToolExecutor(
             extraTools is { Count: > 0 } ? [.. builtIn, .. extraTools] : builtIn,
             new SafeToolPolicy());

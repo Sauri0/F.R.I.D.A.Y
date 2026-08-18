@@ -23,7 +23,10 @@
         Closed="Window_Closed"
         Closing="Window_Closing"
         PreviewKeyDown="Window_PreviewKeyDown"
-        PreviewKeyUp="Window_PreviewKeyUp">
+        PreviewKeyUp="Window_PreviewKeyUp"
+        PreviewMouseMove="Orb_PreviewMouseMove"
+        PreviewMouseLeftButtonUp="Orb_PreviewMouseLeftButtonUp"
+        ShowActivated="False">
 
     <Grid x:Name="ShellGrid" Margin="4" Background="Transparent">
         <Grid.ColumnDefinitions>
@@ -83,7 +86,7 @@
                     Background="Transparent"
                     Cursor="Hand"
                     Focusable="True"
-                    PreviewMouseLeftButtonDown="Orb_PreviewMouseLeftButtonDown"
+                    Click="OrbButton_Click"
                     AutomationProperties.Name="Viernes: tocar para escribir, arrastrar para mover">
                 <!--
                     El botón ya no dibuja: es sólo la superficie de contacto sobre la gota. Al

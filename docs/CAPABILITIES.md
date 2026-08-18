@@ -2,6 +2,8 @@
 
 Un modelo no obtiene permisos por ser más capaz. Viernes sólo puede hacer algo cuando existe una implementación concreta, una política de riesgo y una autorización visible.
 
+Este documento describía el MVP anterior hasta hoy: listaba seis herramientas de las dieciséis que hay, decía que `pc_action` devolvía una simulación, que la búsqueda web no hacía red y que no existía lectura arbitraria de disco. Todo eso es falso desde hace varias versiones. Un registro de capacidades desactualizado es peor que ninguno, porque es el lugar donde se supone que mirás para saber qué le estás dando.
+
 ## Estado actual
 
 | Capacidad | Implementación disponible | Conectada al widget | Permiso / límite actual |
@@ -10,34 +12,65 @@ Un modelo no obtiene permisos por ser más capaz. Viernes sólo puede hacer algo
 | Orbe compacto | `78×78` idle; burbuja temporal `344×112`; entrada `352×158` | sí | no hay panel persistente |
 | Arrastre | WPF `DragMove` + `window.json` | sí | restaura sólo posiciones visibles |
 | Autorun | `HKCU\...\Run` por usuario | sí | opt-in desde bandeja; sin administrador |
+| Freno de emergencia | `Ctrl+Shift+Alt+J` global | sí | corta turno, voz y comandos; silencia el micrófono |
 | PTT | proveedor Whisper preferido / SAPI fallback | sí | micrófono sólo durante captura manual |
 | Wake word | SAPI local con gramática exacta + handoff | sí; toggle en bandeja | **DEMO/no robusto**, 1–8 frases, micrófono visible |
+| Conversación abierta | bucle de captura continua tras el wake | sí | cierra por frase de despedida, silencio, mute o la tool `descansar` |
 | STT Whisper | Whisper.net + NAudio, modelo local español | sí | modelo instalado explícitamente; SAPI fallback |
-| TTS | SAPI/voz local de Windows | sí | cancelable y sujeto a mute |
+| TTS | voz neural por OpenRouter con respaldo SAPI local | sí | cancelable, por oraciones y sujeto a mute |
 | Conversación | OpenRouter chat completions fast | sí, sólo con clave | HTTPS, fallback fast, máximo de iteraciones |
 | Selección por rol | fast/agent/reasoning/premium/embeddings/resumen | API de Core | sólo fast en flujo normal; premium opt-in |
-| Recordatorios | JSON local + tools create/list + scheduler | sí, con aviso al vencer | orbe al frente, globo de bandeja y voz; sin toast nativo de Windows |
-| Agenda local | JSON local + tools create/list | sí, por comandos o tool calls | no sincroniza calendarios externos |
-| Búsqueda web | tool placeholder | sí | simulada; no hace red ni abre navegador |
-| Acciones Windows | `pc_action` | sí | confirmación; resultado simulado; sensible/destructivo bloqueado |
-| Memoria personal | JSON local tipado de tres niveles | sí, por comandos explícitos | observación pausada por defecto; sin extracción automática |
+| Recordatorios | JSON local + tools crear/listar/completar/borrar + vigía | sí, con aviso al vencer | orbe al frente, globo de bandeja y voz; sin toast nativo de Windows |
+| Agenda local | JSON local + tools crear/listar + **el mismo vigía** | sí, con aviso al empezar | no sincroniza calendarios externos |
+| Búsqueda web | resultados del proveedor inyectados en el turno | sí, encendida por defecto | `VIERNES_WEB_SEARCH=false` la apaga; la tool sólo lo declara |
+| Acciones Windows | `pc_action` sobre `WindowsPcActionExecutor` | sí | **ejecuta de verdad**; sensible/destructivo sigue bloqueado |
+| Pantalla | `pc_action see_screen` + lectura de controles | sí | la captura viaja al modelo y se descarta; no se persiste |
+| Archivos | `archivo`: leer, escribir, crear, listar, buscar, mover, copiar, borrar | sí | borrar va a papelera propia y se recupera |
+| Shell PowerShell | `comando` | sí | sin elevación, techo de 45 s, sin la clave en el entorno hijo |
+| Reglas aprendidas | `aprender` → `reglas.json` | sí | se inyectan en todos los turnos siguientes |
+| Objetivos y misiones | `objetivo` y `mision` → `objetivos.json` / `misiones.json` | sí | sobreviven al cierre de la charla y al reinicio |
+| Permisos por persona | `permiso` → `autonomia.json` | sí | mandar/publicar/borrar preguntan salvo permiso guardado |
+| Proyectos de Claude Code | `proyectos`, sólo lectura de sesiones | sí | no escribe en la sesión ni le contesta |
+| Estado del equipo | `estado_equipo` | sí | actividad reciente y carga; sólo mira |
+| Memoria personal | JSON local tipado de tres niveles | sí | al cerrar una charla destila hasta dos hechos, que quedan descartados mientras la observación siga pausada —lo está de fábrica— |
+| Servidores MCP | cliente oficial, `servidores-mcp.json` | sí | lo que exponga cada servidor, por la misma política local |
 | Tokens/costo | parseo por completion + `UsageLedger` local | sí, en lane fast | sin contenido; preflight por turno |
-| Documentos/archivos | no implementado | no | no existe lectura arbitraria de disco |
+| Calendario y correo externos | no implementados | no | previstos vía MCP; ver `MAIL-Y-CALENDARIO.md` |
 | Navegación | no implementada | no | no existe control implícito del navegador |
-| Calendario externo | no implementado | no | requerirá OAuth y scopes mínimos |
 
 ## Herramientas incluidas
 
 | Tool | Riesgo declarado | Efecto |
 |---|---|---|
 | `reminder_create` | safe | guarda título/fecha en `assistant-data.json`; rechaza texto con forma de credencial |
-| `reminder_list` | safe | lista recordatorios locales |
+| `reminder_list` | safe | lista los recordatorios pendientes con su id; `include_completed` suma los hechos |
+| `reminder_update` | safe | marca uno como hecho o lo borra; exige id o un título que corresponda a uno solo |
 | `agenda_create` | safe | guarda un evento en la agenda interna |
 | `agenda_list` | safe | lista la agenda interna |
-| `web_search` | safe | devuelve la consulta como simulación; sin red |
-| `pc_action` | variable | previewables requieren confirmación; sensibles/destructivas nunca se ejecutan |
+| `web_search` | safe | no hace red: declara que los resultados ya vienen inyectados, o que están apagados |
+| `pc_action` | variable | ejecuta de verdad las acciones previsualizables; sensibles/destructivas nunca se ejecutan |
+| `archivo` | safe | acceso real al disco; borrar es reversible desde la papelera propia |
+| `comando` | safe | ejecuta PowerShell sin elevación, con techo de tiempo y salida acotada |
+| `estado_equipo` | safe | describe actividad reciente o carga del equipo; sólo lectura |
+| `aprender` | safe | guarda o borra una regla que se inyecta en los turnos siguientes |
+| `objetivo` | safe | abre, avanza, cierra o lista objetivos duraderos |
+| `mision` | safe | encargos que sobreviven al cierre de la charla, con preguntas pendientes |
+| `permiso` | safe | guarda hasta dónde puede llegar sola con cada acción y cada persona |
+| `proyectos` | safe | lee las sesiones de Claude Code del usuario; no escribe en ellas |
+| `descansar` | safe | deja de hablar, cierra la charla o suelta el micrófono, según el nivel |
 
-`pc_action` sólo reconoce como previsualizables `open_settings`, `open_application` y `show_desktop`; aun con confirmación devuelve una simulación y no invoca el sistema. Acciones como `shutdown`, `run_command`, `change_setting`, borrado, formateo o desinstalación permanecen pendientes/bloqueadas.
+`pc_action` reconoce como previsualizables `open_settings`, `open_application`, `focus_application`, `close_application`, `minimize_application`, `restore_application`, `show_desktop`, `media_control`, `volume`, `play_music`, `search_web`, `lock_screen`, `see_screen`, `move_cursor`, `click`, `double_click`, `right_click`, `type_text`, `press_key`, `scroll`, `read_controls`, `click_control`, `set_text`, `undo` y `what_did_you_do`. Con un ejecutor conectado —que es la configuración normal del escritorio— **se ejecutan de verdad**, y sin `VIERNES_CONFIRM_ACTIONS=true` se ejecutan sin preguntar. `shutdown`, `restart`, `logoff`, `kill_process`, `run_command`, `change_setting`, borrado, formateo y desinstalación siguen marcadas como sensibles o destructivas y no se ejecutan ni aunque se confirmen.
+
+El riesgo declarado no es el riesgo real de la capacidad: `comando` está marcado `safe` porque su argumento se valida y su salida se acota, no porque ejecutar PowerShell arbitrario sea inofensivo. Lo que de verdad puede hacer en tu equipo está en `SECURITY.md`, y ése es el documento a leer antes de dejarlo suelto.
+
+## Recordatorios y agenda
+
+Las dos listas viven en `assistant-data.json` y las vigila el mismo componente, con la misma regla: se estampa que ya se avisó **antes** de anunciar, así que un reinicio no repite un aviso y, como mucho, se pierde uno.
+
+- un recordatorio suena a su hora de vencimiento; uno completado no suena;
+- un evento de agenda suena a su hora de inicio, y si ya terminó se estampa en silencio;
+- lo que quedó atrasado más de doce horas se estampa sin anunciar, para que una máquina apagada una semana no descargue todo junto al prender;
+- hay un techo de avisos por pasada, compartido entre recordatorios y agenda.
 
 ## Comandos locales
 
@@ -61,7 +94,7 @@ Sin modelo remoto se puede invocar la superficie segura de forma determinista:
 
 También se reconocen las frases exactas `mis recordatorios`, `mostrame mis recordatorios`, `mi agenda`, `mostrame mi agenda`, `qué recordás de mí` y `mostrame mi memoria`. El modo local no interpreta lenguaje libre como una orden de sistema.
 
-Reanudar hábitos sólo cambia el permiso/estado del store. El MVP no observa conversaciones ni genera sugerencias automáticamente. Aprobar/rechazar sugerencias y borrar toda la memoria existen en la API, pero aún no tienen comando compacto.
+Completar y borrar un recordatorio todavía no tienen comando local: se hacen pidiéndoselo con palabras, y ahí entra `reminder_update`. Sin clave de OpenRouter no hay forma de completarlos desde el widget.
 
 ## Cómo entra una capacidad nueva
 
@@ -76,7 +109,7 @@ Toda integración real debe aportar:
 7. pruebas de que el modelo no puede saltarse la política;
 8. revocación y scopes mínimos para conectores externos.
 
-No se aceptan shell arbitrario, acceso masivo al disco, elevación, credenciales, compras, envío de mensajes o cambios irreversibles como “tools genéricas”. Para archivos se prevé selector explícito y read-only por defecto; para calendario, OAuth por conector; para navegador, acciones/dominios acotados; para Windows, allowlists pequeñas y operaciones reversibles.
+Elevación, credenciales, compras y envío de mensajes en nombre del usuario siguen fuera. Para calendario y correo el camino previsto es un servidor MCP con OAuth por conector; para navegador, acciones y dominios acotados.
 
 ## Criterio de cartera
 

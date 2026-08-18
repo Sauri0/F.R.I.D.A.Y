@@ -29,6 +29,18 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private BubbleListKind _listKind = BubbleListKind.Agenda;
     private CancellationTokenSource? _resultPresentationCancellation;
 
+    /// <summary>
+    /// Si la conversación en curso se está llevando hablando o escribiendo. <c>null</c> mientras no
+    /// hay conversación.
+    /// </summary>
+    /// <remarks>
+    /// El runtime no distingue una de otra —abre el mismo bucle en los dos casos—, así que la marca
+    /// quien la abre: el toque en el orbe la reclama escrita, mandar texto la confirma escrita, el
+    /// push-to-talk la vuelve hablada, y si se abrió sin que nadie la reclamara fue el wake word,
+    /// que es hablada por definición.
+    /// </remarks>
+    private bool? _isSpokenConversation;
+
     public MainViewModel(IAssistantRuntime runtime)
     {
         _runtime = runtime;
@@ -234,10 +246,29 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// estado está, y desplegar la burbuja en cada turno convierte una charla en una ventana que
     /// aparece y desaparece sin parar. La burbuja se abre al tocarla, o cuando hay que decidir algo.
     /// </summary>
+    /// <remarks>
+    /// Escrita es lo contrario: si escribiste la pregunta, la respuesta se lee, y encogerse a 108 px
+    /// la dejaba dibujada adentro de una burbuja colapsada. Sólo se veía cambiar el color del orbe.
+    /// Se notaba únicamente con el micrófono silenciado, porque ahí el runtime ni siquiera llega a
+    /// abrir la conversación y la burbuja quedaba visible por el otro camino.
+    /// </remarks>
     public bool IsMinimalShellVisible =>
         !IsExpanded &&
         !IsConfirmationVisible &&
-        (IsConversationActive || (State == AssistantVisualState.Idle && !_isPresentingResult));
+        (IsConversationActive
+            ? _isSpokenConversation != false
+            : IsRestingState && !_isPresentingResult);
+
+    /// <summary>
+    /// Reposo no es sólo <see cref="AssistantVisualState.Idle"/>: sin clave o sin red tampoco está
+    /// haciendo nada, y exigir Idle dejaba la burbuja abierta para siempre en una instalación a
+    /// medias —justo la que menos tiene para contar.
+    /// </summary>
+    private bool IsRestingState => State
+        is AssistantVisualState.Idle
+        or AssistantVisualState.Unconfigured
+        or AssistantVisualState.Offline;
+
     public bool IsAssistantShellVisible => !IsMinimalShellVisible;
     public double WidgetWidth => IsMinimalShellVisible ? 108 : IsExpanded ? 368 : 360;
 
@@ -308,7 +339,11 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsSpeaking => State == AssistantVisualState.Speaking;
     public bool IsAttention => State == AssistantVisualState.Attention;
     public bool IsError => State == AssistantVisualState.Error;
-    public bool IsStateLabelVisible => State != AssistantVisualState.Idle;
+    /// <summary>
+    /// La cápsula se muestra sólo si tiene texto. Antes bastaba con no estar en reposo, y los
+    /// estados sin caso en <see cref="StateShortLabel"/> dejaban una cápsula vacía sobre el orbe.
+    /// </summary>
+    public bool IsStateLabelVisible => StateShortLabel.Length > 0;
     public string StateShortLabel => State switch
     {
         AssistantVisualState.Listening => "Escuchando",
@@ -316,6 +351,10 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         AssistantVisualState.Speaking => "Hablando",
         AssistantVisualState.Attention => "Revisar",
         AssistantVisualState.Error => "Atención",
+
+        // Capacidad reducida no es falla: dicen qué falta, no que algo se rompió.
+        AssistantVisualState.Unconfigured => "Sin clave",
+        AssistantVisualState.Offline => "Sin red",
         _ => string.Empty
     };
 
@@ -353,6 +392,9 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        // Hablar deja el orbe solo: si el turno se dijo, la respuesta se dice.
+        _isSpokenConversation = true;
+        NotifyShellProperties();
         await _runtime.StartPushToTalkAsync(cancellationToken);
     }
 
@@ -385,6 +427,11 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
         IsExpanded = true;
 
+        // Se reclama escrita antes de abrirla: el runtime avisa que la conversación arrancó dentro
+        // de StartConversationAsync, y para entonces la marca ya tiene que estar puesta o la burbuja
+        // se calcula como hablada y se encoge.
+        _isSpokenConversation = false;
+
         MessageText = "¿Qué necesitás?";
         StatusText = "Te escucho · escribí, o hablá y decime «listo» para cortar";
         _ = _runtime.StartConversationAsync(CancellationToken.None);
@@ -403,6 +450,11 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         InputText = string.Empty;
         MessageText = text;
         IsExpanded = false;
+
+        // Escribir es la prueba definitiva de que este turno se lee, no se escucha: aunque la
+        // conversación la hubiera abierto la voz, a partir de acá la respuesta tiene que verse.
+        _isSpokenConversation = false;
+        NotifyShellProperties();
         await _runtime.SendAsync(text, cancellationToken);
     }
 
@@ -470,7 +522,24 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             var previousState = State;
             State = update.State;
             StatusText = update.Status;
-            IsConversationActive = _runtime.IsConversationActive;
+
+            // La marca se decide antes de publicar el cambio: el setter recalcula la burbuja, y si
+            // se hiciera después la primera vuelta se dibujaría con el valor viejo.
+            var conversationActive = _runtime.IsConversationActive;
+            if (conversationActive && !IsConversationActive)
+            {
+                // Se abrió sin que nadie la reclamara: la abrió el wake word, y llamarla por su
+                // nombre es hablarle.
+                _isSpokenConversation ??= true;
+            }
+            else if (!conversationActive)
+            {
+                // Cerrada: sin esto, una conversación escrita dejaba su marca puesta y la siguiente
+                // —abierta por voz— heredaba la burbuja desplegada.
+                _isSpokenConversation = null;
+            }
+
+            IsConversationActive = conversationActive;
             if (!string.IsNullOrWhiteSpace(update.Message))
             {
                 MessageText = update.Message;

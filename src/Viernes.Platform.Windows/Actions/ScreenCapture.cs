@@ -27,6 +27,15 @@ internal static class ScreenCapture
     private const int MaximumWidth = 1280;
     private const uint SourceCopy = 0x00CC0020;
 
+    // Métricas de la pantalla virtual: el rectángulo que abarca TODOS los monitores, con su origen
+    // real —que es negativo cuando hay un monitor a la izquierda del primario—.
+    private const int MetricVirtualLeft = 76;
+    private const int MetricVirtualTop = 77;
+    private const int MetricVirtualWidth = 78;
+    private const int MetricVirtualHeight = 79;
+    private const int MetricPrimaryWidth = 0;
+    private const int MetricPrimaryHeight = 1;
+
     /// <summary>
     /// Cuántos píxeles de pantalla vale cada píxel de la última captura entregada al modelo.
     /// </summary>
@@ -46,10 +55,10 @@ internal static class ScreenCapture
     public static (int Width, int Height) LastImageSize { get; private set; }
 
     [DllImport("user32.dll")]
-    private static extern nint GetDesktopWindow();
+    private static extern int GetSystemMetrics(int index);
 
     [DllImport("user32.dll")]
-    private static extern nint GetForegroundWindow();
+    private static extern nint GetDC(nint window);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -101,19 +110,49 @@ internal static class ScreenCapture
         uint operation);
 
     /// <summary>
-    /// Captura el escritorio completo, o sólo la ventana al frente si <paramref name="activeWindowOnly"/>.
-    /// Devuelve un <c>data:</c> URL con PNG, o <c>null</c> si Windows no dejó capturar.
+    /// Captura todos los monitores. Devuelve un <c>data:</c> URL con PNG, o <c>null</c> si Windows no
+    /// dejó capturar.
     /// </summary>
-    public static string? CaptureAsDataUrl(bool activeWindowOnly = false)
+    /// <remarks>
+    /// Antes tomaba el rectángulo de <c>GetDesktopWindow()</c>, que mide sólo el monitor primario:
+    /// con dos pantallas, la segunda directamente no existía y el modelo daba coordenadas sobre una
+    /// mitad del escritorio creyendo que era todo. La pantalla virtual —origen incluido, que es
+    /// negativo cuando hay un monitor a la izquierda— es el único rectángulo que las contiene a todas.
+    /// El origen se guarda en <see cref="LastOrigin"/> porque los clics se calculan sumándolo: sin él,
+    /// un punto leído sobre el monitor izquierdo caería en el derecho.
+    /// </remarks>
+    public static string? CaptureScreen()
     {
-        var desktop = GetDesktopWindow();
-        var source = activeWindowOnly ? GetForegroundWindow() : desktop;
-        if (source == nint.Zero)
+        var left = GetSystemMetrics(MetricVirtualLeft);
+        var top = GetSystemMetrics(MetricVirtualTop);
+        var width = GetSystemMetrics(MetricVirtualWidth);
+        var height = GetSystemMetrics(MetricVirtualHeight);
+
+        // Si el sistema no reporta la pantalla virtual queda el primario, que es peor pero no es nada.
+        if (width <= 0 || height <= 0)
         {
-            source = desktop;
+            left = 0;
+            top = 0;
+            width = GetSystemMetrics(MetricPrimaryWidth);
+            height = GetSystemMetrics(MetricPrimaryHeight);
         }
 
-        if (!GetWindowRect(source, out var bounds))
+        if (width <= 0 || height <= 0)
+        {
+            return null;
+        }
+
+        // El DC de pantalla —GetDC(NULL)— abarca la pantalla virtual entera y admite coordenadas
+        // negativas; el de la ventana escritorio se recorta al primario.
+        return Capture(nint.Zero, GetDC(nint.Zero), left, top, left, top, width, height);
+    }
+
+    /// <summary>
+    /// Captura una ventana concreta, por su identificador. Devuelve <c>null</c> si no se pudo.
+    /// </summary>
+    public static string? CaptureWindow(nint window)
+    {
+        if (window == nint.Zero || !GetWindowRect(window, out var bounds))
         {
             return null;
         }
@@ -125,7 +164,28 @@ internal static class ScreenCapture
             return null;
         }
 
-        var sourceDc = GetWindowDC(source);
+        return Capture(window, GetWindowDC(window), bounds.Left, bounds.Top, 0, 0, width, height);
+    }
+
+    /// <summary>
+    /// Copia un rectángulo del <paramref name="sourceDc"/> y lo codifica.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="originX"/> y <paramref name="originY"/> son coordenadas de pantalla —lo que
+    /// hay que sumarle a un punto leído sobre la imagen—, mientras que <paramref name="sourceX"/> y
+    /// <paramref name="sourceY"/> son el desplazamiento dentro del DC de origen. Coinciden para la
+    /// pantalla y difieren para una ventana, cuyo DC ya arranca en su propia esquina.
+    /// </remarks>
+    private static string? Capture(
+        nint dcOwner,
+        nint sourceDc,
+        int originX,
+        int originY,
+        int sourceX,
+        int sourceY,
+        int width,
+        int height)
+    {
         if (sourceDc == nint.Zero)
         {
             return null;
@@ -143,13 +203,13 @@ internal static class ScreenCapture
             }
 
             var previous = SelectObject(memoryDc, bitmap);
-            if (!BitBlt(memoryDc, 0, 0, width, height, sourceDc, 0, 0, SourceCopy))
+            if (!BitBlt(memoryDc, 0, 0, width, height, sourceDc, sourceX, sourceY, SourceCopy))
             {
                 return null;
             }
 
             SelectObject(memoryDc, previous);
-            LastOrigin = (bounds.Left, bounds.Top);
+            LastOrigin = (originX, originY);
             LastScale = width > MaximumWidth ? (double)width / MaximumWidth : 1;
             return Encode(bitmap, width, height);
         }
@@ -169,7 +229,7 @@ internal static class ScreenCapture
                 DeleteDC(memoryDc);
             }
 
-            ReleaseDC(source, sourceDc);
+            ReleaseDC(dcOwner, sourceDc);
         }
     }
 

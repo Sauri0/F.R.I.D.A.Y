@@ -92,6 +92,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private int _restRequested;
 
     /// <summary>
+    /// Distinto de cero mientras corre una acción confirmada a mano.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ConfirmPendingAsync"/> ejecuta herramientas sin pasar por <see cref="SendAsync"/>,
+    /// así que <c>_requestActive</c> vale cero ahí. Sin esta segunda bandera, el descanso pedido
+    /// desde una acción confirmada no sabía si tenía un turno que lo consumiera.
+    /// </remarks>
+    private int _confirmActive;
+
+    /// <summary>
     /// Distinto de cero mientras destila lo aprendido de la charla que acaba de cerrar.
     /// </summary>
     /// <remarks>
@@ -173,10 +183,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _localCommands = new LocalCommandRouter(_orchestrator, _memory);
         _reminderScheduler = new ReminderScheduler(_dataStore);
         _reminderScheduler.ReminderDue += ReminderSchedulerOnReminderDue;
+        _reminderScheduler.AgendaItemDue += ReminderSchedulerOnAgendaItemDue;
         _neuralVoice = new OpenRouterSpeechClient(
             _httpClient,
             _options,
             SpeechSynthesisOptions.FromEnvironment());
+        // La voz elegida se lee de las preferencias más adelante, cuando ya se cargó el archivo:
+        // acá todavía no se sabe. SpeechService la leía de sus opciones y nadie se la pasaba nunca,
+        // así que ponerla en settings.json no hacía absolutamente nada.
         _speechSynthesizer = new SpeechService(new SpeechServiceOptions
         {
             RecognitionCulture = "es-AR",
@@ -237,6 +251,50 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             // forma de que «desactivate» signifique lo que dice.
             IsMuted = true;
         }
+
+        // Y si nadie va a consumirla, se consume acá mismo.
+        //
+        // La bandera la levantaba esta función y la bajaba el finally de SendAsync, dando por hecho
+        // que descansar siempre pasa por un turno. No siempre: una acción confirmada a mano ejecuta
+        // herramientas por fuera de SendAsync, y por ese camino la bandera quedaba viva hasta el
+        // final del siguiente turno cualquiera —uno que el usuario había pedido de verdad— y ahí
+        // publicaba un reposo espurio que le borraba la respuesta de la pantalla.
+        if (Volatile.Read(ref _requestActive) == 0 && Volatile.Read(ref _confirmActive) == 0)
+        {
+            await ConsumeRestRequestAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Baja la bandera de descanso y, si estaba levantada, deja el orbe callado y en reposo.
+    /// </summary>
+    /// <remarks>
+    /// La última palabra del turno tiene que ser el reposo. Si en el medio el usuario pidió parar,
+    /// el turno igual siguió —el modelo contestó al resultado de la herramienta— y esa respuesta
+    /// dejó el orbe pensando y la burbuja abierta. Acá se corrige al final, cuando ya no queda nadie
+    /// que pueda volver a pisarlo.
+    /// </remarks>
+    private async Task ConsumeRestRequestAsync()
+    {
+        if (Interlocked.Exchange(ref _restRequested, 0) != 1)
+        {
+            return;
+        }
+
+        CancelSpeechSafely();
+        _neuralPlayer.Stop();
+        await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Idle,
+            IsMuted
+                ? "Micrófono apagado"
+                : $"Atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”",
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled,
+            ClearSteps: true,
+            ClearItems: true,
+            Quiet: true));
     }
 
     /// <summary>
@@ -521,28 +579,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             Interlocked.CompareExchange(ref _turnCancellation, null, turn);
             Interlocked.Exchange(ref _requestActive, 0);
             await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
-
-            // La última palabra del turno tiene que ser el reposo. Si en el medio el usuario pidió
-            // parar, el turno igual siguió —el modelo contestó al resultado de la herramienta— y esa
-            // respuesta dejó el orbe pensando y la burbuja abierta. Acá se corrige al final, cuando
-            // ya no queda nadie que pueda volver a pisarlo.
-            if (Interlocked.Exchange(ref _restRequested, 0) == 1)
-            {
-                CancelSpeechSafely();
-                _neuralPlayer.Stop();
-                await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
-
-                Publish(new AssistantRuntimeUpdate(
-                    AssistantVisualState.Idle,
-                    IsMuted
-                        ? "Micrófono apagado"
-                        : $"Atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”",
-                    MicrophoneActive: IsAnyMicrophoneActive(),
-                    WakeWordEnabled: _isWakeWordEnabled,
-                    ClearSteps: true,
-                    ClearItems: true,
-                    Quiet: true));
-            }
+            await ConsumeRestRequestAsync().ConfigureAwait(false);
         }
     }
 
@@ -807,7 +844,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             await _recognition.CancelPushToTalkAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        _speechCancellation?.Cancel();
+        // Sin proteger, esta cancelación tira ObjectDisposedException si pega en la ventana en que
+        // SpeakCoreAsync desecha el origen anterior y asigna el nuevo. Y como silenciar se llama
+        // fire-and-forget desde la interfaz, esa excepción se perdía y las dos líneas de abajo nunca
+        // corrían: apretabas silenciar y la voz seguía hablando.
+        CancelSpeechSafely();
         _neuralPlayer.Stop();
         await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
         _orchestrator.SetListening(false);
@@ -937,6 +978,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
+
+        // Una acción confirmada puede ser «descansar»: acá adentro se ejecutan herramientas sin que
+        // haya un turno de SendAsync que después limpie lo que dejen pedido.
+        Interlocked.Exchange(ref _confirmActive, 1);
         try
         {
             if (await TryConfirmBudgetOverrideAsync(confirmation, cancellationToken).ConfigureAwait(false))
@@ -962,7 +1007,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
         finally
         {
+            Interlocked.Exchange(ref _confirmActive, 0);
             await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+            await ConsumeRestRequestAsync().ConfigureAwait(false);
         }
     }
 
@@ -1139,6 +1186,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         _conversationActive = false;
+
+        // El freno cierra la charla sin pasar por EndConversationAsync, así que vacía él los turnos:
+        // si no, lo dicho antes del pánico reaparecía en la destilación de la charla siguiente.
+        _ = TakeConversationTurns();
         RuntimeTrace.Write("panico", "corte de emergencia por atajo global");
 
         _ = Task.Run(async () =>
@@ -1482,6 +1533,19 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// </summary>
     public async Task EndConversationAsync(string reason, bool quiet, CancellationToken cancellationToken)
     {
+        // Cerrar vacía los turnos, sin excepción.
+        //
+        // Sólo los limpiaba LearnFromConversationAsync, que corre en dos de los muchos caminos de
+        // cierre. Por los demás —la herramienta «descansar», mute, un fallo del dispositivo, una
+        // excepción del bucle— los turnos quedaban en la lista y se arrastraban a la destilación de
+        // la charla siguiente: Viernes «aprendía» de una conversación mezclada con otra que ya había
+        // terminado. Los caminos que sí destilan se llevan los turnos antes de llamar acá.
+        var abandoned = TakeConversationTurns();
+        if (abandoned.Count > 0)
+        {
+            RuntimeTrace.Write("conversacion.turnos.descartados", $"{abandoned.Count} · {reason}");
+        }
+
         if (!_conversationActive)
         {
             return;
@@ -1640,9 +1704,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     {
                         await SpeakIfEnabledAsync("Cualquier cosa me avisás.", CancellationToken.None)
                             .ConfigureAwait(false);
+
+                        // Los turnos se retiran antes de cerrar: el cierre los descarta, y acá se
+                        // quieren para destilar.
+                        var silenced = TakeConversationTurns();
                         await EndConversationAsync("Cerré por silencio", quiet: true, CancellationToken.None)
                             .ConfigureAwait(false);
-                        await LearnFromConversationAsync().ConfigureAwait(false);
+                        await LearnFromConversationAsync(silenced).ConfigureAwait(false);
                         return;
                     }
 
@@ -1678,16 +1746,19 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     await SpeakIfEnabledAsync("Cualquier cosa me avisás.", CancellationToken.None)
                         .ConfigureAwait(false);
 
+                    // Los turnos se retiran antes de cerrar, porque el cierre los descarta.
+                    var closed = TakeConversationTurns();
+
                     // En modo silencioso: se despide y se encoge. Antes cerraba dejando la despedida
                     // en la burbuja siete segundos, y esos siete segundos con el desplegable abierto
                     // después de pedirle que pare se leen como que no hizo caso.
                     await EndConversationAsync("Conversación cerrada", quiet: true, CancellationToken.None)
                         .ConfigureAwait(false);
-                    await LearnFromConversationAsync().ConfigureAwait(false);
+                    await LearnFromConversationAsync(closed).ConfigureAwait(false);
                     return;
                 }
 
-                _conversationTurns.Add(transcript);
+                AddConversationTurn(transcript);
 
                 await SendAsync(transcript, spoken: true, cancellationToken).ConfigureAwait(false);
             }
@@ -1710,6 +1781,40 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             {
                 await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
             }
+        }
+    }
+
+    /// <summary>
+    /// Se lleva lo que dijo el usuario en la charla y deja la lista vacía, en un solo paso.
+    /// </summary>
+    /// <remarks>
+    /// Leer y vaciar tienen que ser la misma operación: si fueran dos, cualquier cierre que hiciera
+    /// una y se olvidara de la otra volvería a dejar turnos viejos para la charla siguiente, que es
+    /// justamente el error que esto viene a cerrar.
+    /// </remarks>
+    /// <summary>
+    /// Anota lo que dijo el usuario, bajo el mismo candado con el que se vacía.
+    /// </summary>
+    /// <remarks>
+    /// Agregar estaba fuera del candado y vaciar adentro: el bucle de conversación corre en otra
+    /// tarea que la del cierre, y una lista sin sincronizar que se recorre mientras se le agrega
+    /// puede tirar en cualquiera de las dos puntas.
+    /// </remarks>
+    private void AddConversationTurn(string transcript)
+    {
+        lock (_confirmationGate)
+        {
+            _conversationTurns.Add(transcript);
+        }
+    }
+
+    private List<string> TakeConversationTurns()
+    {
+        lock (_confirmationGate)
+        {
+            var turns = new List<string>(_conversationTurns);
+            _conversationTurns.Clear();
+            return turns;
         }
     }
 
@@ -1776,16 +1881,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// <remarks>
     /// No guarda la conversación: guarda hechos cortos y revisables. La política de contenido del
     /// store rechaza credenciales y cualquier cosa con forma de transcripción.
+    /// <para>
+    /// Recibe los turnos en vez de leerlos: el que cierra la charla es quien se los lleva, con
+    /// <see cref="TakeConversationTurns"/>, y así el vaciado no depende de que esta función se haya
+    /// llamado.
+    /// </para>
     /// </remarks>
-    private async Task LearnFromConversationAsync()
+    private async Task LearnFromConversationAsync(IReadOnlyList<string> turns)
     {
-        List<string> turns;
-        lock (_confirmationGate)
-        {
-            turns = [.. _conversationTurns];
-            _conversationTurns.Clear();
-        }
-
         // Un turno alcanza. Exigir dos daba por sentado que las charlas son largas, y no lo son: en
         // el registro real casi todas cerraron con cero o un turno, así que la destilación no corrió
         // nunca y el archivo de memoria personal jamás llegó a existir. Una charla de un solo pedido
@@ -1883,6 +1986,52 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         catch (Exception)
         {
             // La voz es un complemento del aviso visual; su falla no debe perder el recordatorio.
+        }
+    }
+
+    private void ReminderSchedulerOnAgendaItemDue(object? sender, AgendaItemDueEventArgs eventArgs) =>
+        _ = AnnounceAgendaItemAsync(eventArgs);
+
+    /// <summary>
+    /// Anuncia un evento de agenda que acaba de empezar.
+    /// </summary>
+    /// <remarks>
+    /// Camino idéntico al de un recordatorio —orbe al frente, globo de bandeja y voz— pero con otras
+    /// palabras: un recordatorio es algo que tenés que hacer y un evento es algo que ya empezó, y
+    /// leerlos con la misma frase obliga a adivinar de cuál de las dos listas salió.
+    /// </remarks>
+    private async Task AnnounceAgendaItemAsync(AgendaItemDueEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        var title = eventArgs.Item.Title;
+        var when = eventArgs.Item.StartsAt.ToLocalTime().ToString("HH:mm", ArgentineCulture);
+        var detail = eventArgs.IsLate
+            ? $"Empezaba a las {when}: {title}"
+            : $"Son las {when}, empieza: {title}";
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Attention,
+            eventArgs.IsLate ? "Agenda · ya había empezado" : "Agenda",
+            detail,
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+
+        RequestActivation(new ShellActivationRequest(
+            ShellActivationReason.Reminder,
+            $"Agenda de {_identity.Name}",
+            detail));
+
+        try
+        {
+            await SpeakIfEnabledAsync(detail, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // La voz es un complemento del aviso visual; su falla no debe perder el evento.
         }
     }
 
@@ -2425,6 +2574,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _orchestrator.StateChanged -= OrchestratorOnStateChanged;
         _orchestrator.ProgressChanged -= OrchestratorOnProgressChanged;
         _reminderScheduler.ReminderDue -= ReminderSchedulerOnReminderDue;
+        _reminderScheduler.AgendaItemDue -= ReminderSchedulerOnAgendaItemDue;
         await _reminderScheduler.DisposeAsync().ConfigureAwait(false);
 
         _signals?.Dispose();

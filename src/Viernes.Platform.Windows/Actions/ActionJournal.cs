@@ -46,8 +46,17 @@ internal sealed class ActionJournal
         }
     }
 
-    /// <summary>Saca la última acción reversible. Las irreversibles quedan como historia.</summary>
-    public JournalEntry? TakeLastReversible()
+    /// <summary>
+    /// Mira la última acción reversible sin sacarla. Las irreversibles quedan como historia.
+    /// </summary>
+    /// <remarks>
+    /// Antes esto era un «sacar»: la entrada salía del diario <em>antes</em> de intentar la inversa y
+    /// nadie la reponía si fallaba. Cerrar una aplicación que pregunta si querés guardar dejaba el
+    /// deshacer en «no pude», y el segundo intento contestaba que no había nada que deshacer: el
+    /// pedido se perdía por haber fracasado una vez. Ahora se mira primero y se descarta recién
+    /// cuando la inversa salió bien, con <see cref="Discard"/>.
+    /// </remarks>
+    public JournalEntry? PeekLastReversible()
     {
         lock (_gate)
         {
@@ -55,13 +64,31 @@ internal sealed class ActionJournal
             {
                 if (_entries[index].Inverse is not null)
                 {
-                    var entry = _entries[index];
-                    _entries.RemoveAt(index);
-                    return entry;
+                    return _entries[index];
                 }
             }
 
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Saca del diario una entrada ya revertida.
+    /// </summary>
+    /// <remarks>
+    /// Compara por identidad y no por valor: <see cref="JournalEntry"/> es un registro, así que dos
+    /// «subí el volumen» seguidos son iguales entre sí y borrar «el que valga lo mismo» podría sacar
+    /// el equivocado, dejando en pie el que ya se deshizo.
+    /// </remarks>
+    public void Discard(JournalEntry entry)
+    {
+        lock (_gate)
+        {
+            var index = _entries.FindLastIndex(candidate => ReferenceEquals(candidate, entry));
+            if (index >= 0)
+            {
+                _entries.RemoveAt(index);
+            }
         }
     }
 

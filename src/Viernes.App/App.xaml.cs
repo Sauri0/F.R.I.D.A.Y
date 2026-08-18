@@ -99,8 +99,13 @@ public partial class App : System.Windows.Application
         _trayIcon.SetAutoStart(autoStartStatus.IsConfiguredForCurrentExecutable);
         _trayIcon.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
         _trayIcon.SetOrbShape(_viewModel.OrbShape.ToString());
+        // Aparecer no puede robar el teclado. Show() activa la ventana y Activate() insistía: si en
+        // ese momento estabas escribiendo en otra aplicación, las teclas siguientes se las comía
+        // Viernes. La ventana ya declara ShowActivated="False" —lo mismo que hace OrbSnapshot para
+        // dibujar sin molestar— y esto la trae al frente sin activarla, que es presencia sin
+        // interrupción.
         _window.Show();
-        _window.Activate();
+        _window.ShowWithoutStealingFocus();
     }
 
     private async Task CheckVoiceAndExitAsync(bool listenOnly, bool whisperOnly = false, bool micOnly = false)

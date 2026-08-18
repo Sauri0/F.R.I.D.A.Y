@@ -25,9 +25,12 @@ public static class BuiltInTools
         [
             new ReminderCreateTool(dataStore),
             new ReminderListTool(dataStore),
+            new ReminderUpdateTool(dataStore),
             new AgendaCreateTool(dataStore),
             new AgendaListTool(dataStore),
-            new WebSearchTool(providerWebSearch),
+            // Con la búsqueda del proveedor encendida no se registra ninguna: la herramienta no
+            // podía buscar nada en ese modo y su esquema se pagaba en tokens en cada turno.
+            .. WebSearchTool.CreateIfUseful(providerWebSearch),
             new PcActionTool(pcActions, confirmActions),
             new SituationTool(environment),
             new TeachTool(rules ?? new Learning.RuleBook()),

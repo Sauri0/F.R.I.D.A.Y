@@ -3,13 +3,20 @@ using Viernes.Core.Persistence;
 namespace Viernes.Core.Scheduling;
 
 /// <summary>
-/// Turns stored reminders into a signal the shell can surface. It owns no UI, sends nothing over the
-/// network and reads only the local data store; the host decides how an alert is presented.
+/// Turns stored reminders and agenda items into a signal the shell can surface. It owns no UI, sends
+/// nothing over the network and reads only the local data store; the host decides how an alert is
+/// presented.
 /// </summary>
 /// <remarks>
 /// A reminder is stamped as notified <em>before</em> the event is raised. A crash between the stamp
 /// and the alert loses one notification, which is preferable to replaying the same alert on every
 /// restart; the reminder itself stays visible through <c>/recordatorios</c>.
+/// <para>
+/// La agenda pasa por exactamente el mismo camino desde que existe <c>AgendaItem.NotifiedAt</c>.
+/// Antes esta clase sólo llamaba a <c>GetRemindersAsync</c>, así que un evento anotado para las
+/// 15:30 llegaba a las 15:30 y no pasaba nada: la agenda se podía escribir y leer, pero no avisaba.
+/// El nombre de la clase quedó por compatibilidad; lo que hace es vigilar las dos cosas.
+/// </para>
 /// </remarks>
 public sealed class ReminderScheduler : IAsyncDisposable
 {
@@ -33,6 +40,9 @@ public sealed class ReminderScheduler : IAsyncDisposable
 
     /// <summary>Raised once per reminder, on the polling thread. Handlers must not block.</summary>
     public event EventHandler<ReminderDueEventArgs>? ReminderDue;
+
+    /// <summary>Raised once per agenda item, on the polling thread. Handlers must not block.</summary>
+    public event EventHandler<AgendaItemDueEventArgs>? AgendaItemDue;
 
     public bool IsRunning => _loop is { IsCompleted: false };
 
@@ -71,51 +81,111 @@ public sealed class ReminderScheduler : IAsyncDisposable
     }
 
     /// <summary>
-    /// Runs a single inspection. Exposed so hosts can force a pass right after writing a reminder and
-    /// so the behaviour is testable without waiting on a timer.
+    /// Runs a single inspection over reminders and agenda. Exposed so hosts can force a pass right
+    /// after writing something and so the behaviour is testable without waiting on a timer.
     /// </summary>
-    public async Task<IReadOnlyList<Reminder>> PollOnceAsync(CancellationToken cancellationToken = default)
+    public async Task<SchedulerPass> PollOnceAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         await _passGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             var now = _timeProvider.GetUtcNow();
-            var reminders = await _store.GetRemindersAsync(cancellationToken).ConfigureAwait(false);
-            var due = reminders
-                .Where(reminder => !reminder.IsCompleted &&
-                                   reminder.NotifiedAt is null &&
-                                   reminder.DueAt <= now)
-                .OrderBy(reminder => reminder.DueAt)
-                .ToArray();
+            var reminders = await RaiseDueRemindersAsync(now, _options.MaxAlertsPerPass, cancellationToken)
+                .ConfigureAwait(false);
 
-            var raised = new List<Reminder>();
-            foreach (var reminder in due)
-            {
-                var lateness = now - reminder.DueAt;
-                var withinGrace = lateness <= _options.LateGrace;
+            // El techo de avisos por pasada se reparte entre las dos fuentes en vez de aplicarse a
+            // cada una: si no, un lunes con seis pendientes y tres reuniones podía escupir el doble
+            // del máximo que dice la opción.
+            var agenda = await RaiseDueAgendaItemsAsync(
+                now,
+                _options.MaxAlertsPerPass - reminders.Count,
+                cancellationToken).ConfigureAwait(false);
 
-                // Stale reminders are stamped silently so a long shutdown cannot flood the shell.
-                if (!await _store.MarkReminderNotifiedAsync(reminder.Id, now, cancellationToken).ConfigureAwait(false))
-                {
-                    continue;
-                }
-
-                if (!withinGrace || raised.Count >= _options.MaxAlertsPerPass)
-                {
-                    continue;
-                }
-
-                raised.Add(reminder);
-                RaiseDue(new ReminderDueEventArgs(reminder, lateness));
-            }
-
-            return raised;
+            return reminders.Count == 0 && agenda.Count == 0
+                ? SchedulerPass.Empty
+                : new SchedulerPass(reminders, agenda);
         }
         finally
         {
             _passGate.Release();
         }
+    }
+
+    private async Task<IReadOnlyList<Reminder>> RaiseDueRemindersAsync(
+        DateTimeOffset now,
+        int budget,
+        CancellationToken cancellationToken)
+    {
+        var reminders = await _store.GetRemindersAsync(cancellationToken).ConfigureAwait(false);
+        var due = reminders
+            .Where(reminder => !reminder.IsCompleted &&
+                               reminder.NotifiedAt is null &&
+                               reminder.DueAt <= now)
+            .OrderBy(reminder => reminder.DueAt)
+            .ToArray();
+
+        var raised = new List<Reminder>();
+        foreach (var reminder in due)
+        {
+            var lateness = now - reminder.DueAt;
+            var withinGrace = lateness <= _options.LateGrace;
+
+            // Stale reminders are stamped silently so a long shutdown cannot flood the shell.
+            if (!await _store.MarkReminderNotifiedAsync(reminder.Id, now, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            if (!withinGrace || raised.Count >= budget)
+            {
+                continue;
+            }
+
+            raised.Add(reminder);
+            Raise(ReminderDue, new ReminderDueEventArgs(reminder, lateness));
+        }
+
+        return raised;
+    }
+
+    private async Task<IReadOnlyList<AgendaItem>> RaiseDueAgendaItemsAsync(
+        DateTimeOffset now,
+        int budget,
+        CancellationToken cancellationToken)
+    {
+        var items = await _store.GetAgendaItemsAsync(cancellationToken).ConfigureAwait(false);
+        var due = items
+            .Where(item => item.NotifiedAt is null && item.StartsAt <= now)
+            .OrderBy(item => item.StartsAt)
+            .ToArray();
+
+        var raised = new List<AgendaItem>();
+        foreach (var item in due)
+        {
+            var lateness = now - item.StartsAt;
+
+            // Un evento que ya terminó se estampa sin anunciar aunque entre en la ventana de gracia:
+            // avisar de una reunión de una hora cuando hace veinte minutos que se acabó no es un
+            // aviso atrasado, es ruido.
+            var worthAnnouncing = lateness <= _options.LateGrace &&
+                                  (item.EndsAt is null || item.EndsAt > now);
+
+            if (!await _store.MarkAgendaItemNotifiedAsync(item.Id, now, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            if (!worthAnnouncing || raised.Count >= budget)
+            {
+                continue;
+            }
+
+            raised.Add(item);
+            Raise(AgendaItemDue, new AgendaItemDueEventArgs(item, lateness));
+        }
+
+        return raised;
     }
 
     private async Task RunLoopAsync(CancellationToken cancellationToken)
@@ -151,15 +221,19 @@ public sealed class ReminderScheduler : IAsyncDisposable
         }
     }
 
-    private void RaiseDue(ReminderDueEventArgs eventArgs)
+    /// <summary>
+    /// Avisa a cada suscriptor por separado. Genérico porque recordatorios y agenda necesitan
+    /// exactamente la misma garantía y duplicarla era duplicar también el <c>catch</c> que la sostiene.
+    /// </summary>
+    private void Raise<TEventArgs>(EventHandler<TEventArgs>? handlers, TEventArgs eventArgs)
+        where TEventArgs : EventArgs
     {
-        var handlers = ReminderDue;
         if (handlers is null)
         {
             return;
         }
 
-        foreach (EventHandler<ReminderDueEventArgs> handler in handlers.GetInvocationList())
+        foreach (EventHandler<TEventArgs> handler in handlers.GetInvocationList())
         {
             try
             {
@@ -167,7 +241,7 @@ public sealed class ReminderScheduler : IAsyncDisposable
             }
             catch (Exception)
             {
-                // A presentation handler must not stop the remaining reminders in this pass.
+                // A presentation handler must not stop the remaining alerts in this pass.
             }
         }
     }

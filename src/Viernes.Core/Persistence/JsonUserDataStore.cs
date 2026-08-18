@@ -68,6 +68,42 @@ public sealed class JsonUserDataStore : IUserDataStore
         return stamped;
     }
 
+    public async Task<bool> CompleteReminderAsync(
+        Guid reminderId,
+        CancellationToken cancellationToken = default)
+    {
+        var completed = false;
+        await MutateAsync(
+            data =>
+            {
+                var index = data.Reminders.FindIndex(item => item.Id == reminderId);
+                if (index < 0 || data.Reminders[index].IsCompleted)
+                {
+                    return;
+                }
+
+                // Igual que en el store en memoria: darlo por hecho también lo estampa como avisado,
+                // porque un pendiente que ya se cumplió no tiene por qué sonar más tarde.
+                data.Reminders[index] = data.Reminders[index] with
+                {
+                    IsCompleted = true,
+                    NotifiedAt = data.Reminders[index].NotifiedAt ?? DateTimeOffset.Now
+                };
+                completed = true;
+            },
+            cancellationToken).ConfigureAwait(false);
+        return completed;
+    }
+
+    public async Task<bool> DeleteReminderAsync(Guid reminderId, CancellationToken cancellationToken = default)
+    {
+        var removed = false;
+        await MutateAsync(
+            data => removed = data.Reminders.RemoveAll(item => item.Id == reminderId) > 0,
+            cancellationToken).ConfigureAwait(false);
+        return removed;
+    }
+
     public async Task<AgendaItem> AddAgendaItemAsync(
         string title,
         DateTimeOffset startsAt,
@@ -92,6 +128,28 @@ public sealed class JsonUserDataStore : IUserDataStore
     {
         var data = await ReadLockedAsync(cancellationToken).ConfigureAwait(false);
         return data.AgendaItems.OrderBy(item => item.StartsAt).ToArray();
+    }
+
+    public async Task<bool> MarkAgendaItemNotifiedAsync(
+        Guid agendaItemId,
+        DateTimeOffset notifiedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var stamped = false;
+        await MutateAsync(
+            data =>
+            {
+                var index = data.AgendaItems.FindIndex(item => item.Id == agendaItemId);
+                if (index < 0 || data.AgendaItems[index].NotifiedAt is not null)
+                {
+                    return;
+                }
+
+                data.AgendaItems[index] = data.AgendaItems[index] with { NotifiedAt = notifiedAt };
+                stamped = true;
+            },
+            cancellationToken).ConfigureAwait(false);
+        return stamped;
     }
 
     private static string GetDefaultPath()

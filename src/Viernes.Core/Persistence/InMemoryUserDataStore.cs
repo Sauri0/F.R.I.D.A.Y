@@ -51,6 +51,40 @@ public sealed class InMemoryUserDataStore : IUserDataStore
         }
     }
 
+    public Task<bool> CompleteReminderAsync(
+        Guid reminderId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var index = _reminders.FindIndex(item => item.Id == reminderId);
+            if (index < 0 || _reminders[index].IsCompleted)
+            {
+                return Task.FromResult(false);
+            }
+
+            // Se estampa también NotifiedAt: un recordatorio que se dio por hecho antes de vencer no
+            // tiene por qué sonar después. Sin esto, marcarlo como listo a las tres de la tarde no
+            // impedía el aviso de las cuatro.
+            _reminders[index] = _reminders[index] with
+            {
+                IsCompleted = true,
+                NotifiedAt = _reminders[index].NotifiedAt ?? DateTimeOffset.Now
+            };
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<bool> DeleteReminderAsync(Guid reminderId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            return Task.FromResult(_reminders.RemoveAll(item => item.Id == reminderId) > 0);
+        }
+    }
+
     public Task<AgendaItem> AddAgendaItemAsync(
         string title,
         DateTimeOffset startsAt,
@@ -82,6 +116,25 @@ public sealed class InMemoryUserDataStore : IUserDataStore
         {
             return Task.FromResult<IReadOnlyList<AgendaItem>>(
                 _agendaItems.OrderBy(item => item.StartsAt).ToArray());
+        }
+    }
+
+    public Task<bool> MarkAgendaItemNotifiedAsync(
+        Guid agendaItemId,
+        DateTimeOffset notifiedAt,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var index = _agendaItems.FindIndex(item => item.Id == agendaItemId);
+            if (index < 0 || _agendaItems[index].NotifiedAt is not null)
+            {
+                return Task.FromResult(false);
+            }
+
+            _agendaItems[index] = _agendaItems[index] with { NotifiedAt = notifiedAt };
+            return Task.FromResult(true);
         }
     }
 
