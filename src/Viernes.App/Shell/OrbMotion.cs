@@ -44,7 +44,31 @@ internal sealed class OrbMotion
     private const double MaxFrame = 0.05;
 
     private const double DragStiffness = 146;
-    private const double DragDamping = 15.5;
+
+    /// <summary>
+    /// Amortiguación del resorte del arrastre. Crítica: sigue a la mano sin pasarse.
+    /// </summary>
+    /// <remarks>
+    /// El fuente trae 15,5 y acá está en 2·√146 ≈ 24,2, que es el valor crítico para esa rigidez.
+    /// Es el único número de la física que no sale de la referencia, y se cambió porque el usuario
+    /// dijo que el arrastre se sentía «tosco» y «medio raro».
+    /// <para>
+    /// Con 15,5 el amortiguamiento relativo es ζ ≈ 0,64: <b>subamortiguado</b>. El orbe no sólo se
+    /// queda atrás de la mano —eso es el peso, y es deliberado— sino que al frenar la <em>pasa</em> y
+    /// vuelve. Arrastrando en círculos eso se lee como que el orbe orbita alrededor del cursor en vez
+    /// de colgar de él, que es exactamente «no sigue tanto el mouse, es medio raro».
+    /// </para>
+    /// <para>
+    /// En ζ = 1 la demora se conserva entera —la constante de tiempo pasa de 0,13 s a 0,083 s, sigue
+    /// habiendo retraso visible— y desaparece el sobrepaso. Es la diferencia entre algo que cuelga y
+    /// algo que rebota. El peso no era el sobrepaso.
+    /// </para>
+    /// <para>
+    /// El resorte de REPOSO (104/14,5, ζ ≈ 0,71) no se tocó: ahí el sobrepaso sí corresponde, porque
+    /// es el orbe acomodándose solo contra un borde y no siguiendo una mano.
+    /// </para>
+    /// </remarks>
+    private const double DragDamping = 24.17;
     private const double RestStiffness = 104;
     private const double RestDamping = 14.5;
     private const double FlyFriction = 0.075;
@@ -292,9 +316,14 @@ internal sealed class OrbMotion
     /// El resorte del arrastre: duro, para seguir al dedo, pero resorte al fin.
     /// </summary>
     /// <remarks>
-    /// Es más duro que el de reposo —146 contra 104— porque tiene que alcanzar la mano; y aun así se
-    /// queda atrás al arrancar y se pasa un poco al frenar. Esa demora <em>es</em> el peso del orbe.
-    /// Con <c>DragMove()</c> no había forma de tenerla: Windows pega la ventana al cursor.
+    /// Es más duro que el de reposo —146 contra 104— porque tiene que alcanzar la mano, y aun así se
+    /// queda atrás al arrancar. Esa demora <em>es</em> el peso del orbe: con <c>DragMove()</c> no
+    /// había forma de tenerla, porque Windows pega la ventana al cursor.
+    /// <para>
+    /// Lo que <b>no</b> es el peso es pasarse al frenar. Acá decía que se pasaba «un poco» y lo daba
+    /// por parte del efecto; no lo es. Ver <see cref="DragDamping"/>: la amortiguación es crítica y
+    /// el orbe llega al cursor sin cruzarlo.
+    /// </para>
     /// </remarks>
     private void StepDrag(double h)
     {

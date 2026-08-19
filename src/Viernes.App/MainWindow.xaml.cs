@@ -619,11 +619,23 @@ public partial class MainWindow : Window
         // borde entero, está en DesktopField.
         var bounds = _travel?.Bounds ?? Field().Reach(workArea, _motion.Position);
 
-        // Mientras se arrastra no se adopta ni se recorta. Adoptar sería leer la posición que este
-        // mismo bucle acaba de escribir, y recortar contra el área útil le sacaría al resorte
-        // justamente el sobrepaso que le da peso: el orbe tiene que poder pasarse del borde y volver.
-        if (!_motion.IsDragging)
+        // Mientras se arrastra, el objetivo se lee ACÁ y no en el manejador del mouse.
+        //
+        // Esa era la mitad del «se traba»: MouseMove llega por la cola del dispatcher, y el
+        // dispatcher es el mismo hilo que dibuja el cuerpo. Con la nube costando unos 11 ms por
+        // cuadro, los eventos del mouse se amontonan y llegan de a saltos, así que el resorte tiraba
+        // hacia un objetivo viejo durante varios cuadros y después pegaba el tirón. El cursor no
+        // necesita eventos: se pregunta al sistema y contesta siempre, cueste lo que cueste el
+        // cuadro anterior.
+        if (_motion.IsDragging)
         {
+            _motion.DragTo(PointerPosition() - _grab);
+        }
+        else
+        {
+            // Adoptar sería leer la posición que este mismo bucle acaba de escribir, y recortar
+            // contra el área útil le sacaría al resorte justamente el sobrepaso que le da peso: el
+            // orbe tiene que poder pasarse del borde y volver.
             AdoptExternalMove();
             _motion.ClampInto(bounds);
         }
@@ -1771,7 +1783,9 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _motion.DragTo(PointerPosition() - _grab);
+            // El objetivo lo pone el bucle de cuadro leyendo el cursor. Acá sólo se vigila que el
+            // botón siga apretado: poner el objetivo también desde este evento lo movería a un
+            // ritmo distinto del que lo consume, que es de dónde salían los tirones.
             return;
         }
 
