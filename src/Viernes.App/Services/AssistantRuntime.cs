@@ -298,6 +298,34 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     private int _ambientRunning;
 
     private DateTimeOffset _projectsReadAt;
+
+    /// <summary>
+    /// Cuánto se queda el orbe en «un proyecto te espera» antes de bajar al estado de siempre.
+    /// </summary>
+    /// <remarks>
+    /// Es un aviso, no una condición, y esa es toda la diferencia. Una sesión de Claude Code que
+    /// espera puede quedarse esperando toda la tarde, y sin este vencimiento el orbe quedaba violeta
+    /// toda la tarde: un aviso que no se va deja de ser un aviso y pasa a ser el fondo de pantalla.
+    /// Peor todavía, tapaba «guardia», que es donde se ve que está atenta al nombre — la única
+    /// información que el usuario mira todo el tiempo.
+    /// <para>
+    /// Vuelve a anunciarse cuando cambia <em>qué</em> proyecto espera, no cuando pasa el tiempo: si
+    /// arranca a esperar otro, eso es noticia nueva. Y no se pierde nada al bajar, porque el
+    /// desplegable de proyectos sigue estando: lo que se libera es el orbe, no el dato.
+    /// </para>
+    /// <para>
+    /// Los 45 s no salen del boceto. Los desplegables informativos de la referencia viven 7 s, pero
+    /// ésos aparecen adelante de la cara; un estado en un orbe de 108 px en un rincón necesita
+    /// sobrevivir a que mires para otro lado.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan ProjectNoticeLife = TimeSpan.FromSeconds(45);
+
+    /// <summary>Qué proyectos esperaban la última vez, para saber si lo que hay ahora es noticia.</summary>
+    private string _projectWaitingSignature = string.Empty;
+
+    /// <summary>Hasta cuándo el aviso de proyecto se queda con el orbe.</summary>
+    private DateTimeOffset _projectNoticeUntil;
     private volatile bool _missionWaiting;
     private volatile bool _missionRunning;
     private volatile bool _projectWaiting;
@@ -3435,7 +3463,11 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             return AssistantVisualState.WaitingForYou;
         }
 
-        if (_projectWaiting)
+        // Y acá el aviso vence. Que un proyecto esté esperando es cierto todo el tiempo que dure,
+        // pero ocupar el orbe con eso todo ese tiempo tapa «guardia» —lo único que el usuario mira
+        // siempre— con algo que además le debe otro, no ella. El dato sigue en el desplegable de
+        // proyectos; lo que se libera es el orbe.
+        if (_projectWaiting && DateTimeOffset.Now < _projectNoticeUntil)
         {
             return AssistantVisualState.ProjectWaiting;
         }
@@ -3508,9 +3540,23 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
                 // El propio Viernes queda afuera por la misma razón que en la herramienta: mirarse
                 // trabajando produce un lazo y no es lo que el usuario quiere seguir.
-                _projectWaiting = _projectWatcher
+                var esperando = _projectWatcher
                     .Recent(now, maximum: 8, excludeProjectContaining: "Viernes")
-                    .Any(session => session.Activity == SessionActivity.Esperando);
+                    .Where(session => session.Activity == SessionActivity.Esperando)
+                    .Select(session => session.Project)
+                    .OrderBy(project => project, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+
+                // La firma es QUIÉNES esperan, no cuántos: si el mismo proyecto sigue esperando, no
+                // hay noticia nueva que anunciar. Si arranca otro, sí.
+                var firma = string.Join('', esperando);
+                if (firma != _projectWaitingSignature)
+                {
+                    _projectWaitingSignature = firma;
+                    _projectNoticeUntil = firma.Length == 0 ? default : now + ProjectNoticeLife;
+                }
+
+                _projectWaiting = firma.Length > 0;
             }
 
             PublishResting();
