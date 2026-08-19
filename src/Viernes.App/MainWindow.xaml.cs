@@ -12,7 +12,11 @@ using Viernes.App.Services;
 using Viernes.App.Shell;
 using Viernes.App.ViewModels;
 using Binding = System.Windows.Data.Binding;
+
+// El proyecto arrastra WinForms por la bandeja y los monitores, así que el menú existe dos veces.
+using ContextMenu = System.Windows.Controls.ContextMenu;
 using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using MenuItem = System.Windows.Controls.MenuItem;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using Point = System.Windows.Point;
@@ -95,6 +99,45 @@ public partial class MainWindow : Window
     private string _currentMonitor = string.Empty;
     private int _stableTicks;
 
+    /// <summary>
+    /// Cada cuánto se pregunta si lo que está adelante ocupa el monitor entero.
+    /// </summary>
+    /// <remarks>
+    /// Un segundo. Son tres llamadas al sistema y una comparación de rectángulos, y entrar o salir de
+    /// pantalla completa es algo que el usuario hace, no algo que pasa sesenta veces por segundo.
+    /// <para>
+    /// Se eligió preguntar y no engancharse a <c>SetWinEventHook</c> por costo de riesgo, no de CPU:
+    /// un <em>hook</em> global mete una llamada de vuelta del sistema en el hilo de la interfaz, y si
+    /// el delegado se recolecta el proceso se cae. Un segundo de demora en esconderse no lo nota
+    /// nadie; ese cuelgue sí.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan FullScreenInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>Cuánto dura la píldora sola sobre una pantalla completa antes de retraerse al filete.</summary>
+    /// <remarks>Cuatro segundos, del LEEME de la referencia.</remarks>
+    private static readonly TimeSpan UrgentPillWindow = TimeSpan.FromSeconds(4);
+
+    private System.Windows.Threading.DispatcherTimer? _fullScreenTimer;
+    private UrgentSliver? _sliver;
+    private bool _sliverShown;
+    private bool _fullScreen;
+    private bool _hiddenByFullScreen;
+
+    /// <summary>Pasó algo urgente mientras había una pantalla completa adelante, y todavía no lo vio.</summary>
+    private bool _urgentPending;
+
+    /// <summary>Mientras esto está puesto se dibuja la píldora y nada más: ni cuerpo ni desplegable.</summary>
+    private bool _pillOnly;
+
+    private System.Windows.Threading.DispatcherTimer? _pillTimer;
+
+    /// <summary>La mudanza de monitor en vuelo, o <c>null</c> si el orbe está donde vive.</summary>
+    private MonitorTravel? _travel;
+
+    /// <summary>El medio segundo entre irse por un borde y volver por el otro.</summary>
+    private System.Windows.Threading.DispatcherTimer? _crossTimer;
+
     internal MainWindow(MainViewModel viewModel, WindowPlacementStore placementStore)
     {
         InitializeComponent();
@@ -118,6 +161,7 @@ public partial class MainWindow : Window
         ApplyOrbShape(viewModel.OrbShape);
         ApplySide(opensRight: true, force: true);
         MeasurePillSlack();
+        BuildOrbMenu();
 
         // Los tres se sueltan en Window_Closed. El ViewModel vive más que la ventana —lo crea la
         // aplicación y sobrevive a esconderse en la bandeja—, así que una ventana cerrada que
@@ -126,7 +170,79 @@ public partial class MainWindow : Window
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
         _viewModel.StepAdvanced += ViewModelOnStepAdvanced;
         _viewModel.MoodShown += ViewModelOnMoodShown;
+
+        // El cuarto: un recordatorio que llega con una pantalla completa adelante es lo único urgente
+        // que el modelo de vista no publica como propiedad.
+        _viewModel.ActivationRequested += ViewModelOnActivationRequested;
     }
+
+    /// <summary>
+    /// El menú del botón derecho: la puerta de todo lo que el usuario abre a mano.
+    /// </summary>
+    /// <remarks>
+    /// Se arma en código y no en el XAML por una razón concreta: acá <see cref="PanelKind"/> es un
+    /// tipo y el compilador verifica cada entrada. En el marcado sería una cadena —igual que el
+    /// <c>ConverterParameter</c> de cada panel—, y una cadena mal escrita no la detecta nadie: el
+    /// menú abre un desplegable vacío y nada avisa.
+    /// <para>
+    /// No están los diecinueve. Los que se deducen del estado —escribir, trabajando, permiso,
+    /// política, sin red, recordatorio— llegan solos y ponerlos acá sería pedirle al usuario que
+    /// invoque un error. Presupuesto tampoco: es una autorización de gasto, y una autorización se
+    /// pide cuando hace falta, no se va a buscar a un menú.
+    /// </para>
+    /// </remarks>
+    private void BuildOrbMenu()
+    {
+        var menu = new ContextMenu
+        {
+            Style = (Style)FindResource("MenuDelOrbe")
+        };
+
+        AddPanelItem(menu, "Misiones abiertas", PanelKind.Misiones);
+        AddPanelItem(menu, "La pregunta pendiente", PanelKind.Pregunta);
+        AddPanelItem(menu, "Proyectos", PanelKind.Proyectos);
+        AddSeparator(menu);
+        AddPanelItem(menu, "Lo que aprendí de vos", PanelKind.Aprendido);
+        AddPanelItem(menu, "Permisos que me diste", PanelKind.Autonomia);
+        AddSeparator(menu);
+        AddPanelItem(menu, "Cuánto llevo gastado", PanelKind.Consumo);
+        AddPanelItem(menu, "Gastos", PanelKind.Gastos);
+        AddPanelItem(menu, "Caja", PanelKind.Caja);
+        AddSeparator(menu);
+        AddPanelItem(menu, "Muestras", PanelKind.Muestras);
+        AddPanelItem(menu, "Música", PanelKind.Musica);
+        AddSeparator(menu);
+        AddSimpleItem(menu, "Guardarse en la bandeja", HideToTray);
+
+        OrbDragSurface.ContextMenu = menu;
+    }
+
+    private void AddPanelItem(ContextMenu menu, string header, PanelKind kind)
+    {
+        var item = new MenuItem
+        {
+            Header = header,
+            Style = (Style)FindResource("ItemDelMenu")
+        };
+
+        item.Click += (_, _) => _viewModel.ShowPanel(kind);
+        menu.Items.Add(item);
+    }
+
+    private void AddSimpleItem(ContextMenu menu, string header, Action action)
+    {
+        var item = new MenuItem
+        {
+            Header = header,
+            Style = (Style)FindResource("ItemDelMenu")
+        };
+
+        item.Click += (_, _) => action();
+        menu.Items.Add(item);
+    }
+
+    private void AddSeparator(ContextMenu menu) =>
+        menu.Items.Add(new Separator { Style = (Style)FindResource("RayaDelMenu") });
 
     /// <summary>El latido sólo existe en la gota: la nube tiene su propio vocabulario y no lo comparte.</summary>
     private void ViewModelOnStepAdvanced(object? sender, EventArgs e) => OrbHost.Children
@@ -146,6 +262,20 @@ public partial class MainWindow : Window
         foreach (var body in Bodies())
         {
             body.ShowMood(mood);
+        }
+
+        if (mood == OrbMood.Urgente)
+        {
+            MarkUrgent();
+        }
+    }
+
+    /// <summary>Un recordatorio llegó a su hora. Con una pantalla completa adelante, es urgente.</summary>
+    private void ViewModelOnActivationRequested(object? sender, ShellActivationRequest request)
+    {
+        if (request.Reason == ShellActivationReason.Reminder)
+        {
+            MarkUrgent();
         }
     }
 
@@ -259,6 +389,7 @@ public partial class MainWindow : Window
         StartSweep();
         StartFollowingActiveMonitor();
         StartWatchingAmbience();
+        StartWatchingFullScreen();
         CompositionTarget.Rendering += OnRendering;
 
         try
@@ -303,18 +434,28 @@ public partial class MainWindow : Window
     /// </summary>
     private void RestoreOrbPlacement()
     {
-        var workArea = CurrentWorkArea;
-        var bounds = ShellLayout.OrbBounds(workArea);
-
+        // Primero se restaura y DESPUÉS se mide. El área útil que importa es la del monitor donde
+        // quedó el orbe, y leerla antes es leer la del monitor donde la ventana estaba sin colocar.
+        // Con el orbe guardado en una pantalla secundaria a la izquierda —coordenadas negativas—,
+        // eso lo recortaba contra los límites del primario y reaparecía pegado al borde izquierdo
+        // del monitor 1 en cada arranque.
         _placementStore.Restore(this);
         var orb = new Point(Left, Top);
+
+        var screen = ScreenAt(orb) ?? System.Windows.Forms.Screen.PrimaryScreen;
+        var workArea = screen is null ? SystemParameters.WorkArea : ToLogical(screen.WorkingArea);
+        var bounds = ShellLayout.OrbBounds(workArea);
 
         // Sin archivo guardado, el almacén propone la esquina de una ventana del tamaño de ésta. Como
         // acá la ventana es mucho más grande que el orbe, esa esquina deja al orbe lejos del borde:
         // en ese caso —y sólo en ese— se prefiere el rincón de abajo a la derecha, que es donde un
         // asistente de escritorio espera aparecer la primera vez.
-        var fallbackLeft = workArea.Right - ShellLayout.WindowWidth - 24;
-        var fallbackTop = workArea.Bottom - ShellLayout.WindowHeight - 24;
+        //
+        // Se compara contra el área del monitor primario porque es la que usó el almacén para
+        // proponerla; medirla en otro monitor haría que la comparación nunca dé.
+        var primary = SystemParameters.WorkArea;
+        var fallbackLeft = primary.Right - ShellLayout.WindowWidth - 24;
+        var fallbackTop = primary.Bottom - ShellLayout.WindowHeight - 24;
         if (Math.Abs(orb.X - fallbackLeft) < 1 && Math.Abs(orb.Y - fallbackTop) < 1)
         {
             orb = new Point(bounds.Right, bounds.Bottom);
@@ -347,7 +488,10 @@ public partial class MainWindow : Window
         }
 
         var workArea = CachedWorkArea();
-        var bounds = ShellLayout.OrbBounds(workArea);
+
+        // Mudándose, el orbe puede estar en cualquiera de los dos monitores. Recortarlo al de origen
+        // cuadro a cuadro es lo que impedía que el viaje arrancara.
+        var bounds = _travel?.Bounds ?? ShellLayout.OrbBounds(workArea);
 
         if (_motion.IsDragging)
         {
@@ -360,6 +504,7 @@ public partial class MainWindow : Window
             AdoptExternalMove();
             _motion.ClampInto(bounds);
             _motion.Step(dt, bounds);
+            SettleTravel();
             WriteWindowPosition();
         }
 
@@ -446,6 +591,19 @@ public partial class MainWindow : Window
         OrbDragSurface.IsHitTestVisible = !gone;
         OrbDragSurface.Visibility = gone ? Visibility.Hidden : Visibility.Visible;
         OrbOverlay.Visibility = gone ? Visibility.Hidden : Visibility.Visible;
+
+        if (!_pillOnly)
+        {
+            return;
+        }
+
+        // Un aviso urgente sobre una pantalla completa muestra la píldora y nada más. El cuerpo
+        // queda apagado aunque la presencia diga otra cosa, y no se puede tocar: aparecer arriba de
+        // un juego con una superficie que agarra clics es peor que no avisar.
+        OrbDragSurface.IsHitTestVisible = false;
+        OrbDragSurface.Visibility = Visibility.Hidden;
+        OrbOverlay.Visibility = Visibility.Visible;
+        OrbOverlay.Opacity = 1;
     }
 
     /// <summary>
@@ -509,7 +667,12 @@ public partial class MainWindow : Window
             _fastMove = _motion.Speed > 340;
         }
 
+        // El desplegable NO se abre nunca con una pantalla completa adelante. La condición vive acá,
+        // del lado de la ventana, y no en el modelo de vista: el modelo abre el panel de permiso por
+        // su cuenta cuando llega una confirmación, y si esta regla estuviera allá habría que
+        // acordarse de repetirla en cada camino que abre un panel.
         var shouldShow = _viewModel.IsPanelOpen &&
+            !_fullScreen &&
             !_presence.IsGone &&
             !_motion.IsDragging &&
             !_fastMove;
@@ -637,13 +800,16 @@ public partial class MainWindow : Window
 
         _followTimer.Tick += (_, _) =>
         {
-            if (_viewModel.IsPanelOpen || _motion.IsDragging || !IsVisible)
+            // También mientras hay una mudanza en vuelo o una pantalla completa adelante: en el
+            // primer caso ya se está yendo a algún lado, en el segundo no hay nada que mover.
+            if (_viewModel.IsPanelOpen || _motion.IsDragging || !IsVisible ||
+                _travel is not null || _fullScreen || _hidingToTray)
             {
                 _stableTicks = 0;
                 return;
             }
 
-            var (key, workArea) = Services.MonitorSlots.MonitorUnderCursor();
+            var (key, _) = Services.MonitorSlots.MonitorUnderCursor();
             if (key == _currentMonitor)
             {
                 _stableTicks = 0;
@@ -659,23 +825,356 @@ public partial class MainWindow : Window
 
             _stableTicks = 0;
             _monitors.Remember(_currentMonitor, _motion.Position);
-
-            var destination = _monitors.SlotFor(
-                key,
-                workArea,
-                new Size(ShellLayout.OrbSize, ShellLayout.OrbSize));
-
-            var bounds = ShellLayout.OrbBounds(workArea);
-            _motion.Teleport(new Point(
-                Math.Clamp(destination.X, bounds.Left, bounds.Right),
-                Math.Clamp(destination.Y, bounds.Top, bounds.Bottom)));
-            ApplySide(ShellLayout.ShouldOpenRight(_motion.Position, workArea), force: false);
-            WriteWindowPosition();
-            _currentMonitor = key;
-            SaveOrbPlacement();
+            MoveToMonitor(key, System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position));
         };
 
         _followTimer.Start();
+    }
+
+    /// <summary>
+    /// La mudanza: viaja con estela si el otro monitor es vecino, y si no se va por el borde y vuelve
+    /// por el otro.
+    /// </summary>
+    /// <remarks>
+    /// Nunca cruza contenido. Entre dos pantallas que no se tocan hay escritorio, ventanas y a veces
+    /// un hueco del escritorio virtual; atravesarlo en línea recta se lee como un objeto pasando por
+    /// encima de todo lo que el usuario está mirando.
+    /// <para>
+    /// El destino se calcula en unidades independientes del DPI, que es el espacio donde viven
+    /// <c>Left</c> y <c>Top</c>: <c>MonitorSlots</c> informa píxeles físicos, y pasárselos tal cual a
+    /// la geometría del orbe sólo funciona si las dos pantallas están al 100 %. Acá se convierten. Lo
+    /// que <b>no</b> está resuelto es la conversión entre dos monitores de escalas distintas: la
+    /// escala sale de la ventana, que está parada en uno de los dos.
+    /// </para>
+    /// </remarks>
+    private void MoveToMonitor(string key, System.Windows.Forms.Screen target)
+    {
+        var toWork = ToLogical(target.WorkingArea);
+        var toBounds = ShellLayout.OrbBounds(toWork);
+        var slot = _monitors.SlotFor(key, toWork, new Size(ShellLayout.OrbSize, ShellLayout.OrbSize));
+        var destination = new Point(
+            Math.Clamp(slot.X, toBounds.Left, toBounds.Right),
+            Math.Clamp(slot.Y, toBounds.Top, toBounds.Bottom));
+
+        _currentMonitor = key;
+        var adjacent = MonitorMove.AreAdjacent(CurrentMonitorBounds, ToLogical(target.Bounds));
+
+        // Queda escrito por qué viajó como viajó: mirando la pantalla, «se fue volando» y «salió por
+        // el borde» se distinguen, pero por qué eligió uno u otro no se ve.
+        Diagnostics.RuntimeTrace.Write(
+            "monitor.mudanza",
+            $"{(adjacent ? "vecino · viaja con estela" : "lejos · sale por el borde")} → " +
+            $"({destination.X:0};{destination.Y:0})");
+
+        if (adjacent)
+        {
+            // Los límites de los dos monitores juntos mientras dura: el recorte por cuadro lo
+            // devolvería al de origen y el viaje no arrancaría nunca.
+            _travel = new MonitorTravel(
+                Rect.Union(ShellLayout.OrbBounds(CurrentWorkArea), toBounds),
+                destination,
+                DateTime.UtcNow + MonitorMove.Longest);
+            _motion.Launch(destination, MonitorMove.Kick, MonitorMove.Lift);
+            return;
+        }
+
+        LeaveByTheEdge(destination, toWork);
+    }
+
+    /// <summary>
+    /// Se va por el borde más cercano y vuelve por el otro lado, medio segundo después.
+    /// </summary>
+    /// <remarks>
+    /// Es la misma retirada de «guardarse»: <see cref="OrbPresence.Esconder"/> elige el borde por el
+    /// que se va midiendo cuál está más cerca. En el fuente de la referencia hay dos líneas que fijan
+    /// esa dirección a mano justo antes de llamar a <c>esconder()</c>, y no hacen nada: <c>esconder()</c>
+    /// la recalcula. Se copió el comportamiento, no las dos líneas muertas.
+    /// </remarks>
+    private void LeaveByTheEdge(Point destination, Rect targetWorkArea)
+    {
+        var centre = new Point(
+            _motion.Position.X + ShellLayout.OrbSize / 2,
+            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        _presence.Esconder(centre, CurrentWorkArea);
+
+        _crossTimer?.Stop();
+        _crossTimer = new System.Windows.Threading.DispatcherTimer { Interval = MonitorMove.EdgeGap };
+        _crossTimer.Tick += (_, _) =>
+        {
+            _crossTimer?.Stop();
+            _crossTimer = null;
+
+            _motion.Teleport(destination);
+            ApplySide(ShellLayout.ShouldOpenRight(destination, targetWorkArea), force: false);
+            WriteWindowPosition();
+            _presence.Aparecer();
+            SaveOrbPlacement();
+        };
+
+        _crossTimer.Start();
+    }
+
+    /// <summary>
+    /// Cierra la mudanza en vuelo cuando el orbe llegó, o cuando se acabó el tiempo.
+    /// </summary>
+    /// <remarks>
+    /// Mientras dura, el orbe tiene puestos los límites de los dos monitores: si esto no cerrara
+    /// nunca, quedaría libre de pararse en el medio de la costura entre las dos pantallas.
+    /// </remarks>
+    private void SettleTravel()
+    {
+        if (_travel is not { } travel)
+        {
+            return;
+        }
+
+        var expired = DateTime.UtcNow > travel.DeadlineUtc;
+        if (_motion.IsFlying && !expired)
+        {
+            return;
+        }
+
+        // El vuelo terminó donde lo dejó la inercia; el resorte de reposo lo lleva al lugar exacto.
+        _motion.Nudge(travel.Destination);
+
+        var arrived = (_motion.Position - travel.Destination).Length < 3 && _motion.Speed < 40;
+        if (!arrived && !expired)
+        {
+            return;
+        }
+
+        _travel = null;
+        SaveOrbPlacement();
+        Diagnostics.RuntimeTrace.Write(
+            "monitor.mudanza",
+            $"{(arrived ? "llegó" : "se quedó")} en ({_motion.Position.X:0};{_motion.Position.Y:0})");
+    }
+
+    /// <summary>
+    /// El vigía de pantalla completa.
+    /// </summary>
+    /// <remarks>
+    /// Tres reglas, y las tres son fáciles de romper sin darse cuenta:
+    /// <list type="number">
+    /// <item><b>Nunca robar el foco.</b> Si hay algo en pantalla completa el usuario está mirando
+    /// eso; una ventana que se pone adelante y se lleva el teclado es lo peor que puede hacer un
+    /// asistente de escritorio. Acá no se llama a <c>Activate</c>, ni a <c>Show</c>, ni a
+    /// <c>Focus</c>: sólo se apaga el dibujo.</item>
+    /// <item><b>El desplegable no se abre nunca.</b> Se apaga en
+    /// <see cref="UpdatePanelVisibility"/>, del lado de la ventana y no del modelo de vista, para
+    /// que valga aunque el modelo decida abrirlo por su cuenta —una confirmación pendiente lo abre
+    /// sin que nadie lo pida—.</item>
+    /// <item><b>Sin nada urgente no queda nada.</b> El filete es lo único, y sólo si hay
+    /// algo.</item>
+    /// </list>
+    /// <para>
+    /// La ventana no se oculta con <c>Hide</c>: eso es «guardarse en la bandeja», lo maneja
+    /// <c>App</c> y cambia lo que dice el menú del área de notificación. Acá se apaga el orbe y se
+    /// suelta el <c>Topmost</c>, con lo que la ventana queda transparente entera y sin píxeles con
+    /// alfa: los clics la atraviesan y no hay nada que ver.
+    /// </para>
+    /// </remarks>
+    private void StartWatchingFullScreen()
+    {
+        _fullScreenTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = FullScreenInterval
+        };
+
+        _fullScreenTimer.Tick += (_, _) => CheckFullScreen();
+        _fullScreenTimer.Start();
+        CheckFullScreen();
+    }
+
+    private void CheckFullScreen()
+    {
+        // Guardado en la bandeja no es asunto de esto: quien lo guardó decide cuándo vuelve. Se mira
+        // también la retirada en curso, que dura media pantalla y todavía informa IsVisible.
+        if (!IsVisible || _hidingToTray)
+        {
+            return;
+        }
+
+        var full = FullScreenWatch.IsForegroundFullScreen(
+            new WindowInteropHelper(this).Handle,
+            OrbScreen());
+        if (full == _fullScreen)
+        {
+            UpdateSliver();
+            return;
+        }
+
+        _fullScreen = full;
+
+        // Queda en la bitácora porque «Viernes desapareció» y «Viernes no se esconde» son el mismo
+        // reporte visto desde los dos lados, y sin esta línea hay que adivinar cuál de los dos es.
+        Diagnostics.RuntimeTrace.Write("pantalla.completa", full ? "entra" : "sale");
+
+        if (full)
+        {
+            EnterFullScreen();
+        }
+        else
+        {
+            LeaveFullScreen();
+        }
+    }
+
+    private void EnterFullScreen()
+    {
+        _viewModel.IsUnderFullScreen = true;
+        _viewModel.ClosePanel();
+
+        var centre = new Point(
+            _motion.Position.X + ShellLayout.OrbSize / 2,
+            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        _presence.Esconder(centre, CurrentWorkArea);
+        _hiddenByFullScreen = true;
+
+        // Soltar el Topmost no es cosmético: una ventana siempre-arriba encima de un juego en
+        // pantalla completa exclusiva lo puede sacar de ese modo, y eso se ve como un parpadeo del
+        // juego cada vez que Viernes se dibuja.
+        Topmost = false;
+        UpdateSliver();
+    }
+
+    private void LeaveFullScreen()
+    {
+        // Ya no está en pantalla completa: si había algo urgente, lo va a ver entero. El filete
+        // cumplió y se apaga.
+        _viewModel.IsUnderFullScreen = false;
+        _urgentPending = false;
+        _pillOnly = false;
+        _pillTimer?.Stop();
+        UpdateSliver();
+
+        Topmost = true;
+        if (!_hiddenByFullScreen)
+        {
+            return;
+        }
+
+        _hiddenByFullScreen = false;
+        ShowWithoutStealingFocus();
+    }
+
+    /// <summary>
+    /// Algo urgente pasó. Con una pantalla completa adelante, se ve la píldora y nada más.
+    /// </summary>
+    /// <remarks>
+    /// Nunca el desplegable y nunca el foco: sólo el nombre del estado flotando donde estaría el
+    /// orbe. A los cuatro segundos se retrae al filete, que es lo que dice el LEEME.
+    /// <para>
+    /// Fuera de pantalla completa no hace nada, y está bien que así sea: ahí el orbe entero ya está
+    /// a la vista y no hay nada que anunciar de otra manera.
+    /// </para>
+    /// </remarks>
+    private void MarkUrgent()
+    {
+        if (!_fullScreen)
+        {
+            return;
+        }
+
+        _urgentPending = true;
+        _pillOnly = true;
+
+        // Vuelve a estar arriba, y sólo ahora: el orbe soltó el Topmost al esconderse, y sin
+        // recuperarlo la píldora se dibuja debajo del video y no la ve nadie. Es el único momento en
+        // que Viernes se pone adelante de una pantalla completa, y aun así no toma el foco.
+        Topmost = true;
+        Diagnostics.RuntimeTrace.Write("pantalla.completa", "aviso urgente · sólo la píldora");
+
+        // Los cuatro segundos van en su propio reloj y no en el bucle de cuadro. Escondido no hay
+        // nada que dibujar, WPF deja de componer y CompositionTarget.Rendering deja de dispararse:
+        // contando ahí, la píldora se quedaba puesta para siempre y el filete no llegaba nunca.
+        _pillTimer ??= CreatePillTimer();
+        _pillTimer.Stop();
+        _pillTimer.Start();
+        UpdateSliver();
+    }
+
+    private System.Windows.Threading.DispatcherTimer CreatePillTimer()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = UrgentPillWindow };
+        timer.Tick += (_, _) => RetractUrgentPill();
+        return timer;
+    }
+
+    /// <summary>
+    /// Retrae la píldora al filete cuando se cumplieron los cuatro segundos.
+    /// </summary>
+    /// <remarks>
+    /// Vuelve a esconder la presencia, y eso no es redundante: el pedido de presencia que dispara el
+    /// aviso lo atiende también <c>App</c>, que llama a <c>ShowWithoutStealingFocus</c> y con eso el
+    /// orbe empieza a volver. Mientras dura la píldora no se nota —el cuerpo está tapado a mano—,
+    /// pero al soltar esa tapa aparecería entero encima del juego. Sin esta línea, el aviso urgente
+    /// termina haciendo justo lo que la regla prohíbe.
+    /// </remarks>
+    private void RetractUrgentPill()
+    {
+        _pillTimer?.Stop();
+        if (!_pillOnly)
+        {
+            return;
+        }
+
+        _pillOnly = false;
+
+        if (_fullScreen)
+        {
+            var centre = new Point(
+                _motion.Position.X + ShellLayout.OrbSize / 2,
+                _motion.Position.Y + ShellLayout.OrbSize / 2);
+            _presence.Esconder(centre, CurrentWorkArea);
+            _hiddenByFullScreen = true;
+
+            // Y suelta el frente otra vez: lo que queda es el filete, que es una ventana propia.
+            Topmost = false;
+        }
+
+        UpdateSliver();
+    }
+
+    /// <summary>
+    /// Muestra u oculta el filete. Se llama en cada transición, no por cuadro.
+    /// </summary>
+    /// <remarks>
+    /// Mostrar y arrancar la respiración están del lado de la transición a propósito: llamarlos en
+    /// cada tic del vigía reiniciaría la animación una vez por segundo, y una respiración que se
+    /// reinicia no respira, parpadea.
+    /// </remarks>
+    private void UpdateSliver()
+    {
+        var shouldShow = _fullScreen && _urgentPending && !_pillOnly;
+        if (!shouldShow)
+        {
+            if (_sliverShown)
+            {
+                _sliverShown = false;
+                _sliver?.Hide();
+            }
+
+            return;
+        }
+
+        _sliver ??= new UrgentSliver();
+        _sliver.SnapNear(
+            new Rect(_motion.Position.X, _motion.Position.Y, ShellLayout.OrbSize, ShellLayout.OrbSize),
+            CurrentMonitorBounds,
+            _viewModel.State);
+
+        if (_sliverShown)
+        {
+            return;
+        }
+
+        _sliverShown = true;
+        _sliver.Show();
+        _sliver.StartBreathing();
+        Diagnostics.RuntimeTrace.Write(
+            "pantalla.completa",
+            $"filete de 3 px en ({_sliver.Left:0};{_sliver.Top:0}) sobre {CurrentMonitorBounds}");
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
@@ -695,12 +1194,21 @@ public partial class MainWindow : Window
         CompositionTarget.Rendering -= OnRendering;
         _followTimer?.Stop();
         _ambienceTimer?.Stop();
+        _fullScreenTimer?.Stop();
+        _pillTimer?.Stop();
+        _crossTimer?.Stop();
 
-        // Los tres, no uno. Se soltaban sólo los cambios de propiedad y quedaban colgados el latido
-        // y el ánimo, que capturan el árbol visual de esta ventana.
+        // El filete es una ventana aparte: si no se cierra, el proceso no termina nunca.
+        _sliver?.Close();
+        _sliver = null;
+        _sliverShown = false;
+
+        // Los cuatro, no uno. Se soltaban sólo los cambios de propiedad y quedaban colgados el
+        // latido, el ánimo y el pedido de presencia, que capturan el árbol visual de esta ventana.
         _viewModel.PropertyChanged -= ViewModelOnPropertyChanged;
         _viewModel.StepAdvanced -= ViewModelOnStepAdvanced;
         _viewModel.MoodShown -= ViewModelOnMoodShown;
+        _viewModel.ActivationRequested -= ViewModelOnActivationRequested;
     }
 
     private void ViewModelOnPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -712,6 +1220,12 @@ public partial class MainWindow : Window
         else if (e.PropertyName == nameof(MainViewModel.OrbShape))
         {
             ApplyOrbShape(_viewModel.OrbShape);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.IsConfirmationVisible) &&
+            _viewModel.IsConfirmationVisible)
+        {
+            // Algo está esperando una decisión del usuario: es lo más urgente que hay.
+            MarkUrgent();
         }
     }
 
@@ -904,29 +1418,103 @@ public partial class MainWindow : Window
         {
             try
             {
-                var handle = new WindowInteropHelper(this).Handle;
-                var screen = handle == nint.Zero
-                    ? System.Windows.Forms.Screen.PrimaryScreen
-                    : System.Windows.Forms.Screen.FromHandle(handle);
-                if (screen is null)
-                {
-                    return SystemParameters.WorkArea;
-                }
-
-                // WinForms informa píxeles físicos; WPF trabaja en unidades independientes del DPI.
-                var dpi = VisualTreeHelper.GetDpi(this);
-                var area = screen.WorkingArea;
-                return new Rect(
-                    area.Left / dpi.DpiScaleX,
-                    area.Top / dpi.DpiScaleY,
-                    area.Width / dpi.DpiScaleX,
-                    area.Height / dpi.DpiScaleY);
+                var screen = OrbScreen();
+                return screen is null ? SystemParameters.WorkArea : ToLogical(screen.WorkingArea);
             }
             catch (Exception)
             {
                 return SystemParameters.WorkArea;
             }
         }
+    }
+
+    /// <summary>
+    /// En qué monitor está <b>el orbe</b>, que no siempre es en el que está la ventana.
+    /// </summary>
+    /// <remarks>
+    /// La ventana mide 528 de ancho —el orbe más el lugar del desplegable más el aire de las
+    /// sombras— y el orbe mide 108. Con el orbe a veinte píxeles de la costura entre dos pantallas,
+    /// la ventana está mayormente del otro lado, y preguntarle a ella devuelve el monitor
+    /// equivocado.
+    /// <para>
+    /// Eso no era teórico: al mudarse a un destino cerca de la costura, el orbe llegaba, la ventana
+    /// quedaba mayormente en el monitor de origen, el lado del desplegable se calculaba con el área
+    /// útil de <em>ése</em> y se espejaba, lo que corría la ventana 368 px más hacia allá, lo que
+    /// confirmaba el monitor equivocado, y el recorte por cuadro terminaba devolviendo el orbe al
+    /// borde de donde había salido. Se veía como que la mudanza «rebotaba».
+    /// </para>
+    /// <para>
+    /// Antes de la primera escritura de posición no hay orbe todavía: ahí sí manda la ventana.
+    /// </para>
+    /// </remarks>
+    private System.Windows.Forms.Screen? OrbScreen()
+    {
+        if (double.IsNaN(_writtenLeft))
+        {
+            var handle = new WindowInteropHelper(this).Handle;
+            return handle == nint.Zero
+                ? System.Windows.Forms.Screen.PrimaryScreen
+                : System.Windows.Forms.Screen.FromHandle(handle);
+        }
+
+        return ScreenAt(new Point(
+            _motion.Position.X + (ShellLayout.OrbSize / 2),
+            _motion.Position.Y + (ShellLayout.OrbSize / 2)));
+    }
+
+    /// <summary>En qué monitor cae un punto. <c>Screen</c> habla en píxeles físicos; el orbe, no.</summary>
+    private System.Windows.Forms.Screen? ScreenAt(Point logical)
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        return System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(
+            (int)(logical.X * dpi.DpiScaleX),
+            (int)(logical.Y * dpi.DpiScaleY)));
+    }
+
+    /// <summary>
+    /// Los límites del monitor donde está el orbe, barra de tareas incluida.
+    /// </summary>
+    /// <remarks>
+    /// El filete de pantalla completa se apoya contra esto y no contra el área útil: en pantalla
+    /// completa la barra de tareas no está, y usar el área útil dejaría el filete flotando a unos
+    /// píxeles del borde real.
+    /// </remarks>
+    private Rect CurrentMonitorBounds
+    {
+        get
+        {
+            try
+            {
+                var screen = OrbScreen();
+                return screen is null ? SystemParameters.WorkArea : ToLogical(screen.Bounds);
+            }
+            catch (Exception)
+            {
+                return SystemParameters.WorkArea;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pasa un rectángulo de WinForms —píxeles físicos— al espacio en el que viven <c>Left</c> y
+    /// <c>Top</c>.
+    /// </summary>
+    /// <remarks>
+    /// WinForms informa píxeles físicos; WPF trabaja en unidades independientes del DPI. La escala
+    /// sale de <em>esta</em> ventana, así que el resultado es correcto para el monitor donde está
+    /// parada. <b>Con dos monitores de escalas distintas, un rectángulo del otro monitor convertido
+    /// con esta escala queda mal</b>; no hay forma de arreglarlo sin saber a qué espacio pertenece
+    /// cada número, y eso pide medirlo con dos pantallas de escalas distintas, cosa que acá no se
+    /// pudo hacer.
+    /// </remarks>
+    private Rect ToLogical(System.Drawing.Rectangle physical)
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        return new Rect(
+            physical.Left / dpi.DpiScaleX,
+            physical.Top / dpi.DpiScaleY,
+            physical.Width / dpi.DpiScaleX,
+            physical.Height / dpi.DpiScaleY);
     }
 
     /// <summary>
@@ -1056,6 +1644,24 @@ public partial class MainWindow : Window
         {
             e.Handled = true;
             _viewModel.SendCommand.Execute(null);
+        }
+    }
+
+    /// <summary>
+    /// Enter contesta la pregunta pendiente, igual que en el campo de escribir.
+    /// </summary>
+    /// <remarks>
+    /// Es el mismo gesto en los dos campos de texto que tiene la interfaz. Que uno mande con Enter y
+    /// el otro obligue a apuntarle al botón se aprende a los golpes.
+    /// </remarks>
+    private void AnswerTextBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter &&
+            Keyboard.Modifiers == ModifierKeys.None &&
+            _viewModel.Board.AnswerCommand.CanExecute(null))
+        {
+            e.Handled = true;
+            _viewModel.Board.AnswerCommand.Execute(null);
         }
     }
 

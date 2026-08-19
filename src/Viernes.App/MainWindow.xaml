@@ -152,6 +152,107 @@
             <Setter Property="Foreground" Value="#FF8C8C95" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
+
+        <!--
+            Los tres niveles de un permiso, uno al lado del otro. Son tres botones y no un control que
+            va rotando: rotando, para llegar a «nunca» hay que pasar por «lo hace sola», y ése es
+            exactamente el estado por el que no se quiere pasar ni un instante.
+        -->
+        <Style x:Key="Segmento" TargetType="Button" BasedOn="{StaticResource BotonTenue}">
+            <Setter Property="Height" Value="21" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="FontSize" Value="8.5" />
+            <Setter Property="Margin" Value="3,0,0,0" />
+        </Style>
+
+        <!-- Una fila de lista: la línea de abajo del separador y nada más. -->
+        <Style x:Key="Separador" TargetType="Border">
+            <Setter Property="VerticalAlignment" Value="Bottom" />
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Background" Value="#0DFFFFFF" />
+        </Style>
+
+        <!-- La columna angosta de la izquierda: un identificador, una rama, un estado. -->
+        <Style x:Key="Guia" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="Foreground" Value="#FF72D9FF" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        </Style>
+
+        <!--
+            El menú del botón derecho sobre el orbe. Es la única puerta que tienen los desplegables
+            que el usuario abre a mano: sin esto, nueve de los diecinueve son código que nadie llama.
+
+            Va con plantilla propia y no con la del sistema porque el menú del sistema es claro, con
+            esquinas vivas y su propia tipografía: al lado de un orbe de vidrio se lee como si lo
+            hubiera abierto otro programa.
+        -->
+        <Style x:Key="MenuDelOrbe" TargetType="ContextMenu">
+            <Setter Property="Background" Value="#F21A1A1E" />
+            <Setter Property="BorderBrush" Value="#26FFFFFF" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="0,6" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ContextMenu">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="12"
+                                Padding="{TemplateBinding Padding}">
+                            <Border.Effect>
+                                <DropShadowEffect Color="#FF000000" BlurRadius="32" Direction="270" ShadowDepth="8" Opacity="0.55" />
+                            </Border.Effect>
+                            <StackPanel IsItemsHost="True" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ItemDelMenu" TargetType="MenuItem">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="Foreground" Value="#FFEAEAEE" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Border x:Name="Fondo" Background="Transparent" Padding="15,6" MinWidth="190">
+                            <ContentPresenter ContentSource="Header" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Fondo" Property="Background" Value="#18FFFFFF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="RayaDelMenu" TargetType="Separator">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Margin" Value="13,5" />
+            <Setter Property="Background" Value="#14FFFFFF" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Separator">
+                        <Border Background="{TemplateBinding Background}" Height="1" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- La columna angosta de la derecha: casi siempre desde cuándo. -->
+        <Style x:Key="Cola" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas" />
+            <Setter Property="FontSize" Value="9" />
+            <Setter Property="Foreground" Value="#FF9C9CA4" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextAlignment" Value="Right" />
+        </Style>
     </Window.Resources>
 
     <Canvas x:Name="Stage" Background="{x:Null}">
@@ -794,6 +895,549 @@
                                        Style="{StaticResource Pie}"
                                        FontFamily="Consolas"
                                        Text="{Binding StatusText}" />
+                        </Grid>
+
+                        <!--
+                            ===================================================================
+                            LOS SEIS QUE LA REFERENCIA DEJÓ ABIERTOS
+
+                            Sus medidas NO están en FASES: se eligieron en PanelCatalog, adentro del
+                            rango que la referencia sí documenta (ancho 360–376, alto 132–220). Todo
+                            lo que muestran sale de donde vive de verdad —misiones.json,
+                            autonomia.json, la memoria personal, el libro de consumo y las sesiones
+                            de Claude Code—; ninguno dibuja un dato de ejemplo.
+                            ===================================================================
+                        -->
+
+                        <!-- ===== 14 · misiones abiertas · 364 × 200 · reposo · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Misiones}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Misiones abiertas" />
+                            <ItemsControl Grid.Row="1" Margin="0,9,0,0" ItemsSource="{Binding Board.Missions}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="42">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" MinWidth="26" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" MinWidth="88" />
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Border Grid.Row="1"
+                                                    Grid.Column="0"
+                                                    Grid.ColumnSpan="3"
+                                                    Style="{StaticResource Separador}" />
+                                            <TextBlock Grid.Row="0"
+                                                       Grid.Column="0"
+                                                       Style="{StaticResource Guia}"
+                                                       VerticalAlignment="Top"
+                                                       Margin="0,2,0,0"
+                                                       Text="{Binding Lead}" />
+                                            <StackPanel Grid.Row="0" Grid.Column="1" Margin="8,0,8,0">
+                                                <TextBlock FontFamily="{StaticResource UiFont}"
+                                                           FontSize="11.5"
+                                                           Foreground="#FFEAEAEE"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Text="{Binding Text}"
+                                                           ToolTip="{Binding Text}" />
+                                                <!-- Qué le falta: sin esto, una misión abierta no dice cuándo se cierra. -->
+                                                <TextBlock Margin="0,2,0,0"
+                                                           FontFamily="{StaticResource UiFont}"
+                                                           FontSize="9.5"
+                                                           Foreground="#FF9C9CA4"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Text="{Binding Detail}"
+                                                           ToolTip="{Binding Detail}" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Top" Margin="0,2,0,0">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock" BasedOn="{StaticResource Cola}">
+                                                        <Setter Property="Text" Value="{Binding Trail}" />
+                                                        <Style.Triggers>
+                                                            <!-- Lo único de la lista que se destraba ahora mismo se ve distinto. -->
+                                                            <DataTrigger Binding="{Binding IsWaiting}" Value="True">
+                                                                <Setter Property="Foreground" Value="#FFFFB347" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Visibility="{Binding Board.Missions.Count, Converter={StaticResource WhenEmpty}}"
+                                       Text="{Binding Board.MissionsNote}" />
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Style="{StaticResource Pie}"
+                                           Text="duran hasta cumplirse · sobreviven a cerrar la charla" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource Pie}"
+                                           Margin="8,0,0,0"
+                                           Text="{Binding Board.More}" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 15 · la pregunta pendiente · 364 × 148 · revisar · ámbar · no se cierra sola ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Pregunta}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <!--
+                                Una pregunta que sólo se lee es una notificación. Por eso el campo de
+                                abajo: acá se contesta, y la respuesta va al archivo de misiones, que
+                                es lo que sobrevive al reinicio.
+                            -->
+                            <TextBlock Grid.Row="0"
+                                       Style="{StaticResource Primaria}"
+                                       Foreground="#FFFFE3B4"
+                                       MaxHeight="34"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="{Binding Board.Question.Question}"
+                                       ToolTip="{Binding Board.Question.Question}"
+                                       Visibility="{Binding Board.HasQuestion, Converter={StaticResource BoolVisibility}}" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Dato}"
+                                       VerticalAlignment="Top"
+                                       Margin="0,5,0,0"
+                                       Foreground="#FFFFB347"
+                                       TextTrimming="CharacterEllipsis"
+                                       Visibility="{Binding Board.HasQuestion, Converter={StaticResource BoolVisibility}}">
+                                <Run Text="{Binding Board.Question.MissionId, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Board.Question.MissionTitle, Mode=OneWay}" /><Run Text=" · te la hizo " /><Run Text="{Binding Board.Question.Since, Mode=OneWay}" /><Run Text="{Binding Board.Question.Queue, Mode=OneWay}" />
+                            </TextBlock>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Text="{Binding Board.QuestionNote}"
+                                       Visibility="{Binding Board.HasNoQuestion, Converter={StaticResource BoolVisibility}}" />
+
+                            <Border Grid.Row="2"
+                                    Height="34"
+                                    CornerRadius="11"
+                                    Background="#8C0B0B0D"
+                                    BorderBrush="#80FFB347"
+                                    BorderThickness="1"
+                                    Padding="11,0,4,0"
+                                    Visibility="{Binding Board.HasQuestion, Converter={StaticResource BoolVisibility}}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="AnswerTextBox"
+                                             Grid.Column="0"
+                                             VerticalAlignment="Center"
+                                             Background="Transparent"
+                                             BorderThickness="0"
+                                             CaretBrush="#FFFFB347"
+                                             Foreground="#FFF4F4F7"
+                                             FontFamily="{StaticResource UiFont}"
+                                             FontSize="11.5"
+                                             KeyDown="AnswerTextBox_KeyDown"
+                                             Text="{Binding Board.Answer, UpdateSourceTrigger=PropertyChanged}"
+                                             AutomationProperties.Name="Contestar la pregunta pendiente" />
+                                    <Button Grid.Column="1"
+                                            Style="{StaticResource BotonAmbar}"
+                                            Height="26"
+                                            Command="{Binding Board.AnswerCommand}"
+                                            Content="Contestar" />
+                                </Grid>
+                            </Border>
+                        </Grid>
+
+                        <!-- ===== 16 · proyectos · 376 × 196 · reposo · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Proyectos}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Proyectos" />
+                            <ItemsControl Grid.Row="1" Margin="0,9,0,0" ItemsSource="{Binding Board.Projects}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="42">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" MinWidth="76" />
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Border Grid.Row="1"
+                                                    Grid.Column="0"
+                                                    Grid.ColumnSpan="2"
+                                                    Style="{StaticResource Separador}" />
+                                            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,8,0">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock FontFamily="{StaticResource UiFont}"
+                                                               FontSize="11.5"
+                                                               Foreground="#FFEAEAEE"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               Text="{Binding Text}" />
+                                                    <TextBlock Style="{StaticResource Guia}"
+                                                               Margin="7,0,0,0"
+                                                               Foreground="#FF6E7C86"
+                                                               Text="{Binding Lead}" />
+                                                </StackPanel>
+                                                <TextBlock Margin="0,2,0,0"
+                                                           FontFamily="{StaticResource UiFont}"
+                                                           FontSize="9.5"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Text="{Binding Detail}"
+                                                           ToolTip="{Binding Detail}">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="#FF9C9CA4" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsWaiting}" Value="True">
+                                                                    <Setter Property="Foreground" Value="#FFFFB347" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </StackPanel>
+                                            <TextBlock Grid.Row="0"
+                                                       Grid.Column="1"
+                                                       Style="{StaticResource Cola}"
+                                                       VerticalAlignment="Top"
+                                                       Margin="0,2,0,0"
+                                                       Text="{Binding Trail}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Visibility="{Binding Board.Projects.Count, Converter={StaticResource WhenEmpty}}"
+                                       Text="{Binding Board.ProjectsNote}" />
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <!-- De sólo lectura por diseño: lee el archivo de sesión, no la ventana. -->
+                                <TextBlock Grid.Column="0"
+                                           Style="{StaticResource Pie}"
+                                           Text="miro las sesiones · no le escribo a Claude Code" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource Pie}"
+                                           Margin="8,0,0,0"
+                                           Text="{Binding Board.More}" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 17 · permisos aprendidos · 372 × 206 · reposo · neutro · no se cierra solo ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Autonomia}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid Grid.Row="0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Style="{StaticResource Encabezado}" Text="Permisos que me diste" />
+                                <Button Grid.Column="1"
+                                        Style="{StaticResource IconButton}"
+                                        Width="22"
+                                        Height="22"
+                                        Command="{Binding ClosePanelCommand}"
+                                        Content="&#xE711;"
+                                        ToolTip="Cerrar" />
+                            </Grid>
+                            <ItemsControl Grid.Row="1" Margin="0,8,0,0" ItemsSource="{Binding Board.Permissions}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="44">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Border Grid.Row="1"
+                                                    Grid.Column="0"
+                                                    Grid.ColumnSpan="2"
+                                                    Style="{StaticResource Separador}" />
+                                            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,8,0">
+                                                <TextBlock FontFamily="{StaticResource UiFont}"
+                                                           FontSize="11.5"
+                                                           Foreground="#FFEAEAEE"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Text="{Binding Text}" />
+                                                <TextBlock Margin="0,2,0,0"
+                                                           FontFamily="{StaticResource UiFont}"
+                                                           FontSize="9.5"
+                                                           Foreground="#FF9C9CA4"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Text="{Binding With}"
+                                                           ToolTip="{Binding Why}" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Row="0"
+                                                        Grid.Column="1"
+                                                        Orientation="Horizontal"
+                                                        VerticalAlignment="Center">
+                                                <Button Command="{Binding SetAutomaticCommand}"
+                                                        Content="sola"
+                                                        AutomationProperties.Name="Que lo haga sola">
+                                                    <Button.Style>
+                                                        <Style TargetType="Button" BasedOn="{StaticResource Segmento}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsAutomatic}" Value="True">
+                                                                    <Setter Property="Background" Value="#3872D9FF" />
+                                                                    <Setter Property="Foreground" Value="#FFEAF7FF" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Button.Style>
+                                                </Button>
+                                                <Button Command="{Binding SetAskCommand}"
+                                                        Content="preguntá"
+                                                        AutomationProperties.Name="Que pregunte antes">
+                                                    <Button.Style>
+                                                        <Style TargetType="Button" BasedOn="{StaticResource Segmento}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsAsk}" Value="True">
+                                                                    <Setter Property="Background" Value="#38FFB347" />
+                                                                    <Setter Property="Foreground" Value="#FFFFE3B4" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Button.Style>
+                                                </Button>
+                                                <Button Command="{Binding SetNeverCommand}"
+                                                        Content="nunca"
+                                                        AutomationProperties.Name="Que no lo haga nunca">
+                                                    <Button.Style>
+                                                        <Style TargetType="Button" BasedOn="{StaticResource Segmento}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsNever}" Value="True">
+                                                                    <Setter Property="Background" Value="#38FF7385" />
+                                                                    <Setter Property="Foreground" Value="#FFFFD5DB" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Button.Style>
+                                                </Button>
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Visibility="{Binding Board.Permissions.Count, Converter={StaticResource WhenEmpty}}"
+                                       Text="{Binding Board.PermissionsNote}" />
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Style="{StaticResource Pie}" Text="{Binding Board.Outcome}" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource Pie}"
+                                           Margin="8,0,0,0"
+                                           Text="{Binding Board.More}" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 18 · lo que aprendí · 364 × 200 · reposo · neutro · no se cierra solo ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Aprendido}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid Grid.Row="0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Style="{StaticResource Encabezado}" Text="Lo que aprendí de vos" />
+                                <Button Grid.Column="1"
+                                        Style="{StaticResource IconButton}"
+                                        Width="22"
+                                        Height="22"
+                                        Command="{Binding ClosePanelCommand}"
+                                        Content="&#xE711;"
+                                        ToolTip="Cerrar" />
+                            </Grid>
+                            <ItemsControl Grid.Row="1" Margin="0,8,0,0" ItemsSource="{Binding Board.Memory}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="42">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Border Grid.Row="1"
+                                                    Grid.Column="0"
+                                                    Grid.ColumnSpan="2"
+                                                    Style="{StaticResource Separador}" />
+                                            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,8,0">
+                                                <TextBlock FontFamily="{StaticResource UiFont}"
+                                                           FontSize="11.5"
+                                                           Foreground="#FFEAEAEE"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Text="{Binding Content}"
+                                                           ToolTip="{Binding Content}" />
+                                                <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                                    <!-- El identificador va acá porque es lo que hace falta para «/olvidar». -->
+                                                    <TextBlock Style="{StaticResource Guia}"
+                                                               FontSize="9"
+                                                               Foreground="#FF6E7C86"
+                                                               Text="{Binding ShortId}" />
+                                                    <TextBlock Style="{StaticResource Cola}"
+                                                               Margin="7,0,0,0"
+                                                               Foreground="#FFFFB347"
+                                                               Text="{Binding Trail}" />
+                                                </StackPanel>
+                                            </StackPanel>
+                                            <StackPanel Grid.Row="0"
+                                                        Grid.Column="1"
+                                                        Orientation="Horizontal"
+                                                        VerticalAlignment="Center">
+                                                <!--
+                                                    Aprobar es lo único que convierte una suposición en
+                                                    un hecho, y siempre empieza acá. Sin esto, Viernes
+                                                    aprendía todas las noches y se olvidaba todas las
+                                                    noches: la observación vencía sola a los siete días.
+                                                -->
+                                                <Button Style="{StaticResource Segmento}"
+                                                        Command="{Binding ApproveCommand}"
+                                                        Content="es cierto"
+                                                        Visibility="{Binding IsPending, Converter={StaticResource BoolVisibility}}"
+                                                        AutomationProperties.Name="Confirmar que es cierto" />
+                                                <Button Style="{StaticResource Segmento}"
+                                                        Command="{Binding RejectCommand}"
+                                                        Content="no"
+                                                        Visibility="{Binding IsPending, Converter={StaticResource BoolVisibility}}"
+                                                        AutomationProperties.Name="Descartarlo" />
+                                                <Button Style="{StaticResource Segmento}"
+                                                        Command="{Binding ForgetCommand}"
+                                                        Content="olvidalo"
+                                                        Visibility="{Binding IsKnown, Converter={StaticResource BoolVisibility}}"
+                                                        AutomationProperties.Name="Olvidar este dato" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Visibility="{Binding Board.Memory.Count, Converter={StaticResource WhenEmpty}}"
+                                       Text="{Binding Board.MemoryNote}" />
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Style="{StaticResource Pie}" Text="{Binding Board.Outcome}" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource Pie}"
+                                           Margin="8,0,0,0"
+                                           Text="{Binding Board.More}" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 19 · gasto · 364 × 166 · reposo · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Consumo}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Cuánto llevo gastado" />
+                            <StackPanel Grid.Row="1" Margin="0,10,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Style="{StaticResource Dato}"
+                                               FontSize="16"
+                                               Foreground="#FF72D9FF"
+                                               Text="{Binding Board.Spend.TodayText}" />
+                                    <TextBlock Grid.Column="1"
+                                               Style="{StaticResource Secundaria}"
+                                               Margin="8,0,0,0"
+                                               VerticalAlignment="Bottom"
+                                               Text="hoy" />
+                                    <TextBlock Grid.Column="2"
+                                               Style="{StaticResource Cola}"
+                                               VerticalAlignment="Bottom"
+                                               Text="{Binding Board.Spend.DailyBudgetText}" />
+                                </Grid>
+
+                                <!-- Sin tope no hay barra: una barra vacía se lee como «no gastaste nada». -->
+                                <Border Height="4"
+                                        Margin="0,8,0,0"
+                                        CornerRadius="2"
+                                        Background="#1FFFFFFF"
+                                        HorizontalAlignment="Left"
+                                        Width="332"
+                                        Visibility="{Binding Board.Spend.HasDailyBudget, Converter={StaticResource BoolVisibility}}">
+                                    <Border HorizontalAlignment="Left"
+                                            CornerRadius="2"
+                                            Background="#FF72D9FF"
+                                            Width="{Binding Board.Spend.BarWidth}" />
+                                </Border>
+
+                                <Grid Margin="0,10,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Style="{StaticResource Dato}"
+                                               Text="{Binding Board.Spend.MonthText}" />
+                                    <TextBlock Grid.Column="1"
+                                               Style="{StaticResource Secundaria}"
+                                               FontSize="10.5"
+                                               Margin="8,0,0,0"
+                                               VerticalAlignment="Center"
+                                               Text="este mes" />
+                                    <TextBlock Grid.Column="2"
+                                               Style="{StaticResource Cola}"
+                                               Text="{Binding Board.Spend.MonthlyBudgetText}" />
+                                </Grid>
+
+                                <TextBlock Style="{StaticResource Pie}"
+                                           Margin="0,7,0,0"
+                                           FontFamily="Consolas"
+                                           Text="{Binding Board.Spend.TrafficText}" />
+                            </StackPanel>
+                            <TextBlock Grid.Row="2" Style="{StaticResource Pie}" Text="{Binding Board.SpendNote}" />
                         </Grid>
                     </Grid>
                 </Grid>

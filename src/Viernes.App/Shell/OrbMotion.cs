@@ -78,6 +78,31 @@ internal sealed class OrbMotion
         Target = target;
     }
 
+    /// <summary>
+    /// Lo lanza hacia un destino con un empujón, en vez de llevarlo con el resorte.
+    /// </summary>
+    /// <remarks>
+    /// Es el viaje entre monitores vecinos. La diferencia con <see cref="Nudge"/> no es de velocidad
+    /// sino de tipo de movimiento: el resorte de reposo <em>tira</em> del orbe y llega frenando; esto
+    /// lo <em>suelta</em> y llega con la inercia que le quedó, rebotando contra el borde si sobró.
+    /// Un objeto que cruza una pantalla tirado por un resorte se ve arrastrado por un hilo; tirado de
+    /// un envión, se ve viajando.
+    /// <para>
+    /// El empuje es proporcional a la distancia —no una velocidad fija— así que cruzar una pantalla
+    /// chica y una grande tarda parecido.
+    /// </para>
+    /// </remarks>
+    /// <param name="target">Dónde tiene que terminar.</param>
+    /// <param name="kick">Cuánto empuje horizontal por píxel de distancia.</param>
+    /// <param name="lift">Empujón vertical del despegue. Negativo arquea hacia arriba.</param>
+    public void Launch(Point target, double kick, double lift)
+    {
+        IsDragging = false;
+        IsFlying = true;
+        Target = target;
+        Velocity = new Vector((target.X - Position.X) * kick, lift);
+    }
+
     /// <summary>Empieza el arrastre. Desde acá el destino lo manda el puntero.</summary>
     public void BeginDrag()
     {

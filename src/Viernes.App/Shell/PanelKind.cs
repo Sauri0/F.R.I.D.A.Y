@@ -1,13 +1,19 @@
 namespace Viernes.App.Shell;
 
 /// <summary>
-/// Los trece desplegables. Uno por función, y ninguno de propósito general.
+/// Los diecinueve desplegables. Uno por función, y ninguno de propósito general.
 /// </summary>
 /// <remarks>
-/// La lista no es una taxonomía: es la enumeración de las trece cosas que Viernes tiene para
+/// La lista no es una taxonomía: es la enumeración de las diecinueve cosas que Viernes tiene para
 /// mostrar. Cada una trae su medida, su familia de vidrio, en qué estado deja al orbe y si se cierra
 /// sola — todo eso vive en <see cref="PanelCatalog"/>. Si aparece una función nueva, se agrega acá y
 /// se le da su fila en el catálogo; no hay panel genérico al que caerse.
+/// <para>
+/// Los seis últimos son los que la referencia ejecutable dejaba abiertos: sus medidas <b>no están</b>
+/// en <c>FASES</c> y se eligieron acá, adentro del rango que sí está documentado (ancho 360–376,
+/// alto 132–220). Van al final y no intercalados a propósito: reordenar esta lista para que quede
+/// prolija cambia el valor numérico de un <c>enum</c> que aparece en los diagnósticos.
+/// </para>
 /// </remarks>
 internal enum PanelKind
 {
@@ -48,5 +54,44 @@ internal enum PanelKind
     Presupuesto,
 
     /// <summary>Decir qué se perdió y, sobre todo, qué no.</summary>
-    SinRed
+    SinRed,
+
+    /// <summary>Los encargos que duran hasta cumplirse: en qué anda cada uno y desde cuándo.</summary>
+    Misiones,
+
+    /// <summary>
+    /// La pregunta que sobrevive al reinicio, y el lugar donde se contesta.
+    /// </summary>
+    /// <remarks>
+    /// Es el único de los seis nuevos que además <em>recibe</em>: una pregunta que sólo se lee es una
+    /// notificación. Por eso es ámbar y por eso no se cierra sola.
+    /// </remarks>
+    Pregunta,
+
+    /// <summary>Lo que ve el vigía de sesiones de Claude Code. Sólo mira: nunca le escribe.</summary>
+    Proyectos,
+
+    /// <summary>
+    /// Los permisos que el usuario fue dando, por acción y por sujeto.
+    /// </summary>
+    /// <remarks>
+    /// No se llama <c>Permisos</c> porque a un carácter de distancia de <see cref="Permiso"/> —que es
+    /// otra cosa: la compuerta de una acción puntual— empieza a doler: el parámetro del convertidor
+    /// en el XAML es una cadena, y una <em>s</em> de más o de menos no la ve el compilador. El panel
+    /// dejaría de dibujarse sin que nada avise.
+    /// </remarks>
+    Autonomia,
+
+    /// <summary>La memoria en revisión: lo que espera aprobación y lo que ya es un hecho.</summary>
+    Aprendido,
+
+    /// <summary>
+    /// Cuánto lleva gastado el modelo contra el presupuesto configurado.
+    /// </summary>
+    /// <remarks>
+    /// No se llama <c>Gasto</c> por la misma razón que <see cref="Autonomia"/> no se llama
+    /// <c>Permisos</c>: <see cref="Gastos"/> ya existe y es otra cosa —el libro de gastos del
+    /// usuario—. Éste cuenta dólares de tokens.
+    /// </remarks>
+    Consumo
 }

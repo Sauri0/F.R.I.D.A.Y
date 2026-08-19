@@ -45,6 +45,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private string _reminderTitle = string.Empty;
     private string _reminderDetail = string.Empty;
     private string _policyMessage = "No hay ninguna regla local frenando nada.";
+    private bool _isUnderFullScreen;
 
     /// <summary>
     /// Si la conversación en curso se está llevando hablando o escribiendo. <c>null</c> mientras no
@@ -74,7 +75,20 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         DismissConfirmationCommand = new RelayCommand(DismissConfirmation, () => IsConfirmationVisible);
         ClosePanelCommand = new RelayCommand(ClosePanel);
         CancelTurnCommand = new AsyncRelayCommand(CancelTurnAsync, () => true, ShowError);
+
+        // Contestar la pregunta pendiente cierra el desplegable: la pregunta ya no está, y dejar
+        // abierto un panel que se quedó sin contenido se lee como que no pasó nada.
+        Board = new PanelBoard(ClosePanel);
     }
+
+    /// <summary>
+    /// Lo que muestran los seis desplegables que se abren a pedido y leen archivos.
+    /// </summary>
+    /// <remarks>
+    /// Va como una propiedad y no repartido en ésta clase porque no comparte nada con el resto: acá
+    /// adentro todo llega del runtime, y eso se lee del disco cuando el usuario abre un panel.
+    /// </remarks>
+    public PanelBoard Board { get; }
 
     public AssistantVisualState State
     {
@@ -382,8 +396,35 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// <remarks>
     /// El nombre del estado ya está adentro del panel, y en la burbuja de dictado ya está la frase.
     /// Dos veces lo mismo a diez píxeles de distancia se lee como un error de la interfaz.
+    /// <para>
+    /// Con una pantalla completa adelante no se calla nunca, y esto no es un caso especial gratuito:
+    /// ahí el desplegable <b>no se dibuja</b> —lo apaga la ventana— y la píldora es lo único que
+    /// queda. Sin esta excepción, un aviso urgente sobre un juego mostraba exactamente nada: el
+    /// panel apagado por la ventana, y la píldora callada porque el modelo creía que el panel estaba
+    /// abierto. Se descubrió midiendo, no leyendo.
+    /// </para>
     /// </remarks>
-    public bool IsStatePillSuppressed => IsPanelOpen || IsDictationVisible;
+    public bool IsStatePillSuppressed => !IsUnderFullScreen && (IsPanelOpen || IsDictationVisible);
+
+    /// <summary>
+    /// Hay una pantalla completa adelante y el orbe está escondido.
+    /// </summary>
+    /// <remarks>
+    /// Lo pone la ventana, que es la única que puede saberlo. Llega hasta acá por una sola razón: la
+    /// píldora se calla cuando hay un desplegable a la vista, y en pantalla completa no hay ninguno
+    /// aunque el modelo tenga uno abierto.
+    /// </remarks>
+    public bool IsUnderFullScreen
+    {
+        get => _isUnderFullScreen;
+        set
+        {
+            if (SetProperty(ref _isUnderFullScreen, value))
+            {
+                OnPropertyChanged(nameof(IsStatePillSuppressed));
+            }
+        }
+    }
 
     /// <summary>Qué recordatorio llegó a su hora. Lo llena el pedido de presencia del runtime.</summary>
     public string ReminderTitle
@@ -414,10 +455,16 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// memoria— se abren solos. Los que dependen de datos que el proyecto todavía no tiene —muestras,
     /// caja, gastos, música, presupuesto— se abren llamando acá, y hasta que existan esos datos
     /// muestran que no hay nada conectado en vez de inventar números.
+    /// <para>
+    /// Los seis que leen archivos —misiones, la pregunta, proyectos, permisos, lo aprendido y el
+    /// gasto— releen acá y no al construirse: lo que muestran cambia entre una apertura y la
+    /// siguiente, y un panel que muestra lo de la vez pasada es la forma más barata de mentir.
+    /// </para>
     /// </remarks>
     public void ShowPanel(PanelKind kind)
     {
         _requestedPanel = kind;
+        Board.Refresh(kind);
         RefreshPanel();
     }
 
