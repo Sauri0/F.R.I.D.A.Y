@@ -93,6 +93,130 @@ public sealed class OrbDragFeelTests
             $"No llegó: quedó en {recorrido[^1].X:0.0} con el objetivo en 900.");
     }
 
+    /// <summary>Arrastra moviendo la mano a velocidad pareja y suelta. Devuelve el orbe soltado.</summary>
+    private static OrbMotion Arrojar(
+        double pxPorSegundo,
+        double hz = 180,
+        double segundos = 0.25,
+        double desde = 300)
+    {
+        var motion = new OrbMotion();
+        motion.Teleport(new Point(desde, 500));
+        motion.BeginDrag();
+
+        var paso = 1.0 / hz;
+        var x = desde;
+        for (var t = 0.0; t < segundos; t += paso)
+        {
+            x += pxPorSegundo * paso;
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        motion.Drop();
+        return motion;
+    }
+
+    [Fact]
+    public void SeLoPuedeArrojar()
+    {
+        // El defecto que esto cierra: al soltar, el orbe salía con la velocidad del RESORTE. Con el
+        // resorte flojo eso andaba de casualidad —iba tan atrás del cursor que siempre traía
+        // inercia— y con la amortiguación crítica dejó de andar: el orbe ya estaba encima del
+        // cursor, su velocidad interna era casi cero, y soltarlo lo dejaba caer ahí mismo.
+        // «No lo puedo tirar.»
+        var motion = Arrojar(pxPorSegundo: 1400);
+
+        Assert.True(motion.IsFlying, "No quedó volando.");
+        Assert.True(
+            motion.Speed > 900,
+            $"Salió demasiado despacio: {motion.Speed:0} px/s con la mano a 1400.");
+    }
+
+    [Fact]
+    public void ArrojadoFuerteLlegaLejosYRebota()
+    {
+        // El circuito entero: sale, vuela, choca contra el borde y vuelve. Sin el rebote el orbe se
+        // clavaría en el borde y el vuelo terminaría en un tope, no en un pique.
+        //
+        // Se tira desde cerca del borde a propósito. El rozamiento del vuelo es fuerte —pow(0,075;h),
+        // o sea que en un segundo queda el 7,5 % de la velocidad— así que un tiro de 2600 px/s
+        // recorre unos 930 px y no llega desde el otro lado de la pantalla. Eso no es un defecto: es
+        // lo que hace que el orbe se detenga donde uno lo mandó y no siga de largo.
+        var motion = Arrojar(pxPorSegundo: 2600, desde: 1200);
+
+        var maximo = motion.Position.X;
+        var rebotó = false;
+        for (var i = 0; i < 400; i++)
+        {
+            motion.Step(1.0 / 180, Pantalla);
+            maximo = Math.Max(maximo, motion.Position.X);
+
+            // Volvió para atrás después de haber ido para adelante: eso es el rebote.
+            if (maximo > 1000 && motion.Position.X < maximo - 20)
+            {
+                rebotó = true;
+                break;
+            }
+        }
+
+        Assert.True(maximo > 1000, $"No llegó lejos: máximo {maximo:0}.");
+        Assert.True(rebotó, "Llegó al borde y no rebotó.");
+    }
+
+    [Fact]
+    public void SoltarloQuietoNoLoMandaANingunLado()
+    {
+        var motion = new OrbMotion();
+        motion.Teleport(new Point(500, 500));
+        motion.BeginDrag();
+
+        // La mano se queda donde está: unos cuadros sin mover nada.
+        for (var i = 0; i < 30; i++)
+        {
+            motion.DragTo(new Point(500, 500));
+            motion.Step(1.0 / 180, Pantalla);
+        }
+
+        motion.Drop();
+
+        Assert.True(motion.Speed < 60, $"Salió disparado sin que nadie lo tirara: {motion.Speed:0} px/s.");
+    }
+
+    [Fact]
+    public void AgarrarloNoLoDispara()
+    {
+        // El primer cuadro después de agarrarlo no puede derivar una velocidad entre el objetivo
+        // viejo y el nuevo: son dos puntos que no tienen nada que ver.
+        var motion = Arrojar(pxPorSegundo: 2600);
+        for (var i = 0; i < 60; i++)
+        {
+            motion.Step(1.0 / 180, Pantalla);
+        }
+
+        motion.BeginDrag();
+        motion.DragTo(motion.Position);
+        motion.Step(1.0 / 180, Pantalla);
+        motion.Drop();
+
+        Assert.True(motion.Speed < 60, $"Agarrarlo y soltarlo lo disparó a {motion.Speed:0} px/s.");
+    }
+
+    [Theory]
+    [InlineData(30)]
+    [InlineData(60)]
+    [InlineData(144)]
+    [InlineData(180)]
+    [InlineData(240)]
+    public void ElTiroSaleIgualATodaFrecuencia(double hz)
+    {
+        // La mano va a la misma velocidad; el orbe tiene que salir con la misma, mida los cuadros
+        // que mida la pantalla.
+        var motion = Arrojar(pxPorSegundo: 1400, hz);
+
+        Assert.InRange(motion.Speed, 900, 1700);
+    }
+
     [Theory]
     [InlineData(30)]
     [InlineData(60)]

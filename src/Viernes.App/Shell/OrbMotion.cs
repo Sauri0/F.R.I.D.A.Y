@@ -133,6 +133,18 @@ internal sealed class OrbMotion
     /// <summary>Rapidez suavizada. Es la que decide si el vidrio se retrae.</summary>
     public double SmoothSpeed => Smoothed.Length;
 
+    /// <summary>
+    /// Cuán rápido venía moviéndose la mano. Es con lo que sale el orbe al soltarlo.
+    /// </summary>
+    /// <remarks>
+    /// No es <see cref="Velocity"/> ni <see cref="Smoothed"/>. Aquéllas describen al orbe; ésta
+    /// describe al cursor, que es quien lo tira. Ver <see cref="Drop"/>.
+    /// </remarks>
+    public Vector HandVelocity { get; private set; }
+
+    /// <summary>Dónde estaba el objetivo el cuadro anterior, para derivar la velocidad de la mano.</summary>
+    private Point _lastTarget;
+
     private int _hitToken;
     private double _hitNormalX;
     private double _hitNormalY;
@@ -237,6 +249,12 @@ internal sealed class OrbMotion
         IsDragging = true;
         IsFlying = false;
         Target = Position;
+
+        // La medición de la mano arranca de cero, y desde donde está el orbe. Si el objetivo
+        // anterior quedara puesto, el primer cuadro derivaría una velocidad enorme entre dos puntos
+        // que no tienen nada que ver, y el orbe saldría disparado apenas lo agarrás.
+        _lastTarget = Position;
+        HandVelocity = default;
     }
 
     /// <summary>
@@ -259,7 +277,21 @@ internal sealed class OrbMotion
         Target = target;
     }
 
-    /// <summary>Suelta el orbe con la velocidad que traía.</summary>
+    /// <summary>
+    /// Suelta el orbe y lo tira con la velocidad que traía <b>la mano</b>.
+    /// </summary>
+    /// <remarks>
+    /// Sale con <see cref="HandVelocity"/> y no con <see cref="Velocity"/>. Con la del resorte, un
+    /// arrastre bien amortiguado no se podía tirar: el orbe ya estaba encima del cursor y su
+    /// velocidad interna era casi cero, así que soltarlo lo dejaba caer ahí mismo. Y al revés, con un
+    /// resorte flojo el tiro salía de la inercia del propio resorte —o sea de lo mal que seguía a la
+    /// mano—, que es una forma rara de decidir con cuánta fuerza sale algo.
+    /// <para>
+    /// Con la de la mano las dos cosas quedan separadas y cada una hace lo suyo: el resorte decide
+    /// cómo se siente arrastrar, y el tiro sale de cuán rápido movías el cursor al soltar. Es lo que
+    /// hace cualquier cosa que uno arroja.
+    /// </para>
+    /// </remarks>
     public void Drop()
     {
         if (!IsDragging)
@@ -269,12 +301,15 @@ internal sealed class OrbMotion
 
         IsDragging = false;
         IsFlying = true;
+        Velocity = HandVelocity;
 
         // Soltarlo casi quieto no debería mandarlo a ningún lado: el resto lo hace el imán.
         if (Speed < 60)
         {
             Velocity *= 0.5;
         }
+
+        HandVelocity = default;
     }
 
     /// <summary>
@@ -283,6 +318,40 @@ internal sealed class OrbMotion
     public void Step(double dt, Rect bounds)
     {
         var previous = Position;
+
+        // Mientras se arrastra se mide la velocidad DE LA MANO, y con eso se tira después.
+        //
+        // Antes el tiro salía con la velocidad del resorte, y eso funcionaba de casualidad: el
+        // resorte iba tan atrás del cursor que siempre traía inercia. Con la amortiguación crítica
+        // llega al cursor y se queda, así que si uno frena aunque sea un instante antes de soltar
+        // —que es lo que hace todo el mundo— el resorte estaba parado y el orbe no salía a ningún
+        // lado. «No lo puedo tirar»: el peso y el tiro dependían del mismo defecto.
+        //
+        // Separadas, cada una hace lo suyo: la amortiguación decide cómo se siente seguir a la mano,
+        // y el tiro sale de cuán rápido movías el cursor. Que es como se tira algo.
+        if (IsDragging)
+        {
+            // El divisor es el dt REAL, sin el piso de MinVelocitySpan.
+            //
+            // Ese piso está bien para la velocidad del cuerpo, donde un cuadro cortísimo puede
+            // inventar una velocidad enorme a partir de un movimiento de un píxel. Acá es al revés y
+            // hace daño: dividir un desplazamiento de 5,56 ms por 8 ms no protege de nada, subestima.
+            // En la pantalla de 180 Hz donde se probó esto el tiro salía al 70 % de lo que movía la
+            // mano, y a 240 Hz al 52 %. Medido: con la mano a 1400 px/s, el orbe salía a 729.
+            //
+            // El ruido de un cuadro suelto ya lo filtra el promedio corrido de abajo. Dos guardas
+            // para lo mismo, y la segunda sesgada, es peor que una.
+            var handSpan = Math.Max(0.0005, dt);
+            var handVelocity = new Vector(
+                (Target.X - _lastTarget.X) / handSpan,
+                (Target.Y - _lastTarget.Y) / handSpan);
+
+            HandVelocity = new Vector(
+                (HandVelocity.X * VelocityMemory) + (handVelocity.X * (1 - VelocityMemory)),
+                (HandVelocity.Y * VelocityMemory) + (handVelocity.Y * (1 - VelocityMemory)));
+
+            _lastTarget = Target;
+        }
 
         var remaining = Math.Min(MaxFrame, dt);
         while (remaining > 0.0001)
