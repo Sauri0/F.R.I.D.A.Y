@@ -97,25 +97,63 @@ internal static class MotionBench
             report.AppendLine($"### {screen.DeviceName} · {RefreshHz(screen.DeviceName)} Hz");
             report.AppendLine();
 
+            // INTERCALADO Y REPETIDO, y esto es la mitad del banco.
+            //
+            // Antes cada arquitectura se medía UNA vez, en secuencia fija. Con eso, cualquier deriva
+            // de la máquina durante los cuarenta segundos de la corrida —otro programa que arranca,
+            // el procesador que baja la frecuencia, una recolección de basura— se le atribuía entera
+            // a la que tocaba en ese momento. Medido: la misma configuración dio 0,0 %, 13,8 % y
+            // 36,7 % de cuadros tardíos en tres corridas seguidas, y en las cuatro comparaciones el
+            // ganador cambiaba entre corridas.
+            //
+            // Un banco que da un orden distinto cada vez es peor que no tener banco: produce
+            // conclusiones que suenan seguras y no lo son. Con las pasadas intercaladas, la deriva
+            // le pega parecido a todas, y con varias repeticiones la mediana dice algo.
+            var medidas = new Dictionary<(OrbShape, MotionBenchMode), List<Pasada>>();
+
+            for (var vuelta = 0; vuelta < Repeticiones; vuelta++)
+            {
+                foreach (var shape in new[] { OrbShape.Gota, OrbShape.Nube })
+                {
+                    foreach (var mode in new[]
+                    {
+                        MotionBenchMode.WindowProperties,
+                        MotionBenchMode.WindowSetPos,
+                        MotionBenchMode.WideWindow
+                    })
+                    {
+                        var pasada = await RunPassAsync(shape, mode, screen).ConfigureAwait(true);
+
+                        // La primera vuelta se descarta entera: la primera ventana por capas de la
+                        // sesión paga el armado del compositor, y ese costo no es de la arquitectura
+                        // que le tocó ir primera.
+                        if (vuelta == 0)
+                        {
+                            continue;
+                        }
+
+                        if (!medidas.TryGetValue((shape, mode), out var lista))
+                        {
+                            lista = [];
+                            medidas[(shape, mode)] = lista;
+                        }
+
+                        lista.Add(pasada);
+                    }
+                }
+            }
+
             foreach (var shape in new[] { OrbShape.Gota, OrbShape.Nube })
             {
-                foreach (var mode in new[]
-                {
-                    MotionBenchMode.WindowProperties,
-                    MotionBenchMode.WindowSetPos,
-                    MotionBenchMode.WideWindow
-                })
-                {
-                    report.AppendLine(await RunPassAsync(shape, mode, screen).ConfigureAwait(true));
-                    report.AppendLine();
-                }
+                report.AppendLine(Resumir(shape, medidas));
+                report.AppendLine();
             }
         }
 
         return report.ToString();
     }
 
-    private static async Task<string> RunPassAsync(
+    private static async Task<Pasada> RunPassAsync(
         OrbShape shape,
         MotionBenchMode mode,
         System.Windows.Forms.Screen screen)
@@ -302,23 +340,120 @@ internal static class MotionBench
         }
 
         var drawn = body is NubeOrb nube ? nube.DrawnFrames : ((LiquidOrb)body).DrawnFrames;
-        var head = $"{Label(mode)}  ·  cuerpo {shape}";
 
-        return new StringBuilder()
-            .AppendLine(head)
-            .AppendLine(new string('-', head.Length))
-            .AppendLine($"  cuadros medidos     {deltas.Count} en {measured:0.00} s")
-            .AppendLine($"  cuadros por segundo {deltas.Count / Math.Max(0.001, measured):0.0}")
-            .AppendLine($"  dt mediana          {Median(deltas):0.00} ms")
-            .AppendLine($"  dt p95              {Percentile(deltas, 0.95):0.00} ms")
-            .AppendLine($"  dt máximo           {Max(deltas):0.00} ms")
-            .AppendLine($"  cuadros tardíos     {Late(deltas):0.0} %  (dt > 1,5 × la mediana)")
-            .AppendLine($"  salto mediano       {Median(jumps):0.0} px")
-            .AppendLine($"  salto p95           {Percentile(jumps, 0.95):0.0} px")
-            .AppendLine($"  salto máximo        {Max(jumps):0.0} px")
-            .AppendLine($"  escrituras          {writes} de {frames} cuadros")
-            .AppendLine($"  el cuerpo se dibujó {drawn} veces  ({drawn / Math.Max(0.001, elapsed):0.0} por segundo)")
-            .ToString();
+        return new Pasada(
+            Cuadros: deltas.Count,
+            PorSegundo: deltas.Count / Math.Max(0.001, measured),
+            DtMediana: Median(deltas),
+            DtP95: Percentile(deltas, 0.95),
+            DtMaximo: Max(deltas),
+            Tardios: Late(deltas, 1000.0 / Math.Max(1, RefreshHz(screen.DeviceName))),
+            SaltoP95: Percentile(jumps, 0.95),
+            Dibujos: drawn / Math.Max(0.001, elapsed));
+    }
+
+    /// <summary>Lo que sale de una pasada. Sin formato: el formato se decide al resumir.</summary>
+    private sealed record Pasada(
+        int Cuadros,
+        double PorSegundo,
+        double DtMediana,
+        double DtP95,
+        double DtMaximo,
+        double Tardios,
+        double SaltoP95,
+        double Dibujos);
+
+    /// <summary>Cuántas veces se corre la matriz entera. La primera vuelta se descarta.</summary>
+    /// <remarks>
+    /// Cuatro vueltas dan tres muestras por arquitectura, que es lo mínimo para que una mediana
+    /// signifique algo y para poder mostrar el rango. Más vueltas serían mejor y el banco ya tarda
+    /// unos minutos; el que quiera más certeza lo corre dos veces.
+    /// </remarks>
+    private const int Repeticiones = 4;
+
+    /// <summary>
+    /// Resume las repeticiones de un cuerpo, y dice si el banco puede decidir o no.
+    /// </summary>
+    /// <remarks>
+    /// Muestra la mediana Y el rango, porque una mediana sola invita a comparar decimales que no
+    /// significan nada. Y cuando el rango de la mejor se pisa con el de otra, <b>lo dice y no
+    /// declara ganador</b>: esa es la línea que faltaba, y su ausencia hizo que se recomendara una
+    /// reescritura grande sobre una diferencia que era ruido.
+    /// </remarks>
+    private static string Resumir(
+        OrbShape shape,
+        Dictionary<(OrbShape, MotionBenchMode), List<Pasada>> medidas)
+    {
+        var modos = new[]
+        {
+            MotionBenchMode.WindowProperties,
+            MotionBenchMode.WindowSetPos,
+            MotionBenchMode.WideWindow
+        };
+
+        var texto = new StringBuilder();
+        var titulo = $"cuerpo {shape}";
+        texto.AppendLine(titulo);
+        texto.AppendLine(new string('-', titulo.Length));
+        texto.AppendLine("                          tardíos %  (dt > 1,5 cuadros)   dt p95   dt máx   cuadros/s");
+
+        var rangos = new List<(MotionBenchMode Modo, double Mediana, double Minimo, double Maximo)>();
+
+        foreach (var modo in modos)
+        {
+            if (!medidas.TryGetValue((shape, modo), out var lista) || lista.Count == 0)
+            {
+                continue;
+            }
+
+            var tardios = lista.ConvertAll(p => p.Tardios);
+            var mediana = Median(tardios);
+            var minimo = Min(tardios);
+            var maximo = Max(tardios);
+            rangos.Add((modo, mediana, minimo, maximo));
+
+            texto.AppendLine(
+                $"  {Corto(modo),-22}  {mediana,5:0.0} ({minimo,4:0.0}–{maximo,4:0.0})" +
+                $"  {Median(lista.ConvertAll(p => p.DtP95)),6:0.0}" +
+                $"  {Median(lista.ConvertAll(p => p.DtMaximo)),12:0.0}" +
+                $"  {Median(lista.ConvertAll(p => p.PorSegundo)),12:0.0}" +
+                $"   ({lista.Count} muestras)");
+        }
+
+        if (rangos.Count < 2)
+        {
+            return texto.ToString();
+        }
+
+        rangos.Sort((a, b) => a.Mediana.CompareTo(b.Mediana));
+        var mejor = rangos[0];
+        var segunda = rangos[1];
+
+        texto.AppendLine();
+        texto.AppendLine(mejor.Maximo < segunda.Minimo
+            ? $"  Gana {Corto(mejor.Modo)}: su peor medición es mejor que la mejor de {Corto(segunda.Modo)}."
+            : $"  SIN GANADOR: el rango de {Corto(mejor.Modo)} se pisa con el de {Corto(segunda.Modo)}. " +
+              "La diferencia entre medianas es ruido y no alcanza para decidir nada.");
+
+        return texto.ToString();
+    }
+
+    private static string Corto(MotionBenchMode mode) => mode switch
+    {
+        MotionBenchMode.WindowSetPos => "ventana·setpos",
+        MotionBenchMode.WideWindow => "contenido",
+        _ => "ventana·wpf"
+    };
+
+    private static double Min(List<double> values)
+    {
+        var bottom = double.MaxValue;
+        foreach (var value in values)
+        {
+            if (value < bottom) { bottom = value; }
+        }
+
+        return values.Count == 0 ? 0 : bottom;
     }
 
     private static string Label(MotionBenchMode mode) => mode switch
@@ -386,14 +521,30 @@ internal static class MotionBench
     /// Es la cifra que se corresponde con «a los tirones». Un promedio alto con todos los cuadros
     /// parejos se ve fluido y lento; un promedio bajo con un 20 % de cuadros al doble se ve áspero.
     /// </remarks>
-    private static double Late(List<double> values)
+    /// <summary>
+    /// Qué porcentaje de cuadros tardó más de vez y media el cuadro nominal de esa pantalla.
+    /// </summary>
+    /// <remarks>
+    /// <b>El umbral es absoluto y no relativo, y esa es la corrección.</b> Acá el umbral era
+    /// <c>Median(values) * 1.5</c>, o sea la mediana de la propia arquitectura que se estaba
+    /// midiendo: cada una se comparaba contra su propia vara. Una arquitectura que dibuja más rápido
+    /// y más parejo se ganaba un umbral más exigente y salía castigada por desviaciones que en otra
+    /// ni contaban. El número servía para ver si una arquitectura era consistente consigo misma, y
+    /// se estaba usando para elegir entre arquitecturas, que es otra pregunta.
+    /// <para>
+    /// Con eso se recomendó una reescritura grande sobre una diferencia que era, en parte, la
+    /// métrica midiendo mal. Contra el cuadro nominal de la pantalla, las tres se miden con la misma
+    /// vara y el número quiere decir lo que parece: cuántas veces el ojo vio un tirón.
+    /// </para>
+    /// </remarks>
+    private static double Late(List<double> values, double nominalMs)
     {
         if (values.Count == 0)
         {
             return 0;
         }
 
-        var threshold = Median(values) * 1.5;
+        var threshold = nominalMs * 1.5;
         var late = 0;
         foreach (var value in values)
         {
