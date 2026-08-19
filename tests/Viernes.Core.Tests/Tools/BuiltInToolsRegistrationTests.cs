@@ -30,4 +30,24 @@ public sealed class BuiltInToolsRegistrationTests
 
         Assert.Contains(tools, tool => tool.Definition.Name == WebSearchTool.ToolName);
     }
+
+    [Fact]
+    public void ObjetivoYMision_SeDeclaranLaDiferenciaEntreEllas()
+    {
+        // Las dos se ofrecen a la vez y las dos dicen «sobrevive a que se cierre la conversación»,
+        // así que el modelo tiene que poder elegir. La distinción existe en el código —una misión
+        // tiene bitácora y una pregunta que lo frena; un objetivo es sólo memoria de en qué anda el
+        // usuario— y hasta ahora no estaba escrita en ninguna de las dos descripciones: cada una
+        // hablaba como si la otra no existiera.
+        //
+        // Los dos archivos siguen sin aparecer en uso real, lo cual no prueba que sea por esto, pero
+        // sí que nadie puede descartarlo.
+        var tools = BuiltInTools.Create(new InMemoryUserDataStore(), providerWebSearch: true);
+
+        var objetivo = Assert.Single(tools, tool => tool.Definition.Name == GoalTool.ToolName);
+        var mision = Assert.Single(tools, tool => tool.Definition.Name == MissionTool.ToolName);
+
+        Assert.Contains(MissionTool.ToolName, objetivo.Definition.Description, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(GoalTool.ToolName, mision.Definition.Description, StringComparison.OrdinalIgnoreCase);
+    }
 }

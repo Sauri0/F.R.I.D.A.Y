@@ -40,7 +40,11 @@ public sealed class MissionTool : IAssistantTool
         "En «id» va el identificador corto (m1, m2) o parte del título; si no lo ponés y hay una " +
         "sola candidata, cae sobre ésa. " +
         "NO crees misiones para pedidos puntuales que resolvés ahora —abrir una app, poner música, " +
-        "crear una carpeta—: sólo para lo que continúa después de este turno.",
+        "crear una carpeta—: sólo para lo que continúa después de este turno. " +
+        "OJO, no confundir con «objetivo»: una MISIÓN es trabajo TUYO, con bitácora de lo que fuiste " +
+        "haciendo y la posibilidad de frenarte a preguntarle algo; un OBJETIVO es algo que trabaja " +
+        "ÉL y vos sólo recordás. Si vas a hacer algo y reportarlo, misión. Si sólo tenés que " +
+        "acordarte de en qué anda, objetivo.",
         ToolSchemas.Object(
             new Dictionary<string, object>
             {

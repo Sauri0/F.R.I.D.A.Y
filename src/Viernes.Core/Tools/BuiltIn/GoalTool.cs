@@ -33,7 +33,10 @@ public sealed class GoalTool : IAssistantTool
         "accion=«cerrar» cuando lo terminó, o «abandonar» si lo deja. " +
         "accion=«listar» para contarle qué tiene abierto. " +
         "NO abras objetivos por pedidos puntuales —abrir una app, poner música— sólo por cosas " +
-        "que continúan en el tiempo.",
+        "que continúan en el tiempo. " +
+        "OJO, no confundir con «mision»: un OBJETIVO es algo que trabaja EL USUARIO y vos recordás " +
+        "—«estoy armando el presupuesto»—; una MISIÓN es algo que hacés VOS y le reportás —«seguí " +
+        "este proyecto y avisame»—. Si el trabajo es suyo, objetivo. Si el trabajo es tuyo, misión.",
         ToolSchemas.Object(
             new Dictionary<string, object>
             {
