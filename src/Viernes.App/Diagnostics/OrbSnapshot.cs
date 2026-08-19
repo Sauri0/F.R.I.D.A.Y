@@ -29,6 +29,21 @@ internal static class OrbSnapshot
     private const double Dpi = 96 * Zoom;
 
     /// <summary>
+    /// Cuántos por fila. Lo usan la hoja y el reparto de escritorio claro, y tiene que ser el mismo.
+    /// </summary>
+    /// <remarks>
+    /// Estaba escrito dos veces —acá cuatro columnas, allá «claro a partir del quinto»— y con doce
+    /// cuadros daba igual porque coincidía. Con los quince estados dejó de coincidir: la hoja pintaba
+    /// las filas alternadas y el dibujo cambiaba a la quinta, así que dos filas mostraban el orbe
+    /// para escritorio claro sobre fondo oscuro. Una hoja de contactos que miente es peor que no
+    /// tenerla: se hicieron decisiones de color mirándola.
+    /// </remarks>
+    private const int Columns = 4;
+
+    /// <summary>Las filas impares de la hoja van sobre fondo claro, y el orbe tiene que saberlo.</summary>
+    private static bool IsLightRow(int index) => (index / Columns) % 2 == 1;
+
+    /// <summary>
     /// Los quince, en el orden en que pasan.
     /// </summary>
     /// <remarks>
@@ -44,29 +59,35 @@ internal static class OrbSnapshot
     /// </remarks>
     private static readonly (AssistantVisualState State, double Seconds)[] Frames =
     [
+        // Fila 1 — el hilo de una charla, de punta a punta.
         (AssistantVisualState.Idle, 0.4),
         (AssistantVisualState.Watching, 1.0),
         (AssistantVisualState.Listening, 1.2),
         (AssistantVisualState.Thinking, 1.2),
+
+        // Fila 2 — lo que dice y lo que pide.
         (AssistantVisualState.Speaking, 1.2),
         (AssistantVisualState.Interrupted, 0.6),
-
-        // Los tres del trío, uno detrás del otro.
-        (AssistantVisualState.Background, 1.2),
-        (AssistantVisualState.ProjectWaiting, 1.2),
-        (AssistantVisualState.WaitingForYou, 1.2),
-
         (AssistantVisualState.Attention, 1.2),
         (AssistantVisualState.AskingPermission, 1.2),
 
-        // Los tres de capacidad reducida van juntos y al final: la prueba de que se distinguen de un
-        // error no es mirarlos solos, es verlos al lado del rojo.
+        // Fila 3 — el trío que la referencia dejó sin resolver, en una sola fila y con reposo al
+        // lado. Se separaron por presencia y no por color: trabajando sin vos no espera nada, un
+        // proyecto te espera espera a otro, esperándote es el único que te debe algo a vos. Ver los
+        // tres a la vez es la única forma de saber si eso se nota; de a uno siempre se distinguen.
+        (AssistantVisualState.Background, 1.2),
+        (AssistantVisualState.ProjectWaiting, 1.2),
+        (AssistantVisualState.WaitingForYou, 1.2),
+        (AssistantVisualState.Idle, 1.2),
+
+        // Fila 4 — las cuatro que no son buenas noticias, juntas. La prueba de que capacidad
+        // reducida se distingue de una falla no es mirarlas solas: es verlas al lado del rojo.
         (AssistantVisualState.Error, 1.2),
         (AssistantVisualState.Deaf, 1.2),
         (AssistantVisualState.Unconfigured, 1.2),
         (AssistantVisualState.Offline, 1.2),
 
-        // Tarea larga: el sedimento se acumula abajo. Tres momentos, para verlo subir.
+        // Fila 5 — tarea larga: el sedimento se acumula abajo. Tres momentos, para verlo subir.
         (AssistantVisualState.Thinking, 14),
         (AssistantVisualState.Thinking, 30),
         (AssistantVisualState.Thinking, 70)
@@ -100,17 +121,18 @@ internal static class OrbSnapshot
         var index = 0;
         foreach (var (state, seconds) in Frames)
         {
+            // Los dos cuerpos cambian de dibujo con el escritorio, así que los dos tienen que
+            // enterarse de en qué fila caen.
             if (gota is not null)
             {
                 gota.State = state;
+                gota.IsLightDesktop = IsLightRow(index);
             }
 
             if (nube is not null)
             {
                 nube.State = state;
-
-                // La segunda fila de la hoja va sobre fondo claro, y ahí la nube cambia de dibujo.
-                nube.IsLightDesktop = index >= 4;
+                nube.IsLightDesktop = IsLightRow(index);
             }
 
             index++;
@@ -138,11 +160,10 @@ internal static class OrbSnapshot
         IReadOnlyList<(BitmapSource Image, string Caption)> shots,
         string path)
     {
-        const int columns = 4;
-        var rows = (int)Math.Ceiling(shots.Count / (double)columns);
+        var rows = (int)Math.Ceiling(shots.Count / (double)Columns);
         var cell = Cell * Zoom;
         const int label = 28;
-        var width = columns * cell;
+        var width = Columns * cell;
         var height = rows * (cell + label);
 
         var visual = new DrawingVisual();
@@ -162,8 +183,8 @@ internal static class OrbSnapshot
 
             for (var index = 0; index < shots.Count; index++)
             {
-                var column = index % columns;
-                var row = index / columns;
+                var column = index % Columns;
+                var row = index / Columns;
                 var x = column * cell;
                 var y = row * (cell + label);
                 context.DrawImage(shots[index].Image, new Rect(x, y, cell, cell));
