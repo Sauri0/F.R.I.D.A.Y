@@ -121,15 +121,21 @@ internal static class OrbTransitions
             LooksBack = true
         },
 
-        // Lo mismo desde reposo, pero más apagado: no estaba atenta, así que no se sobresalta igual.
+        // Y desde reposo va el sobresalto ENTERO, con los mismos números de arriba.
+        //
+        // Acá había una versión apagada —«no estaba atenta, así que no se sobresalta igual»— y era
+        // correcta cuando reposo significaba micrófono desarmado. Dejó de serlo: reposo es ahora el
+        // estado normal con el oído puesto, así que éste es el camino por el que pasa oír el nombre
+        // casi siempre. Dejarlo apagado escondía el gesto más característico del repertorio detrás
+        // de un estado que ya no se dibuja.
         [(AssistantVisualState.Idle, AssistantVisualState.Listening)] = new()
         {
             Seconds = 0.470,
             Curve = OrbTransitionCurve.Anti,
-            Lift = 3.1,
-            Flash = 0.48,
-            SpinKick = 1.4,
-            Ripple = 1.0,
+            Lift = 3.6,
+            Flash = 0.58,
+            SpinKick = 1.6,
+            Ripple = 1.15,
             LooksBack = true
         },
 

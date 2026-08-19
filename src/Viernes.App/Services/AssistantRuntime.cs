@@ -3477,16 +3477,20 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             return AssistantVisualState.Unconfigured;
         }
 
+        // Y acá termina. Guardia —el micrófono armado esperando el nombre— NO es un estado que se
+        // dibuje: es el reposo.
+        //
+        // Durante un tiempo sí lo era, y se sentía mal por una razón que sólo se ve usándola: el
+        // micrófono está armado casi siempre, así que «guardia» no era un estado, era el fondo de
+        // pantalla —y con su cartel puesto—. El orbe quieto tiene que ser celeste y no decir nada:
+        // sólo ella. Que esté atenta al nombre se demuestra reaccionando cuando la nombran, no
+        // anunciándolo todo el día.
+        //
+        // El perfil de guardia se conserva entero en la tabla: lo usa el banco de render, y sigue
+        // disponible si alguna vez hace falta distinguir armado de no armado.
         if (_missionRunning)
         {
             return AssistantVisualState.Background;
-        }
-
-        // Guardia y «te escucho» son dos cosas distintas y confundirlas es un problema de privacidad:
-        // una dice «puedo oírte si me llamás» y la otra «te estoy grabando ahora».
-        if (!IsMuted && _isWakeWordEnabled && _wakeWord?.State == WakeWordServiceState.Listening)
-        {
-            return AssistantVisualState.Watching;
         }
 
         return AssistantVisualState.Idle;
