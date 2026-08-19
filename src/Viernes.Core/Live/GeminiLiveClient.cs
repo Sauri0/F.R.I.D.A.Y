@@ -26,7 +26,11 @@ public sealed class GeminiLiveClient : IAsyncDisposable
 {
     private const int MaximumConsecutiveReconnects = 5;
 
-    private readonly GeminiLiveOptions _options;
+    /// <summary>
+    /// Cómo se abre la sesión. No es de sólo lectura porque la instrucción se refresca antes de cada
+    /// conexión: ver <see cref="UseSystemInstruction"/>.
+    /// </summary>
+    private GeminiLiveOptions _options;
     private readonly Func<string?> _apiKey;
     private readonly ILiveAudioSink _sink;
     private readonly Func<ILiveTransport> _transportFactory;
@@ -67,6 +71,24 @@ public sealed class GeminiLiveClient : IAsyncDisposable
 
     /// <summary>Hay clave y la sesión en vivo está encendida por configuración.</summary>
     public bool IsConfigured => _options.Enabled && !string.IsNullOrWhiteSpace(_apiKey());
+
+    /// <summary>
+    /// Cambia la instrucción de sistema para la próxima conexión.
+    /// </summary>
+    /// <remarks>
+    /// Existe porque la instrucción no puede ser fija. El camino de siempre le arma al modelo, en
+    /// cada turno, lo que sabe del usuario y las misiones abiertas con su pregunta sin contestar; la
+    /// sesión hablada nacía con un texto escrito a mano y nada más, así que hablando era amnésica:
+    /// no sabía quién era el usuario ni que le había dejado una pregunta ayer.
+    /// <para>
+    /// Toma efecto en la próxima conexión, no en la que esté abierta: el <c>setup</c> se manda una
+    /// sola vez al abrir. Como cada conversación abre y cierra, eso alcanza — y es lo correcto,
+    /// porque cambiarle la instrucción a una charla en curso la haría contestar distinto a mitad de
+    /// frase.
+    /// </para>
+    /// </remarks>
+    public void UseSystemInstruction(string? instruction) =>
+        _options = _options.WithSystemInstruction(instruction);
 
     /// <summary>La sesión está abierta y ya pasó el <c>setupComplete</c>.</summary>
     public bool IsConnected => _connected;

@@ -144,6 +144,36 @@ public sealed class GeminiLiveClientTests
     }
 
     [Fact]
+    public async Task LaInstruccionSeRefrescaAntesDeCadaConexion()
+    {
+        // La sesión hablada nacía con una instrucción fija y era amnésica: el camino de siempre le
+        // arma al modelo la memoria personal y las misiones abiertas con su pregunta sin contestar,
+        // y el camino nuevo no le armaba nada. Justo el camino elegido como principal era el único
+        // donde no sabía quién era el usuario.
+        //
+        // Que se pueda refrescar es lo que lo arregla, y tiene que valer para la SEGUNDA charla
+        // también: una misión creada entre una y otra no serviría de nada si la instrucción quedara
+        // congelada en la primera.
+        var (client, banco, _) = Armar();
+        await using var _guard = client;
+
+        // Sin acentos a propósito: el setup viaja como JSON y ahí los no-ASCII salen escapados, así
+        // que buscar «Sabés» en el texto crudo falla por la codificación y no por el comportamiento.
+        client.UseSystemInstruction("Se llama Ana.");
+        Assert.True(await client.StartAsync());
+        Assert.Contains("Se llama Ana.", banco.Last.SentSnapshot()[0], StringComparison.Ordinal);
+
+        await client.StopAsync();
+
+        client.UseSystemInstruction("Le preguntaste por la factura.");
+        Assert.True(await client.StartAsync());
+
+        var segunda = banco.Last.SentSnapshot()[0];
+        Assert.Contains("Le preguntaste por la factura.", segunda, StringComparison.Ordinal);
+        Assert.DoesNotContain("Se llama Ana", segunda, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task SiElServidorNoConfirma_NoDaLaSesionPorAbierta()
     {
         // Esta fábrica no manda setupComplete: es el caso en que el servidor acepta el socket y

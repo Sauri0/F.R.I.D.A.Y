@@ -144,6 +144,75 @@ internal sealed partial class AssistantRuntime
         """;
 
     /// <summary>
+    /// La instrucción de la sesión hablada, con lo que sabe del usuario y lo que le quedó
+    /// preguntando.
+    /// </summary>
+    /// <remarks>
+    /// La sesión hablada era <b>amnésica</b>, y eso no se notaba leyendo el código: la instrucción
+    /// era una constante bien escrita y parecía completa. Pero el camino de siempre le arma al
+    /// modelo, en cada turno, la memoria personal, las reglas enseñadas, los objetivos abiertos, las
+    /// misiones y los permisos; el camino nuevo no le armaba nada. O sea que justo el camino que el
+    /// usuario eligió como principal era el único donde ella no sabía quién era él.
+    /// <para>
+    /// Lo peor era la pregunta pendiente. Está construida para sobrevivir al reinicio y a los días
+    /// —es la promesa central de las misiones— y hablando no existía: podía haberle preguntado algo
+    /// ayer y no tener con qué retomarlo.
+    /// </para>
+    /// <para>
+    /// Van sólo estas dos, y no las cinco del otro camino, porque las otras tres no aplican acá: las
+    /// reglas enseñadas hablan de cómo usar herramientas y en la sesión hablada no hay ninguna, y lo
+    /// mismo los permisos —que gobiernan acciones que acá no se pueden hacer—. Meterlas sería pagar
+    /// tokens en cada conexión por instrucciones sobre cosas que no puede hacer.
+    /// </para>
+    /// </remarks>
+    private async Task<string> BuildLiveInstructionAsync(CancellationToken cancellationToken)
+    {
+        var instruccion = new StringBuilder(BuildLiveInstruction());
+
+        var personal = await SafeContextAsync(
+            () => DescribePersonalMemoryAsync(cancellationToken)).ConfigureAwait(false);
+
+        if (!string.IsNullOrWhiteSpace(personal))
+        {
+            instruccion.AppendLine().AppendLine().Append(personal);
+        }
+
+        var misiones = await SafeContextAsync(
+            () => _missionBook.DescribeOpenAsync(cancellationToken)).ConfigureAwait(false);
+
+        if (!string.IsNullOrWhiteSpace(misiones))
+        {
+            instruccion.AppendLine().AppendLine().Append(misiones);
+            instruccion.AppendLine().AppendLine().Append(
+                "Si hay una pregunta tuya sin contestar, retomala vos apenas venga al caso. No " +
+                "esperes que se acuerde él. Y como acá no tenés herramientas, no podés anotar la " +
+                "respuesta: escuchala, seguí la charla, y pedile que te la repita cuando te escriba.");
+        }
+
+        return instruccion.ToString();
+    }
+
+    /// <summary>
+    /// Trae un pedazo de contexto sin dejar que su falla impida abrir la charla.
+    /// </summary>
+    /// <remarks>
+    /// Un archivo ilegible no puede ser la razón por la que el asistente no atiende. Se pierde el
+    /// contexto —que se nota— y no la conversación —que se nota mucho más—.
+    /// </remarks>
+    private static async Task<string?> SafeContextAsync(Func<Task<string?>> leer)
+    {
+        try
+        {
+            return await leer().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            RuntimeTrace.Write("vivo.contexto.excepcion", exception.GetType().Name);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Intenta abrir la conversación por el camino nuevo. Devuelve si se hizo cargo.
     /// </summary>
     /// <remarks>
@@ -178,6 +247,11 @@ internal sealed partial class AssistantRuntime
         // una copia nueva por conversación, al lado de la que el oído ya tenía cargada.
         var microphone = new LiveMicrophonePump(session, _voiceDetector);
         RuntimeTrace.Write("vivo.microfono.detector", microphone.DetectorInfo.Name);
+
+        // La instrucción se rearma en cada conversación, con lo que sabe del usuario y lo que le
+        // quedó preguntando. Sin esto la sesión hablada era amnésica: ver BuildLiveInstructionAsync.
+        session.UseSystemInstruction(
+            await BuildLiveInstructionAsync(cancellationToken).ConfigureAwait(false));
 
         var reloj = System.Diagnostics.Stopwatch.StartNew();
         var opened = await session.StartAsync(cancellationToken).ConfigureAwait(false);

@@ -213,6 +213,13 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     public string? BlockedReason => _latch.BlockedReason;
 
     /// <summary>
+    /// Deja la instrucción de sistema para la próxima conexión. Ver
+    /// <see cref="GeminiLiveClient.UseSystemInstruction"/>.
+    /// </summary>
+    public void UseSystemInstruction(string? instruction) =>
+        _client.UseSystemInstruction(instruction);
+
+    /// <summary>
     /// Qué camino corresponde ahora mismo, sin abrir nada.
     /// </summary>
     /// <remarks>
