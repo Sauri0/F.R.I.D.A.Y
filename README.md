@@ -70,15 +70,30 @@ Para cambiarlo después, volvé a correr el instalador.
 
 **Este repositorio no contiene ninguna clave, y nunca va a contener una.**
 
-La única credencial que usa el asistente es `OPENROUTER_API_KEY`. La ponés vos en la instalación y se
-guarda como variable de entorno de tu cuenta de Windows:
+Son dos credenciales, y viven en lugares distintos a propósito.
 
-- No se escribe en ningún archivo del proyecto.
-- No se manda a ningún lado que no sea OpenRouter.
-- No viaja a los procesos que el asistente ejecuta por vos: cuando corre un comando de PowerShell,
-  la borra explícitamente del entorno del proceso hijo.
+**`OPENROUTER_API_KEY`** — obligatoria. La ponés en la instalación y se guarda como variable de
+entorno de tu cuenta de Windows. Por ahí pasan todos los modelos de texto.
 
-Todos los modelos pasan por OpenRouter. No hay ninguna otra API involucrada.
+**`GOOGLE_API_KEY`** — opcional. Sólo sirve para la conversación hablada en tiempo real. Ésta sí va
+en un archivo, `%LOCALAPPDATA%\Viernes\claves.json`, porque abrir, pegar y guardar es más simple que
+aprender `setx`. El archivo vive fuera del repositorio y el nombre está en el `.gitignore` igual, por
+si algún día alguien lo copia acá para depurar algo.
+
+**Sin la de Google el asistente anda completo**, por el camino de siempre: la escuchás cuando terminó
+de pensar en vez de mientras piensa.
+
+Las dos, sin excepción:
+
+- No se escriben en ningún archivo del proyecto.
+- No se mandan a ningún lado que no sea su propia API.
+- No aparecen en la bitácora, ni en un mensaje de error, ni en una excepción — los `catch` de la
+  sesión en vivo copian el *tipo* de la excepción y nunca el mensaje, y eso está comentado donde
+  corresponde para que nadie lo "simplifique".
+- No viajan a los procesos que el asistente ejecuta por vos: cuando corre un comando de PowerShell,
+  las borra explícitamente del entorno del proceso hijo.
+- El conector MCP no las lee, no las devuelve y no las nombra. Ninguna de sus diez herramientas se
+  acerca.
 
 ---
 
@@ -99,9 +114,25 @@ ajena por accesibilidad y hace clic en ellos por nombre, en vez de por coordenad
 automáticamente»*) y quedan guardadas. Recuerda objetivos abiertos entre conversaciones.
 
 **Se conecta.** Habla el protocolo MCP, así que le podés enchufar servidores externos —Spotify,
-Google Drive, lo que exista— y sus herramientas aparecen junto a las nativas.
+Google Drive, mail y calendario— y sus herramientas aparecen junto a las nativas. Si un servidor se
+cae, se reconecta solo.
 
-**Frena.** Un atajo global corta todo en cualquier momento.
+**Y se deja enchufar.** Trae su propio servidor MCP, así que se le puede agregar a Claude como
+conector: ver y mover sus misiones, dejarle una pregunta, mirar tus proyectos. Con una frontera
+escrita en el código —no aprueba memoria, no toca ninguna clave, no borra nada, y toda acción que
+escribe consulta antes la política de permisos—. Ver [docs/CONECTOR.md](docs/CONECTOR.md).
+
+**Conversa hablando.** Con una clave de Google usa Gemini Live: una sola conexión dúplex en lugar de
+grabar, reconocer, pensar y sintetizar. El micrófono queda abierto mientras habla, así que
+**hablándole encima se calla** — eso el camino de siempre no lo puede hacer por más que se lo apure,
+porque ahí, mientras habla, no hay nadie escuchando. Sin clave anda igual, por el camino de siempre.
+
+**Se mira sin mirarla.** El orbe tiene quince estados con transiciones que tienen forma propia, seis
+registros de ánimo y diecinueve desplegables. Sin movimiento —si el sistema lo pide— los quince
+colapsan a siete siluetas y la etiqueta deja de ser opcional.
+
+**Frena.** Un atajo global corta todo en cualquier momento. Y silenciar cierra la sesión de voz, no
+la calla nada más: la pantalla y el micrófono no pueden decir cosas distintas.
 
 ---
 
@@ -109,10 +140,20 @@ Google Drive, lo que exista— y sus herramientas aparecen junto a las nativas.
 
 Este proyecto está en desarrollo activo y hay cosas a medias. Las conocidas, sin maquillar:
 
-- La memoria de recetas guarda transcripciones crudas como clave, así que casi nunca vuelve a
-  encontrar lo que aprendió: de 58 recetas guardadas, 56 se usaron una sola vez.
-- Los objetivos persistentes se escriben pero el archivo nunca llegó a crearse en uso real.
-- La transcripción tarda alrededor de 0,85× el largo del audio; ése es hoy el piso de latencia.
+- **Nada de la voz se probó contra una voz humana.** Los números del detector salen de voz
+  sintetizada y de bancos: falta medir falsos positivos por hora en uso real, distintas voces y
+  acentos, distancia y tipo de micrófono.
+- **Las misiones, los permisos aprendidos y los objetivos están escritos y nunca se ejercitaron.**
+  Se comprueba mirando la carpeta de datos: `misiones.json`, `autonomia.json` y `objetivos.json` no
+  existen. El código está probado; el uso no.
+- **Escribir en un chat de Claude Code no se puede**, y está documentado por qué: el `.jsonl` de la
+  sesión es el registro que escribe el proceso vivo y no un buzón, `claude -p --resume` arranca otro
+  proceso en vez de hablarle a la que espera, y el CLI no trae ningún comando para eso. La
+  herramienta te devuelve el mensaje armado para pegar, con el error puesto.
+- **La transcripción tarda alrededor de 0,71× el largo del audio** con `ggml-small`; ése es hoy el
+  piso de latencia del camino de siempre. El camino en vivo no lo tiene, pero cuesta plata por minuto.
+- Quedan bordes sin ejercitar que piden hardware que no tenemos: dos monitores con escalas distintas,
+  y un juego en pantalla completa exclusiva.
 
 ---
 
@@ -126,14 +167,20 @@ dotnet build Viernes.slnx
 dotnet test Viernes.slnx
 ```
 
-Necesitás el SDK de .NET fijado en [`global.json`](global.json). La solución tiene cuatro proyectos:
+Necesitás el SDK de .NET fijado en [`global.json`](global.json). La solución tiene cinco proyectos:
 
 | Proyecto | Qué es |
 |---|---|
-| `Viernes.Core` | Conversación, herramientas, modelos, aprendizaje. Sin dependencias de Windows. |
+| `Viernes.Core` | Conversación, herramientas, modelos, aprendizaje, misiones, sesión en vivo. Sin dependencias de Windows. |
 | `Viernes.Platform.Windows` | Voz, acciones sobre el sistema, preferencias. |
 | `Viernes.Memory` | Memoria personal persistente. |
-| `Viernes.App` | La ventana, la gota y la bandeja. WPF. |
+| `Viernes.Mcp` | El conector: expone Viernes como servidor MCP. |
+| `Viernes.App` | La ventana, el orbe y la bandeja. WPF. |
+
+Casi todo lo que se puede probar sin Windows vive en `Viernes.Core`, y por eso ahí están casi todas
+las pruebas. `Viernes.App` no tiene proyecto de pruebas —WPF no se deja— así que lo suyo se verifica
+corriéndolo: `Viernes.exe --render-orb <carpeta>` saca dos hojas de contactos por cuerpo (los quince
+estados y el movimiento) y `Viernes.exe --medir` abre el banco de micrófono.
 
 Los comentarios del código están en castellano y explican **por qué**, no qué. Varios documentan
 mediciones reales — si vas a cambiar un umbral, leelos primero: la mayoría existe porque el valor

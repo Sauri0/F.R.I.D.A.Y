@@ -29,6 +29,9 @@ public sealed class ShellTool : IAssistantTool
     /// <summary>Techo de tiempo. Un comando que cuelga sin esto se lleva el turno y la conversación.</summary>
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(45);
 
+    /// <summary>Todo lo que no puede cruzar hacia un proceso que lanza el asistente.</summary>
+    private static readonly string[] Credentials = ["OPENROUTER_API_KEY", "GOOGLE_API_KEY"];
+
     private const int MaximumOutput = 8_000;
 
     public ToolDefinition Definition { get; } = ToolDefinition.Create(
@@ -76,9 +79,19 @@ public sealed class ShellTool : IAssistantTool
         start.ArgumentList.Add("-Command");
         start.ArgumentList.Add(command);
 
-        // La credencial del asistente no viaja al proceso hijo. Un comando puede necesitar la red,
-        // nunca la clave de quien lo lanzó.
-        start.Environment.Remove("OPENROUTER_API_KEY");
+        // Las credenciales del asistente no viajan al proceso hijo. Un comando puede necesitar la
+        // red, nunca la clave de quien lo lanzó.
+        //
+        // Son DOS, y la segunda se agregó tarde: la de Google apareció con la sesión hablada y esta
+        // línea se quedó con una sola. Normalmente esa clave vive en claves.json y no en el entorno,
+        // así que no habría nada que borrar — pero se lee con respaldo en el entorno, para quien
+        // prefiera no tener claves en archivos, y a ése le viajaba al proceso hijo.
+        //
+        // Si mañana hay una tercera, va acá. Es la única puerta por la que este proceso lanza otro.
+        foreach (var credencial in Credentials)
+        {
+            start.Environment.Remove(credencial);
+        }
 
         try
         {
