@@ -9,13 +9,31 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using Viernes.App.Controls;
 using Viernes.App.Services;
+using Viernes.App.Shell;
 using Viernes.App.ViewModels;
 using Binding = System.Windows.Data.Binding;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
+using Point = System.Windows.Point;
+using Size = System.Windows.Size;
 
 namespace Viernes.App;
 
+/// <summary>
+/// La ventana: un orbe que se arrastra y un vidrio que se despliega al lado.
+/// </summary>
+/// <remarks>
+/// La ventana mide siempre lo mismo —el desplegable más ancho, el más alto y el aire de las sombras—
+/// y es transparente. Lo que cambia de forma es el vidrio de adentro. Antes cambiaba el tamaño de la
+/// ventana y, como el orbe está anclado a una esquina, había que corregir <c>Left</c> y <c>Top</c> en
+/// el mismo cuadro: eso es lo que se veía como un salto cada vez que se abría un panel.
+/// <para>
+/// Una ventana grande y transparente por encima del escritorio no molesta: siendo <em>layered</em>,
+/// Windows deja pasar el clic por los píxeles con alfa cero. Donde no hay vidrio ni orbe, el clic va
+/// a parar a lo que haya abajo.
+/// </para>
+/// </remarks>
 public partial class MainWindow : Window
 {
     private const uint SwpNoSize = 0x0001;
@@ -24,14 +42,27 @@ public partial class MainWindow : Window
     private const uint SwpShowWindow = 0x0040;
     private static readonly nint HwndTopmost = -1;
 
+    /// <summary>Curva de las transiciones del vidrio. Sale medida de la referencia.</summary>
+    private static readonly KeySpline GlassEase = new(0.22, 0.68, 0.32, 1);
+
     private readonly MainViewModel _viewModel;
     private readonly WindowPlacementStore _placementStore;
+    private readonly OrbMotion _motion = new();
+    private readonly OrbPresence _presence = new();
+    private readonly HoldToAuthorize _spendHold = new();
+
     private bool _pushToTalkActive;
     private CancellationTokenSource? _pushToTalkCancellation;
-    private double _appliedWidgetWidth = 108;
-    private double _appliedWidgetHeight = 108;
-    private bool _expandsLeft;
-    private System.Windows.Point _pressOrigin;
+    private bool _opensRight = true;
+    private bool _panelShown;
+    private bool _fastMove;
+    private bool _hidingToTray;
+    private Rect _workArea = Rect.Empty;
+    private int _workAreaAge;
+    private double _writtenLeft = double.NaN;
+    private double _writtenTop = double.NaN;
+    private TimeSpan _lastRender;
+    private Point _pressOrigin;
     private bool _pressPending;
     private bool _pressStartedOnButton;
 
@@ -41,8 +72,7 @@ public partial class MainWindow : Window
     /// <remarks>
     /// Con dos pantallas el orbe se quedaba clavado en la que le tocó al arrancar. Trabajás en una y
     /// el asistente vive en la otra: para hablarle hay que girar la cabeza, y lo que muestra —los
-    /// pasos, la respuesta— pasa en un monitor que no estás mirando. La clase que resuelve esto
-    /// estaba escrita hace tiempo y no la llamaba nadie.
+    /// pasos, la respuesta— pasa en un monitor que no estás mirando.
     /// </remarks>
     private readonly Services.MonitorSlots _monitors = new();
 
@@ -57,8 +87,18 @@ public partial class MainWindow : Window
         _placementStore = placementStore;
         DataContext = viewModel;
 
+        Width = ShellLayout.WindowWidth;
+        Height = ShellLayout.WindowHeight;
+        Stage.Width = ShellLayout.WindowWidth;
+        Stage.Height = ShellLayout.WindowHeight;
+
+        SpendHoldHost.Content = _spendHold;
+        _spendHold.Authorized += (_, _) => _viewModel.ClosePanel();
+
         ApplyOrbShape(viewModel.OrbShape);
+        ApplySide(opensRight: true, force: true);
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
+
         // El latido sólo existe en la gota: la nube tiene su propio vocabulario y no lo comparte.
         _viewModel.StepAdvanced += (_, _) => OrbHost.Children
             .OfType<LiquidOrb>()
@@ -76,7 +116,7 @@ public partial class MainWindow : Window
 
         if (shape == OrbShape.Nube)
         {
-            var nube = new NubeOrb { Width = 96, Height = 96 };
+            var nube = new NubeOrb { Width = ShellLayout.OrbSize, Height = ShellLayout.OrbSize };
             nube.SetBinding(NubeOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
             OrbHost.Children.Add(nube);
             return;
@@ -98,8 +138,12 @@ public partial class MainWindow : Window
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        _placementStore.Restore(this);
+        RestoreOrbPlacement();
+        Glass.Variant = DesktopGlass.Resolve(this);
+        DesktopGlass.TryApplySystemBackdrop(this);
+        StartSweep();
         StartFollowingActiveMonitor();
+        CompositionTarget.Rendering += OnRendering;
 
         try
         {
@@ -111,6 +155,338 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// El barrido: una banda de luz que cruza el vidrio y después espera. La pausa larga es lo que lo
+    /// hace leerse como un reflejo de algo que pasó, y no como una animación en bucle.
+    /// </summary>
+    private void StartSweep()
+    {
+        var travel = new DoubleAnimationUsingKeyFrames
+        {
+            Duration = TimeSpan.FromSeconds(12),
+            RepeatBehavior = RepeatBehavior.Forever
+        };
+        travel.KeyFrames.Add(new LinearDoubleKeyFrame(-160, KeyTime.FromPercent(0)));
+        travel.KeyFrames.Add(new SplineDoubleKeyFrame(560, KeyTime.FromPercent(0.22), new KeySpline(0.55, 0, 0.45, 1)));
+        travel.KeyFrames.Add(new LinearDoubleKeyFrame(560, KeyTime.FromPercent(1)));
+        SweepOffset.BeginAnimation(TranslateTransform.XProperty, travel);
+
+        // La barra del turno no promete un porcentaje: va y viene para decir que algo se mueve.
+        var pulse = new DoubleAnimation(0, 240, TimeSpan.FromSeconds(1.6))
+        {
+            RepeatBehavior = RepeatBehavior.Forever,
+            AutoReverse = true,
+            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+        };
+        TurnPulseOffset.BeginAnimation(TranslateTransform.XProperty, pulse);
+    }
+
+    /// <summary>
+    /// Lee la última posición guardada. Lo que se guarda es la esquina del orbe, no la de la ventana:
+    /// la ventana es un marco con aire alrededor y su esquina no significa nada para el usuario.
+    /// </summary>
+    private void RestoreOrbPlacement()
+    {
+        var workArea = CurrentWorkArea;
+        var bounds = ShellLayout.OrbBounds(workArea);
+
+        _placementStore.Restore(this);
+        var orb = new Point(Left, Top);
+
+        // Sin archivo guardado, el almacén propone la esquina de una ventana del tamaño de ésta. Como
+        // acá la ventana es mucho más grande que el orbe, esa esquina deja al orbe lejos del borde:
+        // en ese caso —y sólo en ese— se prefiere el rincón de abajo a la derecha, que es donde un
+        // asistente de escritorio espera aparecer la primera vez.
+        var fallbackLeft = workArea.Right - ShellLayout.WindowWidth - 24;
+        var fallbackTop = workArea.Bottom - ShellLayout.WindowHeight - 24;
+        if (Math.Abs(orb.X - fallbackLeft) < 1 && Math.Abs(orb.Y - fallbackTop) < 1)
+        {
+            orb = new Point(bounds.Right, bounds.Bottom);
+        }
+
+        _motion.Teleport(new Point(
+            Math.Clamp(orb.X, bounds.Left, bounds.Right),
+            Math.Clamp(orb.Y, bounds.Top, bounds.Bottom)));
+
+        ApplySide(ShellLayout.ShouldOpenRight(_motion.Position, workArea), force: true);
+        WriteWindowPosition();
+    }
+
+    /// <summary>
+    /// El cuadro. Acá se integra la física, se resuelve la presencia y se escribe la posición de la
+    /// ventana una sola vez.
+    /// </summary>
+    private void OnRendering(object? sender, EventArgs e)
+    {
+        if (e is not RenderingEventArgs rendering)
+        {
+            return;
+        }
+
+        var dt = _lastRender == default ? 1.0 / 60 : (rendering.RenderingTime - _lastRender).TotalSeconds;
+        _lastRender = rendering.RenderingTime;
+        if (dt <= 0)
+        {
+            return;
+        }
+
+        var workArea = CachedWorkArea();
+        var bounds = ShellLayout.OrbBounds(workArea);
+
+        if (_motion.IsDragging)
+        {
+            // Durante el arrastre la posición la manda Windows: acá sólo se anota, para poder soltar
+            // el orbe con la velocidad que traía.
+            _motion.ReportDragged(ShellLayout.OrbOriginFor(new Point(Left, Top), _opensRight), dt);
+        }
+        else
+        {
+            AdoptExternalMove();
+            _motion.ClampInto(bounds);
+            _motion.Step(dt, bounds);
+            WriteWindowPosition();
+        }
+
+        _presence.Step(dt);
+        ApplyPresence();
+        UpdateSide(workArea);
+        UpdatePanelVisibility();
+        UpdateDictationLevel();
+
+        if (_hidingToTray && _presence.IsGone)
+        {
+            _hidingToTray = false;
+            FinishHiding();
+        }
+    }
+
+    /// <summary>
+    /// El área útil, medida una vez cada veinte cuadros.
+    /// </summary>
+    /// <remarks>
+    /// Averiguarla cuesta tres llamadas al sistema —el handle, el monitor, el DPI— y en el bucle de
+    /// cuadro eso es sesenta veces por segundo para un dato que cambia cuando enchufás un monitor.
+    /// Un tercio de segundo de desfase no se nota; lo que sí se nota es el orbe pagando ese peaje.
+    /// </remarks>
+    private Rect CachedWorkArea()
+    {
+        if (_workAreaAge++ % 20 == 0 || _workArea.IsEmpty)
+        {
+            _workArea = CurrentWorkArea;
+        }
+
+        return _workArea;
+    }
+
+    /// <summary>
+    /// Si alguien más movió la ventana —el vigía de monitores, la llegada desde la bandeja—, la
+    /// física adopta esa posición en vez de pelearse con ella.
+    /// </summary>
+    private void AdoptExternalMove()
+    {
+        if (double.IsNaN(_writtenLeft))
+        {
+            return;
+        }
+
+        if (Math.Abs(Left - _writtenLeft) < 0.5 && Math.Abs(Top - _writtenTop) < 0.5)
+        {
+            return;
+        }
+
+        _motion.Teleport(ShellLayout.OrbOriginFor(new Point(Left, Top), _opensRight));
+    }
+
+    private void WriteWindowPosition()
+    {
+        var origin = ShellLayout.WindowOriginFor(_motion.Position, _opensRight);
+        if (Math.Abs(origin.X - Left) > 0.05)
+        {
+            Left = origin.X;
+        }
+
+        if (Math.Abs(origin.Y - Top) > 0.05)
+        {
+            Top = origin.Y;
+        }
+
+        _writtenLeft = Left;
+        _writtenTop = Top;
+    }
+
+    private void ApplyPresence()
+    {
+        var scale = _presence.Scale;
+        var offset = _presence.Offset;
+
+        OrbPresenceScale.ScaleX = scale;
+        OrbPresenceScale.ScaleY = scale;
+        OrbPresenceOffset.X = offset.X;
+        OrbPresenceOffset.Y = offset.Y;
+        OrbDragSurface.Opacity = _presence.Opacity;
+        OrbOverlay.Opacity = _presence.Opacity;
+
+        var gone = _presence.IsGone;
+        OrbDragSurface.IsHitTestVisible = !gone;
+        OrbDragSurface.Visibility = gone ? Visibility.Hidden : Visibility.Visible;
+        OrbOverlay.Visibility = gone ? Visibility.Hidden : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// El panel se abre hacia donde hay lugar. Si el orbe cruza la mitad de la pantalla, el vidrio se
+    /// espeja: cambian las esquinas, el lado por el que entra la luz y el origen de la escala.
+    /// </summary>
+    private void UpdateSide(Rect workArea)
+    {
+        var shouldOpenRight = ShellLayout.ShouldOpenRight(_motion.Position, workArea);
+        if (shouldOpenRight != _opensRight)
+        {
+            ApplySide(shouldOpenRight, force: false);
+        }
+    }
+
+    private void ApplySide(bool opensRight, bool force)
+    {
+        if (!force && opensRight == _opensRight)
+        {
+            return;
+        }
+
+        _opensRight = opensRight;
+
+        var orbLeft = opensRight ? ShellLayout.OrbLeftWhenOpeningRight : ShellLayout.OrbLeftWhenOpeningLeft;
+        Canvas.SetLeft(OrbDragSurface, orbLeft);
+        Canvas.SetTop(OrbDragSurface, ShellLayout.OrbTop);
+        Canvas.SetLeft(OrbOverlay, orbLeft);
+        Canvas.SetTop(OrbOverlay, ShellLayout.OrbTop);
+        Canvas.SetLeft(PanelHost, ShellLayout.PanelHostLeft(opensRight));
+
+        Glass.OpensRight = opensRight;
+        Glass.HorizontalAlignment = opensRight ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        Glass.RenderTransformOrigin = opensRight ? new Point(0, 0.5) : new Point(1, 0.5);
+
+        // El brillo no se espeja: la luz viene del ambiente, no del panel. La burbuja sí, porque su
+        // esquina chica es la que apunta al orbe.
+        DictationBubble.HorizontalAlignment = opensRight ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        DictationBubble.Margin = opensRight
+            ? new Thickness(2, 0, 0, 116)
+            : new Thickness(0, 0, 2, 116);
+        DictationBubble.CornerRadius = opensRight
+            ? new CornerRadius(20, 20, 20, 7)
+            : new CornerRadius(20, 20, 7, 20);
+
+        WriteWindowPosition();
+    }
+
+    /// <summary>
+    /// El vidrio se retrae mientras el orbe está agarrado o viaja rápido: un panel arrastrado por la
+    /// pantalla se lee como una ventana que persigue al mouse.
+    /// </summary>
+    private void UpdatePanelVisibility()
+    {
+        if (_fastMove)
+        {
+            _fastMove = _motion.Speed > 170;
+        }
+        else
+        {
+            _fastMove = _motion.Speed > 340;
+        }
+
+        var shouldShow = _viewModel.IsPanelOpen &&
+            !_presence.IsGone &&
+            !_motion.IsDragging &&
+            !_fastMove;
+
+        if (shouldShow == _panelShown)
+        {
+            return;
+        }
+
+        _panelShown = shouldShow;
+        AnimatePanel(shouldShow);
+    }
+
+    private void AnimatePanel(bool show)
+    {
+        if (show)
+        {
+            PanelHost.Visibility = Visibility.Visible;
+            ApplyPanelShape(animate: false);
+        }
+
+        var fade = new DoubleAnimation(show ? 1 : 0, TimeSpan.FromMilliseconds(show ? 200 : 160))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+
+        if (!show)
+        {
+            fade.Completed += (_, _) =>
+            {
+                if (!_panelShown)
+                {
+                    PanelHost.Visibility = Visibility.Collapsed;
+                }
+            };
+        }
+
+        Glass.BeginAnimation(OpacityProperty, fade);
+
+        var pop = new DoubleAnimation(show ? 1 : 0.93, TimeSpan.FromMilliseconds(280))
+        {
+            EasingFunction = new BackEase { Amplitude = 0.12, EasingMode = EasingMode.EaseOut }
+        };
+        GlassScale.BeginAnimation(ScaleTransform.ScaleXProperty, pop);
+        GlassScale.BeginAnimation(ScaleTransform.ScaleYProperty, pop);
+    }
+
+    /// <summary>
+    /// El alto y el ancho del vidrio se interpolan; nunca se cierra para volver a abrirse. Es el mismo
+    /// objeto cambiando de forma, y eso es lo que lo hace sentir un objeto y no una ventana.
+    /// </summary>
+    private void ApplyPanelShape(bool animate)
+    {
+        var spec = _viewModel.ActivePanelSpec;
+        Glass.Family = spec.Family;
+
+        if (!animate)
+        {
+            Glass.BeginAnimation(WidthProperty, null);
+            Glass.BeginAnimation(HeightProperty, null);
+            Glass.Width = spec.Width;
+            Glass.Height = spec.Height;
+            return;
+        }
+
+        Glass.BeginAnimation(WidthProperty, Morph(spec.Width, 320));
+        Glass.BeginAnimation(HeightProperty, Morph(spec.Height, 360));
+    }
+
+    private static DoubleAnimationUsingKeyFrames Morph(double to, int milliseconds)
+    {
+        var animation = new DoubleAnimationUsingKeyFrames
+        {
+            Duration = TimeSpan.FromMilliseconds(milliseconds),
+            FillBehavior = FillBehavior.HoldEnd
+        };
+        animation.KeyFrames.Add(new SplineDoubleKeyFrame(to, KeyTime.FromPercent(1), GlassEase));
+        return animation;
+    }
+
+    private void UpdateDictationLevel()
+    {
+        if (DictationBubble.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        DictationLevel.Width = Math.Clamp(_viewModel.AudioLevel, 0, 1) * 60;
+    }
+
+    private void Panel_MouseEnter(object sender, MouseEventArgs e) => _viewModel.IsPanelHovered = true;
+
+    private void Panel_MouseLeave(object sender, MouseEventArgs e) => _viewModel.IsPanelHovered = false;
 
     /// <summary>
     /// Lleva el orbe al monitor donde estás trabajando, sin perseguir el mouse.
@@ -120,14 +496,13 @@ public partial class MainWindow : Window
     /// rato. Cruzar la pantalla para llegar a un botón no es «me mudé de monitor», y un orbe que
     /// sigue al mouse en tiempo real es un moscardón.
     /// <para>
-    /// La posición de cada monitor se recuerda por separado, así que si en la pantalla de la derecha
-    /// lo dejaste arriba y en la izquierda abajo, cada una lo recibe donde lo dejaste. Y no se mueve
-    /// mientras la ventana está desplegada: sería sacarle de las manos algo que estás leyendo.
+    /// La posición de cada monitor se recuerda por separado. Y no se mueve mientras hay un panel
+    /// abierto: sería sacarle de las manos algo que estás leyendo.
     /// </para>
     /// </remarks>
     private void StartFollowingActiveMonitor()
     {
-        _currentMonitor = Services.MonitorSlots.MonitorAt(new System.Windows.Point(Left, Top)).Key;
+        _currentMonitor = Services.MonitorSlots.MonitorAt(_motion.Position).Key;
 
         _followTimer = new System.Windows.Threading.DispatcherTimer
         {
@@ -136,7 +511,7 @@ public partial class MainWindow : Window
 
         _followTimer.Tick += (_, _) =>
         {
-            if (_viewModel.IsExpanded || _viewModel.IsConfirmationVisible || !IsVisible)
+            if (_viewModel.IsPanelOpen || _motion.IsDragging || !IsVisible)
             {
                 _stableTicks = 0;
                 return;
@@ -157,19 +532,21 @@ public partial class MainWindow : Window
             }
 
             _stableTicks = 0;
+            _monitors.Remember(_currentMonitor, _motion.Position);
 
-            // Dónde estaba en el monitor que se deja, para encontrarlo igual al volver.
-            _monitors.Remember(_currentMonitor, new System.Windows.Point(Left, Top));
-
-            var destino = _monitors.SlotFor(
+            var destination = _monitors.SlotFor(
                 key,
                 workArea,
-                new System.Windows.Size(_appliedWidgetWidth, _appliedWidgetHeight));
+                new Size(ShellLayout.OrbSize, ShellLayout.OrbSize));
 
-            Left = destino.X;
-            Top = destino.Y;
+            var bounds = ShellLayout.OrbBounds(workArea);
+            _motion.Teleport(new Point(
+                Math.Clamp(destination.X, bounds.Left, bounds.Right),
+                Math.Clamp(destination.Y, bounds.Top, bounds.Bottom)));
+            ApplySide(ShellLayout.ShouldOpenRight(_motion.Position, workArea), force: false);
+            WriteWindowPosition();
             _currentMonitor = key;
-            _placementStore.Save(this);
+            SaveOrbPlacement();
         };
 
         _followTimer.Start();
@@ -178,27 +555,27 @@ public partial class MainWindow : Window
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
         SaveOrbPlacement();
-        if (!App.Current.IsExitRequested)
+        if (App.Current.IsExitRequested)
         {
-            e.Cancel = true;
-            _ = _viewModel.SetShellVisibilityAsync(false, CancellationToken.None);
-            Hide();
-            App.Current.NotifyWindowVisibilityChanged(false);
+            return;
         }
+
+        e.Cancel = true;
+        HideToTray();
     }
 
-    private void Window_Closed(object? sender, EventArgs e) =>
+    private void Window_Closed(object? sender, EventArgs e)
+    {
+        CompositionTarget.Rendering -= OnRendering;
+        _followTimer?.Stop();
         _viewModel.PropertyChanged -= ViewModelOnPropertyChanged;
+    }
 
     private void ViewModelOnPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MainViewModel.WidgetWidth))
+        if (e.PropertyName == nameof(MainViewModel.ActivePanelSpec))
         {
-            ApplyWidgetWidth(_viewModel.WidgetWidth);
-        }
-        else if (e.PropertyName == nameof(MainViewModel.WidgetHeight))
-        {
-            ApplyWidgetHeight(_viewModel.WidgetHeight);
+            ApplyPanelShape(animate: _panelShown);
         }
         else if (e.PropertyName == nameof(MainViewModel.OrbShape))
         {
@@ -206,86 +583,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyWidgetWidth(double targetWidth)
-    {
-        if (Math.Abs(targetWidth - _appliedWidgetWidth) < 0.5)
-        {
-            return;
-        }
-
-        var workArea = CurrentWorkArea;
-        var previousWidth = _appliedWidgetWidth;
-        var isBecomingExpanded = previousWidth <= 120 && targetWidth > 120;
-        var isBecomingMinimal = previousWidth > 120 && targetWidth <= 120;
-
-        if (isBecomingExpanded)
-        {
-            _expandsLeft = Left + targetWidth > workArea.Right - 8;
-            ConfigureExpansionDirection(_expandsLeft);
-            if (_expandsLeft)
-            {
-                Left -= targetWidth - previousWidth;
-            }
-        }
-        else if (_expandsLeft)
-        {
-            Left += previousWidth - targetWidth;
-        }
-
-        _appliedWidgetWidth = targetWidth;
-        Width = targetWidth;
-
-        if (isBecomingMinimal)
-        {
-            ConfigureExpansionDirection(expandsLeft: false);
-            _expandsLeft = false;
-        }
-
-        Left = Math.Clamp(Left, workArea.Left + 4, Math.Max(workArea.Left + 4, workArea.Right - targetWidth - 4));
-    }
-
-    private void ApplyWidgetHeight(double targetHeight)
-    {
-        if (Math.Abs(targetHeight - _appliedWidgetHeight) < 0.5)
-        {
-            return;
-        }
-
-        var workArea = CurrentWorkArea;
-        Top -= (targetHeight - _appliedWidgetHeight) / 2;
-        _appliedWidgetHeight = targetHeight;
-        Height = targetHeight;
-        Top = Math.Clamp(Top, workArea.Top + 4, Math.Max(workArea.Top + 4, workArea.Bottom - targetHeight - 4));
-    }
-
-    private void ConfigureExpansionDirection(bool expandsLeft)
-    {
-        if (expandsLeft)
-        {
-            LeadingColumn.Width = new GridLength(1, GridUnitType.Star);
-            TrailingColumn.Width = new GridLength(96);
-            Grid.SetColumn(AssistantBubble, 0);
-            Grid.SetColumn(OrbDragSurface, 1);
-            OrbDragSurface.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
-            AssistantBubble.Margin = new Thickness(2, 2, -1, 2);
-            AssistantBubble.Padding = new Thickness(8, 10, 14, 8);
-            AssistantBubble.CornerRadius = new CornerRadius(24, 5, 5, 24);
-            return;
-        }
-
-        LeadingColumn.Width = new GridLength(96);
-        TrailingColumn.Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(OrbDragSurface, 0);
-        Grid.SetColumn(AssistantBubble, 1);
-        OrbDragSurface.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
-        AssistantBubble.Margin = new Thickness(-1, 2, 2, 2);
-        AssistantBubble.Padding = new Thickness(14, 10, 8, 8);
-        AssistantBubble.CornerRadius = new CornerRadius(5, 24, 24, 5);
-    }
-
     /// <summary>
     /// Presionar en cualquier parte del orbe arrastra; si se suelta sin haberse movido, cuenta como
-    /// toque y abre el panel. Antes había que apuntar al aro exterior, que a 96 px es una franja
+    /// toque y abre el panel. Antes había que apuntar al aro exterior, que a 108 px es una franja
     /// de pocos píxeles y volvía tedioso algo que se hace todo el tiempo.
     /// </summary>
     /// <remarks>
@@ -314,6 +614,10 @@ public partial class MainWindow : Window
     /// <remarks>
     /// Los cuatro píxeles de tolerancia son los mismos que antes decidían «esto fue un toque»: si no
     /// se llegan a recorrer, nadie mueve nada y el toque lo resuelve el botón.
+    /// <para>
+    /// <c>DragMove</c> no vuelve hasta que se suelta el botón, así que la inercia se arma con lo que
+    /// el bucle de cuadro fue anotando mientras tanto: soltar es empezar a volar con esa velocidad.
+    /// </para>
     /// </remarks>
     private void Orb_PreviewMouseMove(object sender, MouseEventArgs e)
     {
@@ -346,6 +650,8 @@ public partial class MainWindow : Window
             Mouse.Capture(null);
         }
 
+        _motion.BeginDrag();
+
         try
         {
             // DragMove no vuelve hasta que se suelta el botón.
@@ -356,6 +662,8 @@ public partial class MainWindow : Window
             // El botón se soltó antes de que arrancara el arrastre; no hay nada que guardar distinto.
         }
 
+        _motion.ReportDragged(ShellLayout.OrbOriginFor(new Point(Left, Top), _opensRight), 1.0 / 60);
+        _motion.Drop();
         SaveOrbPlacement();
     }
 
@@ -392,6 +700,12 @@ public partial class MainWindow : Window
     /// </remarks>
     private void HandleOrbTap()
     {
+        if (_presence.IsGone)
+        {
+            _presence.Aparecer();
+            return;
+        }
+
         Keyboard.Focus(OrbButton);
         _viewModel.OpenTextInput();
 
@@ -418,11 +732,31 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private void HideButton_Click(object sender, RoutedEventArgs e)
+    private void HideButton_Click(object sender, RoutedEventArgs e) => HideToTray();
+
+    /// <summary>
+    /// Guardarse: el orbe se encoge hacia el borde más cercano y recién ahí la ventana desaparece.
+    /// </summary>
+    /// <remarks>
+    /// La ventana se oculta cuando la animación terminó, no antes: esconder algo que todavía se está
+    /// yendo es un corte, y un corte no dice a dónde se fue.
+    /// </remarks>
+    private void HideToTray()
     {
         CancelActiveVoice();
-        _ = _viewModel.SetShellVisibilityAsync(false, CancellationToken.None);
+        _viewModel.ClosePanel();
         SaveOrbPlacement();
+
+        var centre = new Point(
+            _motion.Position.X + ShellLayout.OrbSize / 2,
+            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        _presence.Esconder(centre, CurrentWorkArea);
+        _hidingToTray = true;
+    }
+
+    private void FinishHiding()
+    {
+        _ = _viewModel.SetShellVisibilityAsync(false, CancellationToken.None);
         Hide();
         App.Current.NotifyWindowVisibilityChanged(false);
     }
@@ -464,45 +798,33 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// La gota se desprende del borde inferior derecho del monitor donde ya vive —no del monitor
-    /// principal— y aterriza en su lugar. Llamarlo no lo muda de pantalla: si lo dejaste en la
-    /// segunda, ahí se queda.
+    /// La llegada desde la bandeja: el orbe se desprende del borde inferior derecho del monitor donde
+    /// ya vive y aterriza en su lugar.
     /// </summary>
     internal void PlayArrivalFromTray()
     {
         var workArea = CurrentWorkArea;
-        var targetLeft = Left;
-        var targetTop = Top;
+        var bounds = ShellLayout.OrbBounds(workArea);
+        var target = _motion.Position;
 
-        var startLeft = Math.Clamp(workArea.Right - 52, workArea.Left, workArea.Right - 8);
-        var startTop = Math.Clamp(workArea.Bottom - 34, workArea.Top, workArea.Bottom - 8);
-        if (Math.Abs(startLeft - targetLeft) < 2 && Math.Abs(startTop - targetTop) < 2)
+        var start = new Point(
+            Math.Clamp(workArea.Right - 52, bounds.Left, bounds.Right),
+            Math.Clamp(workArea.Bottom - 34, bounds.Top, bounds.Bottom));
+
+        _presence.Aparecer();
+
+        if (Math.Abs(start.X - target.X) < 2 && Math.Abs(start.Y - target.Y) < 2)
         {
             return;
         }
 
-        Left = startLeft;
-        Top = startTop;
-        Opacity = 0;
-
-        var travel = TimeSpan.FromMilliseconds(420);
-        var glide = new CubicEase { EasingMode = EasingMode.EaseOut };
-
-        var slideLeft = new DoubleAnimation(startLeft, targetLeft, travel) { EasingFunction = glide };
-        slideLeft.Completed += (_, _) =>
-        {
-            // Soltar la animación devuelve el control de la posición a DragMove.
-            BeginAnimation(LeftProperty, null);
-            BeginAnimation(TopProperty, null);
-            Left = targetLeft;
-            Top = targetTop;
-        };
-
-        BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)));
-        BeginAnimation(LeftProperty, slideLeft);
-        BeginAnimation(TopProperty, new DoubleAnimation(startTop, targetTop, travel) { EasingFunction = glide });
-
-        PlaySquashAndStretch(travel);
+        // La física escribe la posición de la ventana cuadro a cuadro, así que la llegada no se anima
+        // con Storyboards sobre Left y Top: se teletransporta al punto de partida y se deja que el
+        // resorte de reposo la lleve. Es el mismo movimiento que cuando la soltás cerca de un borde.
+        _motion.Teleport(start);
+        _motion.Nudge(target);
+        ApplySide(ShellLayout.ShouldOpenRight(target, workArea), force: false);
+        PlaySquashAndStretch(TimeSpan.FromMilliseconds(420));
     }
 
     private void PlaySquashAndStretch(TimeSpan travel)
@@ -540,6 +862,9 @@ public partial class MainWindow : Window
     /// </summary>
     internal void ShowWithoutStealingFocus()
     {
+        _presence.Aparecer();
+        _hidingToTray = false;
+
         var handle = new WindowInteropHelper(this).Handle;
         if (handle == nint.Zero)
         {
@@ -549,12 +874,9 @@ public partial class MainWindow : Window
         SetWindowPos(handle, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
     }
 
-    internal void SaveOrbPlacement()
-    {
-        var anchorLeft = Left + (_expandsLeft ? Math.Max(0, _appliedWidgetWidth - 108) : 0);
-        var anchorTop = Top + Math.Max(0, _appliedWidgetHeight - 108) / 2;
-        _placementStore.Save(this, anchorLeft, anchorTop);
-    }
+    /// <summary>Guarda dónde quedó el orbe. Lo que se persiste es su esquina, no la de la ventana.</summary>
+    internal void SaveOrbPlacement() =>
+        _placementStore.Save(this, _motion.Position.X, _motion.Position.Y);
 
     internal void CancelActiveVoice()
     {
@@ -570,9 +892,16 @@ public partial class MainWindow : Window
         _ = _viewModel.CancelVoiceAsync(CancellationToken.None);
     }
 
-
     private async void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Escape && _viewModel.IsPanelOpen)
+        {
+            e.Handled = true;
+            _viewModel.ClosePanel();
+            Keyboard.Focus(OrbButton);
+            return;
+        }
+
         if (e.Key == Key.Space && OrbButton.IsKeyboardFocused && !e.IsRepeat)
         {
             e.Handled = true;

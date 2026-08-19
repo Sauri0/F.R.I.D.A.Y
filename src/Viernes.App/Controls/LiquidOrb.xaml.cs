@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Media.Effects;
 using Viernes.App.ViewModels;
 
 // El proyecto referencia WPF y WinForms a la vez: los alias evitan la ambigüedad de nombres.
@@ -11,44 +10,33 @@ using UserControl = System.Windows.Controls.UserControl;
 namespace Viernes.App.Controls;
 
 /// <summary>
-/// La gota. Ocho puntos sobre una elipse, cada uno oscilando con su propio período, unidos con
-/// tangentes Catmull-Rom y reconstruidos cuadro a cuadro.
+/// La gota. Un contorno de 72 muestras cuya distancia al centro es la suma de cinco armónicos con
+/// períodos que no comparten divisor, reconstruido cuadro a cuadro.
 /// </summary>
 /// <remarks>
 /// Dos reglas que se pagaron caro y no conviene volver a probar: <b>deformar más no la hace más
 /// líquida</b> —una gota en reposo es casi esférica y lo que la vuelve agua es la luz—, y <b>nada
-/// rota</b>, porque girar un cuerpo ovoide barre la silueta y despega los reflejos.
+/// rota</b>, porque girar un cuerpo ovoide barre la silueta y despega los reflejos. La única
+/// excepción a la segunda es la pregunta, que ladea el cuerpo a propósito y por poco tiempo.
+/// <para>
+/// Los cinco armónicos son 2, 3, 4, 5 y 7. El siete y no el seis: seis es múltiplo de dos y de tres
+/// y el conjunto se cerraría en un patrón visible cada pocas vueltas.
+/// </para>
 /// </remarks>
-internal partial class LiquidOrb : UserControl
+internal partial class LiquidOrb : UserControl, IOrbBody
 {
-    private const int Points = 8;
-    private const double Radius = 25.0;
+    /// <summary>Muestras del contorno. A 72 el ojo ya no encuentra el polígono.</summary>
+    private const int Samples = 72;
+
+    private const double BaseRadius = 24.5;
     private const double CenterX = 35.0;
     private const double CenterY = 36.5;
-    private const double ScaleX = 1.035;
-    private const double ScaleY = 0.965;
 
-    /// <summary>Tangente Catmull-Rom. A ocho puntos el error contra el círculo es menor al 0,1 %.</summary>
-    private const double Tangent = 0.1875;
+    /// <summary>Los cinco armónicos. Ninguno es múltiplo de otro, así que el conjunto nunca se repite.</summary>
+    private static readonly double[] Harmonics = [2, 3, 4, 5, 7];
 
-    /// <summary>Períodos deliberadamente no conmensurables: el conjunto nunca vuelve a alinearse.</summary>
-    private static readonly double[] Periods = [6.3, 7.1, 8.7, 7.9, 9.3, 6.7, 8.1, 10.3];
-    private static readonly double[] Phases = [0, 1.7, 3.1, 4.6, 2.2, 5.4, 0.9, 3.8];
-
-    private static readonly TimeSpan StateTransition = TimeSpan.FromMilliseconds(320);
-
-    /// <summary>
-    /// Entrar o salir de capacidad reducida tarda casi el triple que un cambio de estado normal.
-    /// </summary>
-    /// <remarks>
-    /// Perder la clave o la red no es un evento: es una condición. A 320 ms se leería como que algo
-    /// acaba de pasar, y lo que hay que comunicar es que algo <em>está</em> distinto. La misma
-    /// lentitud al volver es, por sí sola, el aviso de que la capacidad se recuperó.
-    /// </remarks>
-    private static readonly TimeSpan CapacityTransition = TimeSpan.FromMilliseconds(900);
-
-    private static bool IsCapacityState(AssistantVisualState state) =>
-        state is AssistantVisualState.Unconfigured or AssistantVisualState.Offline;
+    /// <summary>Velocidad relativa de cada armónico. Los signos cruzados desarman cualquier simetría.</summary>
+    private static readonly double[] HarmonicRates = [1, -0.74, 0.52, -0.38, 0.24];
 
     /// <summary>
     /// Los tres tramos de una tarea larga. El orbe informa <em>modo</em>, no tiempo, y por eso el
@@ -69,14 +57,26 @@ internal partial class LiquidOrb : UserControl
     /// <summary>Sube 1 px cada 1500 ms sobre 108 px de alto.</summary>
     private const double SedimentRisePerSecond = 1.0 / 1.5 / 108;
 
-    private readonly Point[] _points = new Point[Points];
-    private StateProfile _from = StateProfile.For(AssistantVisualState.Idle);
-    private StateProfile _to = StateProfile.For(AssistantVisualState.Idle);
+    private readonly Point[] _points = new Point[Samples];
+    private readonly double[] _harmonicPhase = [0.4, 1.9, 3.3, 5.1, 2.2];
+    private readonly List<Ripple> _ripples = [];
+    private readonly OrbMoodClock _moods = new();
+
+    private OrbStateProfile _from = OrbPalette.For(AssistantVisualState.Idle);
+    private OrbStateProfile _to = OrbPalette.For(AssistantVisualState.Idle);
     private double _transition = 1.0;
+    private bool _capacityChange;
+
     private double _phase;
     private double _clock;
     private double _levelSmoothed;
-    private bool _capacityChange;
+
+    /// <summary>Escala del cuerpo entero y su velocidad: un resorte, no una animación.</summary>
+    private double _scale = 1.0;
+    private double _scaleVelocity;
+
+    private double _nextThinkRipple;
+    private OrbMoodShape _mood = OrbMoodShape.Neutral;
 
     /// <summary>Segundos que lleva la tarea en curso. Cero cuando no hay ninguna.</summary>
     private double _taskElapsed;
@@ -94,28 +94,67 @@ internal partial class LiquidOrb : UserControl
         Unloaded += (_, _) => Stop();
     }
 
+    /// <summary>El estado de fondo.</summary>
     public static readonly DependencyProperty StateProperty = DependencyProperty.Register(
         nameof(State),
         typeof(AssistantVisualState),
         typeof(LiquidOrb),
         new PropertyMetadata(AssistantVisualState.Idle, OnStateChanged));
 
-    internal AssistantVisualState State
+    /// <inheritdoc />
+    public AssistantVisualState State
     {
         get => (AssistantVisualState)GetValue(StateProperty);
         set => SetValue(StateProperty, value);
     }
 
+    /// <summary>Sobre escritorio claro la gota se dibuja con el color de profundidad, no con el cuerpo.</summary>
+    public static readonly DependencyProperty IsLightDesktopProperty = DependencyProperty.Register(
+        nameof(IsLightDesktop),
+        typeof(bool),
+        typeof(LiquidOrb),
+        new PropertyMetadata(false));
+
+    /// <inheritdoc />
+    public bool IsLightDesktop
+    {
+        get => (bool)GetValue(IsLightDesktopProperty);
+        set => SetValue(IsLightDesktopProperty, value);
+    }
+
+    /// <summary>Modo madrugada, de 0 a 1.</summary>
+    public static readonly DependencyProperty NightModeProperty = DependencyProperty.Register(
+        nameof(NightMode),
+        typeof(double),
+        typeof(LiquidOrb),
+        new PropertyMetadata(0.0));
+
+    /// <inheritdoc />
+    public double NightMode
+    {
+        get => (double)GetValue(NightModeProperty);
+        set => SetValue(NightModeProperty, value);
+    }
+
+    /// <inheritdoc />
+    public void ShowMood(OrbMood mood) => _moods.Trigger(mood);
+
     /// <summary>
     /// Micrófono armado pero sin capturar. No dibuja geometría nueva: tiñe de verde el rebote que
     /// ya existía, porque a 108 px cualquier anillo compite con el borde oscuro que da densidad.
     /// </summary>
+    /// <remarks>
+    /// Desde que existe <see cref="AssistantVisualState.Watching"/> esto es redundante y se
+    /// conserva por compatibilidad con el enlace del shell: guardia dice lo mismo con el cuerpo
+    /// entero, que es mucho más difícil de pasar por alto que un tinte en un reflejo.
+    /// </remarks>
     public static readonly DependencyProperty IsMicrophoneArmedProperty = DependencyProperty.Register(
         nameof(IsMicrophoneArmed),
         typeof(bool),
         typeof(LiquidOrb),
         new PropertyMetadata(false));
 
+    /// <summary>Micrófono armado pero sin capturar.</summary>
     internal bool IsMicrophoneArmed
     {
         get => (bool)GetValue(IsMicrophoneArmedProperty);
@@ -129,6 +168,7 @@ internal partial class LiquidOrb : UserControl
         typeof(LiquidOrb),
         new PropertyMetadata(false));
 
+    /// <summary>Hay autorización de gasto viva.</summary>
     internal bool HasSpendAuthorization
     {
         get => (bool)GetValue(HasSpendAuthorizationProperty);
@@ -142,6 +182,7 @@ internal partial class LiquidOrb : UserControl
         typeof(LiquidOrb),
         new PropertyMetadata(false));
 
+    /// <summary>Conservada por compatibilidad con el enlace del shell.</summary>
     internal bool IsMicrophoneActive
     {
         get => (bool)GetValue(IsMicrophoneActiveProperty);
@@ -162,6 +203,7 @@ internal partial class LiquidOrb : UserControl
         typeof(LiquidOrb),
         new PropertyMetadata(0.0));
 
+    /// <summary>Nivel del micrófono, de 0 a 1.</summary>
     internal double AudioLevel
     {
         get => (double)GetValue(AudioLevelProperty);
@@ -171,16 +213,30 @@ internal partial class LiquidOrb : UserControl
     private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         var orb = (LiquidOrb)d;
+        var next = (AssistantVisualState)e.NewValue;
 
         // Se interpola desde lo que se está viendo, no desde el estado anterior nominal: si el
         // cambio llega a mitad de una transición, no hay salto.
-        orb._from = StateProfile.Lerp(orb._from, orb._to, orb._transition);
-        orb._to = StateProfile.For((AssistantVisualState)e.NewValue);
+        orb._from = OrbPalette.Lerp(orb._from, orb._to, OrbPalette.SineInOut(orb._transition));
+        orb._to = OrbPalette.For(next);
         orb._transition = 0;
 
         // Basta con que uno de los dos lados sea de capacidad: entrar y salir tardan lo mismo.
-        orb._capacityChange = IsCapacityState((AssistantVisualState)e.OldValue) ||
-            IsCapacityState((AssistantVisualState)e.NewValue);
+        orb._capacityChange = OrbPalette.IsCapacityState((AssistantVisualState)e.OldValue) ||
+            OrbPalette.IsCapacityState(next);
+
+        // Interrumpida entra de golpe: la transición arranca terminada y la masa se hunde.
+        if (orb._to.IsSnap)
+        {
+            orb._transition = 1;
+            orb._ripples.Add(new Ripple(orb._clock, -1.15));
+            orb._scaleVelocity -= 1.5;
+        }
+        else
+        {
+            orb._ripples.Add(new Ripple(orb._clock, 1));
+            orb._scaleVelocity += 1.15;
+        }
     }
 
     private void Start()
@@ -221,31 +277,73 @@ internal partial class LiquidOrb : UserControl
         delta = Math.Clamp(delta, 0, 0.1);
         _clock += delta;
 
+        var duration = (_capacityChange ? OrbPalette.CapacityTransition : OrbPalette.Transition).TotalSeconds;
         if (_transition < 1)
         {
-            var duration = _capacityChange ? CapacityTransition : StateTransition;
-            _transition = Math.Min(1, _transition + (delta / duration.TotalSeconds));
+            _transition = Math.Min(1, _transition + (delta / duration));
         }
 
-        var eased = SineInOut(_transition);
-        var current = StateProfile.Lerp(_from, _to, eased);
+        var eased = OrbPalette.SineInOut(_transition);
+        var profile = OrbPalette.Lerp(_from, _to, eased);
 
-        current = ApplyTaskPacing(current, delta);
+        _mood = _moods.Advance(delta, OrbBody.Gota);
+        if (_moods.TryTakeImpulse(out var impulse))
+        {
+            _ripples.Add(new Ripple(_clock, impulse.Ripple));
+            _scaleVelocity += impulse.Scale;
+        }
+
+        profile = ApplyTaskPacing(profile, delta);
         AdvanceBeat(delta);
 
-        // La viscosidad es velocidad del mismo fluido: acelera el reloj de la ondulación, no la amplitud.
-        _phase += delta * current.Viscosity;
+        // La velocidad del estado acelera el reloj de la ondulación, no su amplitud.
+        var speed = OrbNight.Speed(NightMode) * profile.DropSpeed;
+        _phase += delta * speed;
+        for (var i = 0; i < Harmonics.Length; i++)
+        {
+            _harmonicPhase[i] += delta * speed * HarmonicRates[i] * 0.9;
+        }
 
-        ApplyGeometry(current);
-        ApplyPalette(current);
+        // La escala es un resorte crítico: los golpes entran como velocidad y vuelven solos.
+        _scaleVelocity += ((170 * (1 - _scale)) - (15 * _scaleVelocity)) * delta;
+        _scale += _scaleVelocity * delta;
+
+        if (profile.ThinkPeriod > 0 && _clock > _nextThinkRipple)
+        {
+            _ripples.Add(new Ripple(_clock, 0.42));
+            _nextThinkRipple = _clock + profile.ThinkPeriod;
+        }
+
+        _ripples.RemoveAll(r => _clock - r.Start > 1.5);
+
+        ApplyGeometry(profile, eased);
+        ApplyPalette(profile);
+    }
+
+    /// <summary>Las ondas que salen del centro, sumadas para un radio dado.</summary>
+    private double RippleAt(double radius)
+    {
+        var value = 0.0;
+        foreach (var ripple in _ripples)
+        {
+            var tau = _clock - ripple.Start;
+            if (tau > 1.5)
+            {
+                continue;
+            }
+
+            value += ripple.Amplitude * Math.Exp(-tau * 2.0) * Math.Sin(2 * Math.PI * ((radius * 1.25) - (tau * 2.15)));
+        }
+
+        return value * 0.072;
     }
 
     /// <summary>
     /// Ajusta el ritmo según cuánto lleva la tarea, y devuelve el perfil ya corregido.
     /// </summary>
-    private StateProfile ApplyTaskPacing(StateProfile profile, double delta)
+    private OrbStateProfile ApplyTaskPacing(OrbStateProfile profile, double delta)
     {
-        if (State != AssistantVisualState.Thinking)
+        if (State != AssistantVisualState.Thinking && State != AssistantVisualState.Background)
         {
             _taskElapsed = 0;
             Sediment.Height = 0;
@@ -261,19 +359,18 @@ internal partial class LiquidOrb : UserControl
             return profile;
         }
 
-        // Tramo 1: acelera. Tramo 2: desacelera y empieza a contar con sedimento.
-        var viscosity = 3.4;
-        if (_taskElapsed > LongTaskSeconds)
+        // Tramo 1: mantiene el ritmo del estado. Tramo 2: desacelera y empieza a contar con sedimento.
+        if (_taskElapsed <= LongTaskSeconds)
         {
-            var into = Math.Min(1, (_taskElapsed - LongTaskSeconds) / 3.0);
-            viscosity = 3.4 + ((2.0 - 3.4) * SineInOut(into));
-
-            var level = Math.Min(SedimentCeiling, (_taskElapsed - LongTaskSeconds) * SedimentRisePerSecond);
-            Sediment.Height = level * 70;
-            System.Windows.Controls.Canvas.SetTop(Sediment, 70 - (level * 70));
+            return profile;
         }
 
-        return profile with { Viscosity = viscosity };
+        var into = Math.Min(1, (_taskElapsed - LongTaskSeconds) / 3.0);
+        var level = Math.Min(SedimentCeiling, (_taskElapsed - LongTaskSeconds) * SedimentRisePerSecond);
+        Sediment.Height = level * 70;
+        System.Windows.Controls.Canvas.SetTop(Sediment, 70 - (level * 70));
+
+        return profile with { DropSpeed = profile.DropSpeed * (1 - (0.35 * OrbPalette.SineInOut(into))) };
     }
 
     /// <summary>
@@ -307,10 +404,49 @@ internal partial class LiquidOrb : UserControl
         }
     }
 
-    private void ApplyGeometry(StateProfile profile)
+    private void ApplyGeometry(OrbStateProfile profile, double eased)
     {
-        var (bias, excursionFactor) = profile.Character.Evaluate(_clock);
-        var excursion = profile.Excursion * excursionFactor;
+        // Los gestos propios del estado, todos sobre el radio del cuerpo entero.
+        var extra = _mood.Extra;
+        if (profile.Breath is { } breath)
+        {
+            extra += breath.Amplitude * Math.Sin(2 * Math.PI * _clock / breath.Period) * eased;
+        }
+
+        if (profile.Tremor > 0)
+        {
+            extra += profile.Tremor * Math.Sin(2 * Math.PI * _clock / 0.085) * eased;
+        }
+
+        if (profile.Knock is { } knock)
+        {
+            var u = (_clock % knock.Period) / knock.Period;
+            if (u < 0.16)
+            {
+                extra += knock.Amplitude * Math.Sin(Math.PI * u / 0.16);
+            }
+            else if (u is > 0.22 and < 0.38)
+            {
+                extra += knock.Amplitude * 0.68 * Math.Sin(Math.PI * (u - 0.22) / 0.16);
+            }
+        }
+
+        if (profile.ReachPeriod > 0)
+        {
+            var u = (_clock % profile.ReachPeriod) / profile.ReachPeriod;
+            extra += u < 0.46 ? 0.16 * Math.Sin(Math.PI * u / 0.46) : 0;
+        }
+
+        // Oído y boca: escuchar hunde, hablar saca. Los dos suman actividad.
+        var earIn = profile.Ear > 0
+            ? profile.Ear * Math.Pow(Math.Abs(Math.Sin(_clock * 2.35) * Math.Sin((_clock * 0.73) + 0.4)), 1.25)
+            : 0;
+        var mouthOut = profile.Wave is not null
+            ? (profile.Mouth > 0 ? profile.Mouth : 0.13) *
+                Math.Pow(Math.Abs(Math.Sin(_clock * 3.05) * Math.Sin((_clock * 1.13) + 0.6)), 1.45)
+            : 0;
+        var sound = (mouthOut - earIn) * eased;
+        var soundEnergy = (mouthOut + earIn) * eased;
 
         // La voz del usuario entra como crecimiento del radio, no como agitación del contorno:
         // hablarle más fuerte la hincha, y eso se lee de inmediato como «me está oyendo».
@@ -318,74 +454,213 @@ internal partial class LiquidOrb : UserControl
         // parpadea con cada sílaba en vez de acompañar la frase.
         var target = State == AssistantVisualState.Listening ? Math.Clamp(AudioLevel, 0, 1) : 0;
         _levelSmoothed += (target - _levelSmoothed) * (target > _levelSmoothed ? 0.45 : 0.08);
-        bias += _levelSmoothed * 3.2;
+        extra += _levelSmoothed * 0.128;
 
         // El latido crece la masa entera bajo la misma luz —los reflejos están fuera de esta cuenta—,
         // y eso es exactamente lo que se lee como líquido en vez de como un objeto que se infla.
-        bias += _beat * 1.2;
+        extra += _beat * 0.048;
 
-        var (scaleX, scaleY, shiftX) = BodyTransform(profile.Mode, _clock);
+        var radius = BaseRadius * _scale * _mood.CoreRadius *
+            (1 + extra + RippleAt(1) + (sound * 0.8));
 
-        for (var i = 0; i < Points; i++)
+        // El signo se arma con gotas que salen del cuerpo, así que el cuerpo se vacía en la misma
+        // proporción. Es lo que hace que el tilde parezca hecho <em>de</em> ella y no dibujado encima.
+        var beads = BuildGlyph(radius, out var drain);
+        radius *= 1 - (0.82 * drain);
+
+        var amplitude = profile.DropAmplitude * _mood.AmplitudeFactor *
+            (1 + (0.7 * soundEnergy)) * (1 - (0.88 * drain));
+
+        var centerX = CenterX + (profile.Lean * 22) + _mood.OffsetX;
+        var centerY = CenterY + (0.5 * Math.Sin(_clock / 3.7)) + _mood.OffsetY;
+        var rollCos = Math.Cos(_mood.Roll);
+        var rollSin = Math.Sin(_mood.Roll);
+
+        for (var i = 0; i < Samples; i++)
         {
-            var angle = (-Math.PI / 2) + (i * 2 * Math.PI / Points);
+            var theta = (double)i / Samples * 2 * Math.PI;
 
-            // Verticalidad del punto: +1 arriba, −1 abajo. Es lo que permite deformar asimétrico
-            // sin rotar nada, que es la regla que sostiene los reflejos quietos.
-            var verticality = -Math.Sin(angle);
-            var wave = Deform(profile.Mode, i, verticality, _phase, _clock);
-            var radius = Radius + bias + PointBias(profile.Mode, verticality, _clock) + (excursion * wave);
+            var scale = 1.0;
+            for (var j = 0; j < Harmonics.Length; j++)
+            {
+                scale += amplitude *
+                    Math.Cos((Harmonics[j] * theta) + _harmonicPhase[j] + (_phase * HarmonicRates[j])) /
+                    (1 + (j * 0.55));
+            }
 
-            _points[i] = new Point(
-                CenterX + (radius * ScaleX * scaleX * Math.Cos(angle)) + shiftX,
-                CenterY + (radius * ScaleY * scaleY * Math.Sin(angle)));
+            // El achatamiento de abajo es la gravedad, y es lo único que le da un arriba y un abajo
+            // a una forma que si no sería una mancha.
+            scale *= 1 - (0.055 * Math.Max(0, Math.Sin(theta)));
+
+            if (_mood.Sway != 0)
+            {
+                scale *= 1 + (0.02 * _mood.Sway * (0.5 - (0.5 * Math.Sin(theta))));
+            }
+
+            var dx = Math.Cos(theta) * scale * radius;
+            var dy = Math.Sin(theta) * scale * radius * 0.985;
+
+            if (_mood.Sway != 0)
+            {
+                dx += _mood.Sway * 0.16 * (0.5 - (0.5 * Math.Sin(theta)));
+            }
+
+            if (_mood.Roll != 0)
+            {
+                var rotated = (dx * rollCos) - (dy * rollSin);
+                dy = (dx * rollSin) + (dy * rollCos);
+                dx = rotated;
+            }
+
+            if (_mood.SquashY != 1)
+            {
+                dy *= _mood.SquashY;
+                dx *= 1 + ((1 - _mood.SquashY) * 0.5);
+            }
+
+            if (_mood.Shear != 0)
+            {
+                dx += dy * _mood.Shear;
+            }
+
+            // Sin la guarda del lienzo del boceto, el error se saldría del control. El techo es
+            // blando: ningún estado que no sea el error llega a tocarlo.
+            (dx, dy) = OrbBounds.SoftLimit(dx, dy);
+
+            _points[i] = new Point(centerX + dx, centerY + dy);
         }
 
-        var geometry = new StreamGeometry();
-        using (var context = geometry.Open())
+        var body = new StreamGeometry();
+        using (var context = body.Open())
         {
-            context.BeginFigure(_points[0], isFilled: true, isClosed: true);
-            for (var i = 0; i < Points; i++)
+            // Curvas cuadráticas por los puntos medios: el contorno pasa suave por 72 muestras sin
+            // calcular tangentes, y con 72 el error contra la curva verdadera es invisible.
+            context.BeginFigure(Midpoint(_points[Samples - 1], _points[0]), isFilled: true, isClosed: true);
+            for (var i = 0; i < Samples; i++)
             {
-                var previous = _points[(i - 1 + Points) % Points];
-                var start = _points[i];
-                var end = _points[(i + 1) % Points];
-                var next = _points[(i + 2) % Points];
-
-                context.BezierTo(
-                    new Point(
-                        start.X + ((end.X - previous.X) * Tangent),
-                        start.Y + ((end.Y - previous.Y) * Tangent)),
-                    new Point(
-                        end.X - ((next.X - start.X) * Tangent),
-                        end.Y - ((next.Y - start.Y) * Tangent)),
-                    end,
-                    isStroked: true,
-                    isSmoothJoin: true);
+                var next = _points[(i + 1) % Samples];
+                context.QuadraticBezierTo(_points[i], Midpoint(_points[i], next), isStroked: true, isSmoothJoin: true);
             }
         }
 
-        geometry.Freeze();
-        Mass.Data = geometry;
+        body.Freeze();
+
+        if (beads.Count == 0)
+        {
+            Mass.Data = body;
+        }
+        else
+        {
+            var group = new GeometryGroup { FillRule = FillRule.Nonzero };
+            group.Children.Add(body);
+            foreach (var bead in beads)
+            {
+                group.Children.Add(new EllipseGeometry(new Point(bead.X, bead.Y), bead.Radius, bead.Radius));
+            }
+
+            group.Freeze();
+            Mass.Data = group;
+        }
 
         // Recortar los reflejos contra la silueta es lo que hace que la luz resbale por el borde.
-        Reflections.Clip = geometry;
+        // Se recortan contra el cuerpo y no contra el signo: la luz es del ambiente y el signo es
+        // una escritura, no un objeto con volumen.
+        Reflections.Clip = body;
 
         // El sedimento usa el mismo recorte: es líquido dentro de la gota, no una banda encima.
-        SedimentLayer.Clip = geometry;
+        SedimentLayer.Clip = body;
     }
 
-    private void ApplyPalette(StateProfile profile)
+    /// <summary>
+    /// Las gotas del signo, y cuánto cuerpo se llevaron.
+    /// </summary>
+    /// <remarks>
+    /// Cada gota sale de cerca del centro y viaja por una curva cuadrática hasta su lugar en el
+    /// trazo, y las de más adelante en el signo salen más tarde: por eso el signo se escribe de una
+    /// punta a la otra en vez de aparecer entero. La deuda es que acá son círculos sueltos que se
+    /// superponen, y en el boceto son un contorno envolvente calculado sobre la cadena. A 108 px la
+    /// superposición ya cierra el trazo; en un orbe grande se notarían las juntas.
+    /// </remarks>
+    private List<Bead> BuildGlyph(double radius, out double drain)
     {
-        StopLight.Color = Lighten(profile.Body, 0.26);
-        StopBody.Color = profile.Body;
-        StopDeep.Color = profile.Depth;
-        StopRim.Color = profile.Rim;
-        MassGlow.Color = profile.Body;
+        drain = 0;
+        var beads = new List<Bead>();
+        if (_mood.GlyphReveal <= 0.004 || _mood.Glyph == OrbGlyphKind.None)
+        {
+            return beads;
+        }
+
+        var points = OrbGlyph.Points(_mood.Glyph);
+        var count = points.Length;
+        if (count == 0)
+        {
+            return beads;
+        }
+
+        var span = radius * 1.42 * _mood.GlyphScale;
+        var smooth = _mood.GlyphReveal * _mood.GlyphReveal * (3 - (2 * _mood.GlyphReveal));
+        var centerX = CenterX + (_mood.OffsetX);
+        var centerY = CenterY + (0.5 * Math.Sin(_clock / 3.7)) + _mood.OffsetY;
+
+        for (var i = 0; i < count; i++)
+        {
+            var raw = Math.Clamp(((smooth * 1.36) - ((double)i / count * 0.44)) / 0.50, 0, 1);
+            var reveal = raw * raw * (3 - (2 * raw));
+            drain += reveal / count;
+            if (reveal < 0.004)
+            {
+                continue;
+            }
+
+            var e = 1 - Math.Pow(1 - reveal, 2.0);
+            var om = 1 - e;
+            var overshoot = 1 + (0.055 * Math.Sin(Math.PI * reveal));
+
+            var tx = points[i].X * span * overshoot;
+            var ty = points[i].Y * span * overshoot;
+            var bx = tx * 0.10;
+            var by = ty * 0.10;
+            var mx = ((bx + tx) / 2) - ((ty - by) * 0.17);
+            var my = ((by + ty) / 2) + ((tx - bx) * 0.17);
+
+            var ex = (om * om * bx) + (2 * om * e * mx) + (e * e * tx);
+            var ey = (om * om * by) + (2 * om * e * my) + (e * e * ty);
+
+            var size = points[i].Radius * span * (0.44 + (0.56 * reveal)) *
+                (1 + (0.075 * Math.Sin((_phase * 2.4) + (i * 0.6))));
+
+            beads.Add(new Bead(centerX + ex, centerY + ey, size));
+        }
+
+        return beads;
+    }
+
+    private void ApplyPalette(OrbStateProfile profile)
+    {
+        var night = Math.Clamp(NightMode, 0, 1);
+        var light = IsLightDesktop;
+
+        var body = OrbNight.Tint(light ? profile.Depth : profile.Body, night);
+        body = OrbPalette.Wash(body, _mood.Tint, _mood.WashCore);
+
+        // La profundidad y el borde salen del color de profundidad y no son tres colores sueltos por
+        // estado: derivarlos es lo que permite que quince estados tengan luz coherente sin quince
+        // decisiones cromáticas que envejecen mal.
+        var deep = OrbNight.Tint(profile.Depth, night);
+        deep = light ? OrbPalette.Lighten(deep, 0.30) : OrbPalette.LerpColor(deep, Colors.Black, 0.42);
+        deep = OrbPalette.Wash(deep, _mood.Tint, _mood.WashCore * 0.6);
+
+        var rim = OrbPalette.LerpColor(OrbNight.Tint(profile.Depth, night), Colors.Black, 0.55);
+        rim = OrbPalette.Wash(rim, _mood.Tint, _mood.WashRim * 0.5);
+
+        StopLight.Color = OrbPalette.Lighten(body, 0.26);
+        StopBody.Color = body;
+        StopDeep.Color = deep;
+        StopRim.Color = rim;
+        MassGlow.Color = body;
 
         // El sedimento es el color de profundidad al 55 %: pertenece al mismo líquido, más denso.
-        Sediment.Fill = new SolidColorBrush(
-            Color.FromArgb(0x8C, profile.Depth.R, profile.Depth.G, profile.Depth.B));
+        Sediment.Fill = new SolidColorBrush(Color.FromArgb(0x8C, deep.R, deep.G, deep.B));
 
         // Mientras hay autorización de gasto viva, el borde queda más cálido todo el día.
         //
@@ -394,252 +669,31 @@ internal partial class LiquidOrb : UserControl
         // la autorización vive en memoria y muere con el proceso, así que el aviso también.
         if (HasSpendAuthorization)
         {
-            StopRim.Color = Mix(profile.Rim, Rgb(0x3E, 0x23, 0x04), 0.40);
+            StopRim.Color = OrbPalette.LerpColor(StopRim.Color, Color.FromRgb(0x3E, 0x23, 0x04), 0.40);
         }
 
         // Durante el latido el borde se aclara: el golpe de masa se acompaña con luz en el contorno.
         if (_beat > 0)
         {
-            StopRim.Color = Lighten(StopRim.Color, 0.18 * _beat);
+            StopRim.Color = OrbPalette.Lighten(StopRim.Color, 0.18 * _beat);
         }
 
         // Armado: verde sobre la luz que ya existe, en vez de geometría nueva.
-        var bounce = IsMicrophoneArmed && State == AssistantVisualState.Idle
-            ? Color.FromRgb(0x72, 0xF0, 0xC0)
-            : profile.Body;
-        var strength = IsMicrophoneArmed && State == AssistantVisualState.Idle ? 0x4D : 0x57;
+        var armed = IsMicrophoneArmed && State == AssistantVisualState.Idle;
+        var bounce = armed ? Color.FromRgb(0x72, 0xF0, 0xC0) : body;
+        var strength = armed ? 0x4D : 0x57;
         BounceCore.Color = Color.FromArgb((byte)strength, bounce.R, bounce.G, bounce.B);
         BounceEdge.Color = Color.FromArgb(0x00, bounce.R, bounce.G, bounce.B);
+
+        // La opacidad general es la que separa «trabajando sin vos» de «pensando» sin cambiar el
+        // color, y la que hace que la madrugada baje el volumen de todo de una sola vez.
+        Stage.Opacity = Math.Clamp(profile.Alpha * OrbNight.Alpha(night) * _mood.AlphaFactor, 0, 1);
     }
 
-    private static double SineInOut(double t) => 0.5 - (Math.Cos(Math.PI * Math.Clamp(t, 0, 1)) / 2);
+    private static Point Midpoint(Point a, Point b) => new((a.X + b.X) / 2, (a.Y + b.Y) / 2);
 
-    private static Color Rgb(byte r, byte g, byte b) => Color.FromRgb(r, g, b);
+    private readonly record struct Ripple(double Start, double Amplitude);
 
-    /// <summary>Mezcla dos colores. Se usa para teñir el borde sin reemplazar la paleta del estado.</summary>
-    private static Color Mix(Color start, Color target, double amount) => Color.FromRgb(
-        (byte)(start.R + ((target.R - start.R) * amount)),
-        (byte)(start.G + ((target.G - start.G) * amount)),
-        (byte)(start.B + ((target.B - start.B) * amount)));
-
-    private static Color Lighten(Color color, double amount) => Color.FromRgb(
-        (byte)(color.R + ((255 - color.R) * amount)),
-        (byte)(color.G + ((255 - color.G) * amount)),
-        (byte)(color.B + ((255 - color.B) * amount)));
-
-    /// <summary>
-    /// El término propio de cada estado. La velocidad sola no alcanzaba para distinguirlos: cada uno
-    /// suma su carácter sobre el radio, en tiempo de reloj y no acumulado.
-    /// </summary>
-    /// <summary>
-    /// Cuánto ondula cada punto, según el modo del estado.
-    /// </summary>
-    /// <remarks>
-    /// Es lo que faltaba para que los estados se distingan de verdad. Antes los seis usaban el mismo
-    /// dibujo de movimiento y sólo cambiaban amplitud y velocidad; a los tres segundos el ojo deja de
-    /// medir velocidad y todos se parecen. Ahora cada estado deforma distinto, que es una diferencia
-    /// que se lee sin comparar contra nada.
-    /// </remarks>
-    private static double Deform(
-        DeformationMode mode,
-        int index,
-        double verticality,
-        double phase,
-        double clock) => mode switch
-    {
-        // Escuchando: la gota se estira hacia el sonido. Arriba 1,55× y abajo 0,5×.
-        DeformationMode.Listening =>
-            Math.Sin((2 * Math.PI * phase / Periods[index]) + Phases[index]) *
-            (0.5 + (1.05 * ((verticality + 1) / 2))),
-
-        // Pensando: una onda que recorre el contorno. Período común y fase corrida por punto, así
-        // que circula sin rotar — los reflejos, que están fuera de la masa, siguen quietos.
-        DeformationMode.Thinking =>
-            Math.Sin((2 * Math.PI * phase / 4.2) + (index * 1.34)),
-
-        // Hablando: pares afuera, impares adentro, alternando cada 340 ms — pero mezclado con la
-        // ondulación de base, no en lugar de ella.
-        //
-        // Con la alternancia sola y a excursión completa, ocho puntos que van uno sí y uno no dan un
-        // cuadrilátero redondeado: se ve en el render, y una gota que se vuelve cuadrada rompe el
-        // vocabulario de formas que sostiene todo el sistema. Repartido 55/45 la sílaba se lee y la
-        // silueta sigue siendo la misma.
-        // La alternancia además va corrida por punto: si los ocho la reciben en el mismo instante, la
-        // simetría resultante es de orden cuatro, y una simetría de orden cuatro es un cuadrado, sin
-        // importar cuán chica sea la amplitud. Con el corrimiento la sílaba recorre el contorno.
-        DeformationMode.Speaking =>
-            (0.72 * Math.Sin((2 * Math.PI * phase / Periods[index]) + Phases[index])) +
-            (0.28 * (index % 2 == 0 ? 1 : -1) * Math.Sin((2 * Math.PI * clock / 0.68) + (index * 0.45))),
-
-        // Revisar: queda tensa, casi lisa. La atención la pide el latido del cuerpo entero.
-        DeformationMode.Tense =>
-            Math.Sin((2 * Math.PI * phase / Periods[index]) + Phases[index]) * 0.45,
-
-        // Error: dos ruidos superpuestos que no comparten período, así que nunca se repiten igual.
-        DeformationMode.Error =>
-            (0.6 * Math.Sin(2 * Math.PI * clock / 0.130)) +
-            (0.4 * Math.Sin((2 * Math.PI * clock / 0.077) + 1.9)),
-
-        _ => Math.Sin((2 * Math.PI * phase / Periods[index]) + Phases[index])
-    };
-
-    /// <summary>Corrimiento de radio propio de cada punto: es lo que hace que la gota se descuelgue.</summary>
-    private static double PointBias(DeformationMode mode, double verticality, double clock) => mode switch
-    {
-        // Se estira hacia arriba: el conjunto se desplaza, no sólo ondula.
-        DeformationMode.Listening => -0.8 * verticality * -1,
-
-        // Los puntos de abajo se descuelgan: una gota golpeada.
-        DeformationMode.Error => verticality < 0 ? 0.5 : 0,
-
-        // Sin capacidad la gota se cansa: cae abajo y se hunde arriba.
-        DeformationMode.Weary => verticality < 0 ? 0.7 : -0.4,
-
-        _ => 0
-    };
-
-    /// <summary>
-    /// Escalas y desplazamiento del cuerpo entero. Van sobre la masa y nunca sobre los reflejos: la
-    /// luz se queda donde estaba y el líquido se mueve por debajo.
-    /// </summary>
-    private static (double ScaleX, double ScaleY, double ShiftX) BodyTransform(
-        DeformationMode mode,
-        double clock) => mode switch
-    {
-        // Squash silábico: se achata al hablar, como una boca.
-        DeformationMode.Speaking =>
-            (1 - (0.05 * Pulse(clock, 0.34)), 1 + (0.055 * Pulse(clock, 0.34)), 0),
-
-        // Late entera pidiendo atención, sin apurar.
-        DeformationMode.Tense =>
-            (1 + (0.05 * Math.Sin(2 * Math.PI * clock / 1.6)), 1 + (0.05 * Math.Sin(2 * Math.PI * clock / 1.6)), 0),
-
-        // Temblor horizontal rápido: 11,7 Hz es lo bastante alto para leerse como nervio.
-        DeformationMode.Error =>
-            (1, 1, 0.85 * Math.Sin(2 * Math.PI * clock * 11.7)),
-
-        _ => (1, 1, 0)
-    };
-
-    private static double Pulse(double clock, double period) =>
-        0.5 + (0.5 * Math.Sin(2 * Math.PI * clock / period));
-
-    private enum DeformationMode
-    {
-        Idle,
-        Listening,
-        Thinking,
-        Speaking,
-        Tense,
-        Error,
-        Weary
-    }
-
-    private readonly record struct CharacterTerm(CharacterKind Kind, double Amplitude, double Period)
-    {
-        public static CharacterTerm None => new(CharacterKind.None, 0, 1);
-
-        /// <summary>Devuelve el corrimiento de radio y el factor que multiplica la excursión.</summary>
-        public (double Bias, double ExcursionFactor) Evaluate(double clock) => Kind switch
-        {
-            // Temblor y respiración mueven el radio entero: la masa crece bajo la misma luz.
-            CharacterKind.Tremor or CharacterKind.Breath =>
-                (Amplitude * Math.Sin(2 * Math.PI * clock / Period), 1.0),
-
-            // La envolvente silábica modula cuánto ondula, entre el 52 % y el 100 %.
-            CharacterKind.Syllabic =>
-                (0.0, 0.52 + (0.48 * (0.5 + (0.5 * Math.Sin(2 * Math.PI * clock / Period))))),
-
-            _ => (0.0, 1.0)
-        };
-
-        public static CharacterTerm Lerp(CharacterTerm start, CharacterTerm target, double t)
-        {
-            // Con el mismo carácter, la amplitud se interpola. Con caracteres distintos no hay mezcla
-            // posible —un temblor no es medio una respiración—, así que se cambia a mitad de camino.
-            if (start.Kind == target.Kind)
-            {
-                return target with { Amplitude = start.Amplitude + ((target.Amplitude - start.Amplitude) * t) };
-            }
-
-            return t >= 0.5 ? target : start;
-        }
-    }
-
-    private enum CharacterKind
-    {
-        None,
-        Tremor,
-        Breath,
-        Syllabic
-    }
-
-    private readonly record struct StateProfile(
-        Color Body,
-        Color Depth,
-        Color Rim,
-        double Viscosity,
-        double Excursion,
-        CharacterTerm Character,
-        DeformationMode Mode)
-    {
-        public static StateProfile For(AssistantVisualState state) => state switch
-        {
-            AssistantVisualState.Listening => new(
-                Rgb(0x72, 0xF0, 0xC0), Rgb(0x16, 0x6B, 0x54), Rgb(0x07, 0x36, 0x2A),
-                2.6, 2.8, new CharacterTerm(CharacterKind.Tremor, 0.5, 0.42),
-                DeformationMode.Listening),
-            AssistantVisualState.Thinking => new(
-                Rgb(0x9B, 0xB7, 0xFF), Rgb(0x30, 0x44, 0x86), Rgb(0x15, 0x1E, 0x45),
-                3.0, 3.6, new CharacterTerm(CharacterKind.Breath, 1.0, 2.4),
-                DeformationMode.Thinking),
-            AssistantVisualState.Speaking => new(
-                Rgb(0xFF, 0xCE, 0x82), Rgb(0x7D, 0x54, 0x1C), Rgb(0x3E, 0x28, 0x08),
-                4.0, 4.3, new CharacterTerm(CharacterKind.Syllabic, 0, 0.34),
-                DeformationMode.Speaking),
-            AssistantVisualState.Attention => new(
-                Rgb(0xFF, 0xB3, 0x47), Rgb(0x7D, 0x4D, 0x13), Rgb(0x3E, 0x23, 0x04),
-                1.7, 2.0, new CharacterTerm(CharacterKind.Breath, 1.6, 1.6),
-                DeformationMode.Tense),
-            AssistantVisualState.Error => new(
-                Rgb(0xFF, 0x73, 0x85), Rgb(0x78, 0x26, 0x32), Rgb(0x3B, 0x0F, 0x17),
-                2.2, 2.5, new CharacterTerm(CharacterKind.Tremor, 0.65, 0.28),
-                DeformationMode.Error),
-
-            // Gris casi sin croma: no es «otro color de estado», es ausencia de color, que es
-            // exactamente lo que hay que decir. El borde va más oscuro que en el resto de la paleta
-            // porque sobre escritorio claro un cuerpo casi blanco necesita ese contorno para existir.
-            AssistantVisualState.Unconfigured => new(
-                Rgb(0xE9, 0xEF, 0xF2), Rgb(0x93, 0xA3, 0xAE), Rgb(0x3A, 0x46, 0x4E),
-                1.0, 1.7, CharacterTerm.None, DeformationMode.Idle),
-
-            // Mismo cuerpo, casi quieta. De un vistazo se distingue de la anterior sólo por el
-            // movimiento, y alcanza: una no arrancó, la otra se quedó sin a dónde ir.
-            AssistantVisualState.Offline => new(
-                Rgb(0xE9, 0xEF, 0xF2), Rgb(0x93, 0xA3, 0xAE), Rgb(0x3A, 0x46, 0x4E),
-                0.35, 1.7, CharacterTerm.None, DeformationMode.Weary),
-            _ => new(
-                Rgb(0x72, 0xD9, 0xFF), Rgb(0x17, 0x60, 0x7F), Rgb(0x08, 0x31, 0x4A),
-                1.0, 1.7, CharacterTerm.None, DeformationMode.Idle)
-        };
-
-        public static StateProfile Lerp(StateProfile start, StateProfile target, double t) => new(
-            LerpColor(start.Body, target.Body, t),
-            LerpColor(start.Depth, target.Depth, t),
-            LerpColor(start.Rim, target.Rim, t),
-            start.Viscosity + ((target.Viscosity - start.Viscosity) * t),
-            start.Excursion + ((target.Excursion - start.Excursion) * t),
-            CharacterTerm.Lerp(start.Character, target.Character, t),
-            // El modo no se mezcla: una onda que recorre el contorno no es media alternancia de
-            // pares e impares. Cambia a mitad de camino, cuando el color ya avanzó lo suficiente
-            // para que el salto de dibujo quede tapado por la transición cromática.
-            t >= 0.5 ? target.Mode : start.Mode);
-
-        private static Color Rgb(byte r, byte g, byte b) => Color.FromRgb(r, g, b);
-
-        private static Color LerpColor(Color start, Color target, double t) => Color.FromRgb(
-            (byte)(start.R + ((target.R - start.R) * t)),
-            (byte)(start.G + ((target.G - start.G) * t)),
-            (byte)(start.B + ((target.B - start.B) * t)));
-    }
+    /// <summary>Una gota del signo: dónde quedó y de qué tamaño.</summary>
+    private readonly record struct Bead(double X, double Y, double Radius);
 }

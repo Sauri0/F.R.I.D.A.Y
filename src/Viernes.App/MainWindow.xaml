@@ -3,12 +3,11 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:shell="clr-namespace:Viernes.App.Shell"
         mc:Ignorable="d"
         Title="Viernes"
-        Width="{Binding WidgetWidth, FallbackValue=108}"
-        Height="{Binding WidgetHeight, FallbackValue=108}"
-        MinWidth="100"
-        MinHeight="100"
+        d:Width="528"
+        d:Height="272"
         WindowStyle="None"
         ResizeMode="NoResize"
         AllowsTransparency="True"
@@ -28,27 +27,792 @@
         PreviewMouseLeftButtonUp="Orb_PreviewMouseLeftButtonUp"
         ShowActivated="False">
 
-    <Grid x:Name="ShellGrid" Margin="4" Background="Transparent">
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition x:Name="LeadingColumn" Width="96" />
-            <ColumnDefinition x:Name="TrailingColumn" Width="*" />
-        </Grid.ColumnDefinitions>
+    <!--
+        La ventana no cambia de tamaño nunca: mide el desplegable más ancho, el más alto y el aire de
+        las sombras, y es transparente. Lo que se anima es el vidrio de adentro. Cambiar Width y
+        Height de la ventana por cuadro es lo que hacía saltar al orbe, porque estando anclado a una
+        esquina había que corregir Left y Top a mano en el mismo cuadro.
+    -->
 
-        <!-- El aura es también la zona de arrastre. El núcleo interior conserva PTT. -->
+    <Window.Resources>
+        <shell:PanelKindVisibilityConverter x:Key="PanelIs" />
+        <shell:StateBrushConverter x:Key="StateBrush" />
+        <shell:StateColorConverter x:Key="StateColor" />
+        <shell:EmptyToVisibilityConverter x:Key="WhenEmpty" />
+        <shell:FilledToVisibilityConverter x:Key="WhenFilled" />
+
+        <!--
+            Jerarquía tipográfica dentro de 140 px de alto útil. Una sola línea primaria por panel:
+            si hay dos cosas importantes, una está de más. Los datos van en Consolas porque montos,
+            identificadores y horas se leen con precisión y se repiten en voz alta.
+        -->
+        <Style x:Key="Primaria" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="LineHeight" Value="17" />
+            <Setter Property="FontWeight" Value="Medium" />
+            <Setter Property="Foreground" Value="#FFF4F4F7" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <Style x:Key="Secundaria" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="LineHeight" Value="16" />
+            <Setter Property="Foreground" Value="#FFCACAD1" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <Style x:Key="Encabezado" TargetType="TextBlock" BasedOn="{StaticResource Primaria}">
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="TextWrapping" Value="NoWrap" />
+        </Style>
+
+        <Style x:Key="Dato" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Foreground" Value="#FFEAEAEE" />
+        </Style>
+
+        <Style x:Key="Pie" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="9.5" />
+            <Setter Property="Foreground" Value="#FF9C9CA4" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        </Style>
+
+        <!-- Un botón, o dos. Lo irreversible nunca es un botón: es un mantener apretado. -->
+        <Style x:Key="BotonTenue" TargetType="Button">
+            <Setter Property="Height" Value="26" />
+            <Setter Property="Padding" Value="13,0" />
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="9" />
+            <Setter Property="Foreground" Value="#FFCACAD1" />
+            <Setter Property="Background" Value="#12FFFFFF" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Superficie"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="#24FFFFFF"
+                                BorderThickness="1"
+                                CornerRadius="13"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Superficie" Property="Background" Value="#20FFFFFF" />
+                                <Setter Property="Foreground" Value="#FFEFEFF3" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Superficie" Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="BotonAmbar" TargetType="Button" BasedOn="{StaticResource BotonTenue}">
+            <Setter Property="Foreground" Value="#FF17150F" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Padding" Value="14,0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Superficie" CornerRadius="13" Padding="{TemplateBinding Padding}">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                    <GradientStop Color="#FFFFC46B" Offset="0" />
+                                    <GradientStop Color="#FFF5A331" Offset="1" />
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Superficie" Property="Opacity" Value="0.92" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Superficie" Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Lo que no existe todavía se dice, no se inventa con datos plausibles. -->
+        <Style x:Key="Vacio" TargetType="TextBlock" BasedOn="{StaticResource Secundaria}">
+            <Setter Property="Foreground" Value="#FF8C8C95" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+    </Window.Resources>
+
+    <Canvas x:Name="Stage" Background="{x:Null}">
+
+        <!-- ============================ EL VIDRIO ============================ -->
+        <Grid x:Name="PanelHost"
+              Canvas.Top="26"
+              Width="376"
+              Height="220"
+              Background="{x:Null}"
+              Visibility="Collapsed"
+              MouseEnter="Panel_MouseEnter"
+              MouseLeave="Panel_MouseLeave">
+
+            <shell:GlassSurface x:Name="Glass"
+                                Width="372"
+                                Height="206"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Center"
+                                RenderTransformOrigin="0,0.5"
+                                Tint="{Binding State, Converter={StaticResource StateColor}}"
+                                LifeProgress="{Binding PanelLifeProgress}">
+                <shell:GlassSurface.RenderTransform>
+                    <ScaleTransform x:Name="GlassScale" ScaleX="1" ScaleY="1" />
+                </shell:GlassSurface.RenderTransform>
+                <shell:GlassSurface.Effect>
+                    <DropShadowEffect Color="#FF000000" BlurRadius="56" Direction="270" ShadowDepth="16" Opacity="0.62" />
+                </shell:GlassSurface.Effect>
+
+                <Grid>
+                    <!--
+                        El barrido: lo único que se mueve en el vidrio, y por eso funciona. Va como
+                        hijo y no dibujado en el panel porque mover un TranslateTransform lo compone
+                        la GPU: repintar ocho capas para correr un reflejo no vale la pena.
+                    -->
+                    <Rectangle x:Name="Sweep"
+                               Width="130"
+                               HorizontalAlignment="Left"
+                               IsHitTestVisible="False">
+                        <Rectangle.Fill>
+                            <LinearGradientBrush StartPoint="0,1" EndPoint="1,0">
+                                <GradientStop Color="#00FFFFFF" Offset="0" />
+                                <GradientStop Color="#1AFFFFFF" Offset="0.48" />
+                                <GradientStop Color="#00FFFFFF" Offset="1" />
+                            </LinearGradientBrush>
+                        </Rectangle.Fill>
+                        <Rectangle.RenderTransform>
+                            <TranslateTransform x:Name="SweepOffset" X="-160" />
+                        </Rectangle.RenderTransform>
+                    </Rectangle>
+
+                    <Grid x:Name="PanelContent" Margin="16,14,16,13">
+
+                        <!-- ===== 1 · escribir · 372 × 206 · escuchando · neutro · no se cierra sola ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Escribir}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Grid Grid.Row="0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                    <TextBlock Style="{StaticResource Primaria}"
+                                               Text="{Binding MessageText}"
+                                               MaxHeight="34"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Style="{StaticResource Secundaria}"
+                                               Margin="0,5,0,0"
+                                               Text="Podés seguir escribiendo en la otra ventana: no te robo el teclado hasta que hagas clic acá." />
+                                </StackPanel>
+                                <!--
+                                    Silenciar y guardarse son las dos únicas cosas que hay que poder
+                                    hacer sin hablar ni escribir, así que viven en el panel de
+                                    conversación y no en una barra permanente.
+                                -->
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                                    <Button Style="{StaticResource CompactCircleButton}"
+                                            Command="{Binding ToggleMuteCommand}"
+                                            Content="{Binding MuteGlyph}"
+                                            ToolTip="{Binding MuteToolTip}"
+                                            AutomationProperties.Name="{Binding MuteToolTip}" />
+                                    <Button Style="{StaticResource CompactCircleButton}"
+                                            Margin="4,0,0,0"
+                                            Click="HideButton_Click"
+                                            Content="&#xE921;"
+                                            ToolTip="Guardarse en la bandeja"
+                                            AutomationProperties.Name="Guardarse en la bandeja" />
+                                </StackPanel>
+                            </Grid>
+
+                            <Border Grid.Row="2"
+                                    Height="34"
+                                    CornerRadius="11"
+                                    Background="#8C0B0B0D"
+                                    BorderBrush="#26FFFFFF"
+                                    BorderThickness="1"
+                                    Padding="11,0,4,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Grid.Column="0">
+                                        <TextBlock VerticalAlignment="Center"
+                                                   Text="Escribí una instrucción…"
+                                                   Foreground="#FFA2A2AA"
+                                                   FontFamily="{StaticResource UiFont}"
+                                                   FontSize="11"
+                                                   IsHitTestVisible="False">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding InputText}" Value="">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <TextBox x:Name="PromptTextBox"
+                                                 Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                                 VerticalContentAlignment="Center"
+                                                 Background="Transparent"
+                                                 BorderThickness="0"
+                                                 Foreground="{StaticResource TextPrimary}"
+                                                 CaretBrush="{StaticResource Cyan}"
+                                                 FontFamily="{StaticResource UiFont}"
+                                                 FontSize="11"
+                                                 SpellCheck.IsEnabled="True"
+                                                 KeyDown="PromptTextBox_KeyDown"
+                                                 AutomationProperties.Name="Instrucción escrita" />
+                                    </Grid>
+                                    <Button Grid.Column="1"
+                                            Command="{Binding SendCommand}"
+                                            Content="Enviar"
+                                            Height="26"
+                                            Padding="13,0"
+                                            Foreground="#FF0E1416"
+                                            FontFamily="{StaticResource UiFont}"
+                                            FontSize="9"
+                                            FontWeight="Bold"
+                                            BorderThickness="0"
+                                            Cursor="Hand">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Enviar" CornerRadius="13" Padding="{TemplateBinding Padding}">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                            <GradientStop Color="#FF8AE1FF" Offset="0" />
+                                                            <GradientStop Color="#FF5FCDF6" Offset="1" />
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter TargetName="Enviar" Property="Opacity" Value="0.35" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                </Grid>
+                            </Border>
+
+                            <Grid Grid.Row="3" Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Style="{StaticResource Pie}" Text="Enter envía · Esc cierra" />
+                                <TextBlock Grid.Column="1"
+                                           Style="{StaticResource Pie}"
+                                           FontFamily="Consolas"
+                                           Text="{Binding ModeLabel}" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 2 · trabajando · 364 × 200 · pensando · neutro · no se cierra sola ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Trabajando}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Grid Grid.Row="0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Ellipse Grid.Column="0"
+                                         Width="10"
+                                         Height="10"
+                                         Margin="0,0,8,0"
+                                         VerticalAlignment="Center"
+                                         Fill="{Binding State, Converter={StaticResource StateBrush}}" />
+                                <TextBlock Grid.Column="1" Style="{StaticResource Encabezado}" Text="Trabajando" />
+                                <TextBlock Grid.Column="2"
+                                           Style="{StaticResource Pie}"
+                                           FontFamily="Consolas"
+                                           Text="{Binding StatusText}"
+                                           MaxWidth="150" />
+                            </Grid>
+
+                            <ItemsControl Grid.Row="1"
+                                          Margin="0,9,0,0"
+                                          ItemsSource="{Binding Steps}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="14" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Ellipse Grid.Column="0"
+                                                     Width="5"
+                                                     Height="5"
+                                                     HorizontalAlignment="Left"
+                                                     VerticalAlignment="Center">
+                                                <Ellipse.Style>
+                                                    <Style TargetType="Ellipse">
+                                                        <Setter Property="Fill" Value="#FF2E4055" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsDone}" Value="True">
+                                                                <Setter Property="Fill" Value="#FF72F0C0" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsBlocked}" Value="True">
+                                                                <Setter Property="Fill" Value="#FFFFB347" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                                <Setter Property="Fill" Value="#FF9BB7FF" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Ellipse.Style>
+                                            </Ellipse>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding Label}"
+                                                       ToolTip="{Binding Label}"
+                                                       FontFamily="{StaticResource UiFont}"
+                                                       FontSize="11"
+                                                       LineHeight="15"
+                                                       TextTrimming="CharacterEllipsis">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#FF62758A" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsDone}" Value="True">
+                                                                <Setter Property="Foreground" Value="#FF9DB0C2" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsBlocked}" Value="True">
+                                                                <Setter Property="Foreground" Value="#FFFFC56B" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                                <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+                                                                <Setter Property="FontWeight" Value="SemiBold" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- No promete un porcentaje: sólo dice que algo se mueve. -->
+                            <Border Grid.Row="2" Height="2" Margin="0,0,0,9" CornerRadius="1" Background="#12FFFFFF">
+                                <Border x:Name="TurnPulse"
+                                        Width="90"
+                                        HorizontalAlignment="Left"
+                                        CornerRadius="1"
+                                        Background="#FF9BB7FF"
+                                        Opacity="0.7">
+                                    <Border.RenderTransform>
+                                        <TranslateTransform x:Name="TurnPulseOffset" X="0" />
+                                    </Border.RenderTransform>
+                                </Border>
+                            </Border>
+
+                            <Grid Grid.Row="3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Style="{StaticResource Pie}"
+                                           VerticalAlignment="Center"
+                                           Text="Nada se ejecuta sin figurar acá" />
+                                <Button Grid.Column="1"
+                                        Style="{StaticResource BotonTenue}"
+                                        Command="{Binding CancelTurnCommand}"
+                                        Content="Cancelar" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 3 · calendario · 364 × 188 · reposo · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Calendario}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Tu agenda" />
+                            <ItemsControl Grid.Row="1" Margin="0,10,0,0" ItemsSource="{Binding ListItems}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="32">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" MinWidth="74" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Grid.Column="0"
+                                                    Grid.ColumnSpan="3"
+                                                    VerticalAlignment="Bottom"
+                                                    Height="1"
+                                                    Background="#0DFFFFFF" />
+                                            <TextBlock Grid.Column="0"
+                                                       VerticalAlignment="Center"
+                                                       FontFamily="Consolas"
+                                                       FontSize="11"
+                                                       Foreground="#FF72D9FF"
+                                                       Text="{Binding When}" />
+                                            <TextBlock Grid.Column="1"
+                                                       VerticalAlignment="Center"
+                                                       Margin="8,0"
+                                                       FontFamily="{StaticResource UiFont}"
+                                                       FontSize="11.5"
+                                                       Foreground="#FFEAEAEE"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Text="{Binding What}"
+                                                       ToolTip="{Binding What}" />
+                                            <TextBlock Grid.Column="2"
+                                                       VerticalAlignment="Center"
+                                                       FontFamily="Consolas"
+                                                       FontSize="9"
+                                                       Foreground="#FF9C9CA4"
+                                                       Text="{Binding Tag}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Visibility="{Binding ListItems.Count, Converter={StaticResource WhenEmpty}}"
+                                       Text="No tenés nada anotado para hoy." />
+                            <TextBlock Grid.Row="2" Style="{StaticResource Pie}" Text="«mi agenda» para volver a verla" />
+                        </Grid>
+
+                        <!-- ===== 4 · muestras · 376 × 202 · reposo · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Muestras}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Muestras" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Text="Todavía no hay ninguna fuente de muestras conectada. La estructura del panel está lista: falta decir qué es una muestra, qué campos tiene y de dónde se leen." />
+                            <TextBlock Grid.Row="2" Style="{StaticResource Pie}" Text="sin origen de datos" />
+                        </Grid>
+
+                        <!-- ===== 5 · caja · 364 × 220 · revisar · neutro · no se cierra sola ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Caja}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Caja de hoy" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Text="No hay caja conectada. Cerrar una caja es irreversible, así que este panel no se dibuja con números de ejemplo: cuando existan los reales, el cierre va a ser un mantener apretado, no un botón." />
+                            <TextBlock Grid.Row="2" Style="{StaticResource Pie}" Text="sin origen de datos" />
+                        </Grid>
+
+                        <!-- ===== 6 · gastos · 364 × 166 · hablando · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Gastos}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Gastos" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Text="No hay libro de gastos conectado. Falta decir qué cajas existen y con qué categorías." />
+                            <TextBlock Grid.Row="2" Style="{StaticResource Pie}" Text="sin origen de datos" />
+                        </Grid>
+
+                        <!-- ===== 7 · música · 376 × 196 · reposo · neutro · no se cierra sola ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Musica}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Música" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Text="No hay ningún reproductor conectado. El control de transporte del sistema existe en Windows, pero Viernes todavía no lo lee." />
+                            <TextBlock Grid.Row="2" Style="{StaticResource Pie}" Text="sin sesión de medios" />
+                        </Grid>
+
+                        <!-- ===== 8 · recordatorio · 364 × 136 · revisar · ámbar · no se cierra solo ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Recordatorio}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0"
+                                       Style="{StaticResource Primaria}"
+                                       Foreground="#FFFFE3B4"
+                                       MaxHeight="34"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="{Binding ReminderTitle}" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Dato}"
+                                       VerticalAlignment="Top"
+                                       Margin="0,5,0,0"
+                                       Foreground="#FFFFB347"
+                                       Text="{Binding ReminderDetail}" />
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Style="{StaticResource Pie}"
+                                           VerticalAlignment="Center"
+                                           Text="Lo dije en voz alta" />
+                                <Button Grid.Column="1"
+                                        Style="{StaticResource BotonAmbar}"
+                                        Command="{Binding ClosePanelCommand}"
+                                        Content="Listo" />
+                            </Grid>
+                        </Grid>
+
+                        <!-- ===== 9 · permiso · 364 × 148 · revisar · ámbar · no se cierra solo ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Permiso}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0"
+                                       Style="{StaticResource Primaria}"
+                                       Foreground="#FFFFE3B4"
+                                       MaxHeight="34"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="{Binding ConfirmationTitle}"
+                                       ToolTip="{Binding ConfirmationDetail}" />
+                            <!--
+                                «Todavía no pasó nada» es la línea más importante de la interfaz. Va en
+                                la secundaria y en blanco: es una aclaración, no un título.
+                            -->
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Secundaria}"
+                                       Margin="0,5,0,0"
+                                       VerticalAlignment="Top"
+                                       MaxHeight="32"
+                                       TextTrimming="CharacterEllipsis">
+                                <Run Foreground="#FFF4F4F7" FontWeight="SemiBold" Text="Todavía no pasó nada." />
+                                <Run Text=" " /><Run Text="{Binding ConfirmationDetail, Mode=OneWay}" />
+                            </TextBlock>
+                            <Border Grid.Row="2"
+                                    Height="34"
+                                    CornerRadius="11"
+                                    Background="#2EFFB347"
+                                    BorderBrush="#80FFB347"
+                                    BorderThickness="1"
+                                    Padding="11,0,5,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               VerticalAlignment="Center"
+                                               FontFamily="{StaticResource UiFont}"
+                                               FontSize="9.5"
+                                               FontWeight="SemiBold"
+                                               Foreground="#FFFFE3B4"
+                                               TextTrimming="CharacterEllipsis"
+                                               Text="Decidís vos, acá y ahora" />
+                                    <Button Grid.Column="1"
+                                            Style="{StaticResource BotonAmbar}"
+                                            Height="24"
+                                            Command="{Binding ConfirmCommand}"
+                                            Content="Confirmar" />
+                                    <!-- El ✕ no lleva fondo: negarse no debería costar más que aceptar. -->
+                                    <Button Grid.Column="2"
+                                            Style="{StaticResource IconButton}"
+                                            Width="24"
+                                            Height="24"
+                                            Margin="2,0,0,0"
+                                            Command="{Binding DismissConfirmationCommand}"
+                                            Content="&#xE711;"
+                                            ToolTip="No autorizar" />
+                                </Grid>
+                            </Border>
+                        </Grid>
+
+                        <!-- ===== 10 · política · 364 × 136 · error · rojo · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Politica}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0"
+                                       Style="{StaticResource Primaria}"
+                                       Foreground="#FFFFD5DB"
+                                       MaxHeight="34"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="{Binding PolicyMessage}" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Secundaria}"
+                                       Margin="0,5,0,0"
+                                       VerticalAlignment="Top"
+                                       Text="La regla está en tu máquina, no en el modelo." />
+                            <!-- Ni reintento ni ✕: hay una regla, y el rechazo se ve tan terminado como el éxito. -->
+                            <TextBlock Grid.Row="2"
+                                       Style="{StaticResource Pie}"
+                                       FontFamily="Consolas"
+                                       Foreground="#FFFF7385"
+                                       Text="política local · la acción no se ejecutó" />
+                        </Grid>
+
+                        <!-- ===== 11 · memoria · 364 × 200 · reposo · neutro · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Memoria}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Style="{StaticResource Encabezado}" Text="Qué recuerdo de vos" />
+                            <ItemsControl Grid.Row="1" Margin="0,9,0,0" ItemsSource="{Binding ListItems}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Height="32">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" MinWidth="62" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Grid.Column="0"
+                                                    Grid.ColumnSpan="3"
+                                                    VerticalAlignment="Bottom"
+                                                    Height="1"
+                                                    Background="#0DFFFFFF" />
+                                            <!-- El identificador va primero: es lo que hace falta para poder olvidar algo. -->
+                                            <TextBlock Grid.Column="0"
+                                                       VerticalAlignment="Center"
+                                                       FontFamily="Consolas"
+                                                       FontSize="10"
+                                                       Foreground="#FF72D9FF"
+                                                       Text="{Binding When}" />
+                                            <TextBlock Grid.Column="1"
+                                                       VerticalAlignment="Center"
+                                                       Margin="8,0"
+                                                       FontFamily="{StaticResource UiFont}"
+                                                       FontSize="11.5"
+                                                       Foreground="#FFEAEAEE"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Text="{Binding What}"
+                                                       ToolTip="{Binding What}" />
+                                            <TextBlock Grid.Column="2"
+                                                       VerticalAlignment="Center"
+                                                       FontFamily="Consolas"
+                                                       FontSize="9"
+                                                       Foreground="#FF9C9CA4"
+                                                       Text="{Binding Tag}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Vacio}"
+                                       Visibility="{Binding ListItems.Count, Converter={StaticResource WhenEmpty}}"
+                                       Text="La memoria está vacía." />
+                            <TextBlock Grid.Row="2"
+                                       Style="{StaticResource Pie}"
+                                       Visibility="{Binding ListItems.Count, Converter={StaticResource WhenFilled}}"
+                                       Text="«/olvidar ID» para borrar uno" />
+                        </Grid>
+
+                        <!-- ===== 12 · presupuesto · 364 × 144 · revisar · ámbar · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=Presupuesto}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0"
+                                       Style="{StaticResource Primaria}"
+                                       Foreground="#FFFFE3B4"
+                                       Text="Autorizar gasto del modelo" />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Secundaria}"
+                                       Margin="0,5,0,0"
+                                       VerticalAlignment="Top"
+                                       Text="Mantené apretado. Revocar es un clic: la asimetría es el diseño." />
+                            <!--
+                                El control de mantener apretado se inserta desde el código: existe desde
+                                antes de este rework y ya trae los 1200 ms lineales.
+                            -->
+                            <ContentControl x:Name="SpendHoldHost" Grid.Row="2" />
+                        </Grid>
+
+                        <!-- ===== 13 · sin red · 364 × 140 · gris · gris · 7 s ===== -->
+                        <Grid Visibility="{Binding ActivePanel, Converter={StaticResource PanelIs}, ConverterParameter=SinRed}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <!-- Sin mayúsculas, sin ícono tachado, sin rojo: el cuerpo gris del orbe ya lo dice. -->
+                            <TextBlock Grid.Row="0" Style="{StaticResource Primaria}" Text="Sin red. Sigo con lo de acá." />
+                            <TextBlock Grid.Row="1"
+                                       Style="{StaticResource Secundaria}"
+                                       Margin="0,5,0,0"
+                                       VerticalAlignment="Top"
+                                       Text="Agenda, recordatorios y memoria funcionan: viven en tu máquina. Lo que necesita el modelo espera." />
+                            <TextBlock Grid.Row="2"
+                                       Style="{StaticResource Pie}"
+                                       FontFamily="Consolas"
+                                       Text="{Binding StatusText}" />
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </shell:GlassSurface>
+        </Grid>
+
+        <!-- ============================ EL ORBE ============================ -->
         <Grid x:Name="OrbDragSurface"
-              Grid.Column="0"
-              Width="96"
-              Height="96"
-              HorizontalAlignment="Left"
-              VerticalAlignment="Center"
+              Width="108"
+              Height="108"
               Background="Transparent"
               PreviewMouseLeftButtonDown="Orb_PreviewMouseLeftButtonDown"
               ToolTip="Tocar: escribir · arrastrar: mover · decí «Viernes» para hablar">
-            <!--
-                La gota. Sin anillos: el fluido mismo dice en qué estado está. Se inserta desde
-                código para evitar la compilación en dos pasadas que WPF dispara cuando el XAML
-                referencia un tipo del propio ensamblado.
-            -->
+            <Grid.RenderTransform>
+                <TransformGroup>
+                    <ScaleTransform x:Name="OrbPresenceScale" ScaleX="1" ScaleY="1" />
+                    <TranslateTransform x:Name="OrbPresenceOffset" X="0" Y="0" />
+                </TransformGroup>
+            </Grid.RenderTransform>
+
             <Grid x:Name="OrbHost" RenderTransformOrigin="0.5,0.5">
                 <Grid.RenderTransform>
                     <TransformGroup>
@@ -58,27 +822,9 @@
                 </Grid.RenderTransform>
             </Grid>
 
-            <Border Panel.ZIndex="7"
-                    Margin="0,-2,0,0"
-                    Padding="6,2"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Top"
-                    CornerRadius="7"
-                    Background="#E60B1116"
-                    BorderBrush="#36FFFFFF"
-                    BorderThickness="1"
-                    IsHitTestVisible="False"
-                    Visibility="{Binding IsStateLabelVisible, Converter={StaticResource BoolVisibility}}">
-                <TextBlock Text="{Binding StateShortLabel}"
-                           Foreground="#FFE9F4F8"
-                           FontFamily="{StaticResource UiFont}"
-                           FontSize="8.5"
-                           FontWeight="SemiBold" />
-            </Border>
-
             <Button x:Name="OrbButton"
-                    Width="72"
-                    Height="72"
+                    Width="76"
+                    Height="76"
                     Padding="0"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -88,10 +834,6 @@
                     Focusable="True"
                     Click="OrbButton_Click"
                     AutomationProperties.Name="Viernes: tocar para escribir, arrastrar para mover">
-                <!--
-                    El botón ya no dibuja: es sólo la superficie de contacto sobre la gota. Al
-                    presionar hunde el fluido, que es lo que hace un líquido cuando lo tocás.
-                -->
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
                         <Grid Background="Transparent" RenderTransformOrigin="0.5,0.5">
@@ -99,10 +841,7 @@
                                 <ScaleTransform x:Name="PressDepth" ScaleX="1" ScaleY="1" />
                             </Grid.RenderTransform>
                             <Ellipse x:Name="Touch" Fill="Transparent" />
-                            <Ellipse x:Name="Wet"
-                                     Margin="2"
-                                     Fill="#00FFFFFF"
-                                     IsHitTestVisible="False" />
+                            <Ellipse x:Name="Wet" Margin="2" Fill="#00FFFFFF" IsHitTestVisible="False" />
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -147,365 +886,91 @@
                     </ControlTemplate>
                 </Button.Template>
             </Button>
-
         </Grid>
 
-        <!-- La burbuja aparece sólo durante interacción o cuando el usuario abre texto. -->
-        <!--
-            Vidrio dibujado a mano: sin backdrop-filter no hay vidrio real, hay que pintarlo.
-            Cinco capas — cuerpo, canto de luz, brillo, contorno y sombra. Lo que se fue es el
-            borde cian: un contorno de color decía «encendido» todo el tiempo. Ahora los estados
-            tiñen el cuerpo, no el contorno.
-        -->
-        <Border x:Name="AssistantBubble"
-                Grid.Column="1"
-                Margin="-1,2,2,2"
-                Padding="14,10,8,8"
-                VerticalAlignment="Stretch"
-                CornerRadius="5,24,24,5"
-                BorderThickness="1"
-                BorderBrush="#1CFFFFFF"
-                Visibility="{Binding IsAssistantShellVisible, Converter={StaticResource BoolVisibility}}">
-            <Border.Background>
-                <LinearGradientBrush StartPoint="0.28,0" EndPoint="0.72,1">
-                    <GradientStop Color="#F2283442" Offset="0" />
-                    <GradientStop Color="#F620212B" Offset="0.46" />
-                    <GradientStop Color="#FA121922" Offset="1" />
-                </LinearGradientBrush>
-            </Border.Background>
-            <Border.Effect>
-                <DropShadowEffect Color="#FF000000" BlurRadius="38" Direction="270" ShadowDepth="14" Opacity="0.58" />
-            </Border.Effect>
+        <!-- ================= PÍLDORA DE ESTADO Y BURBUJA DE DICTADO ================= -->
+        <Grid x:Name="OrbOverlay" Width="108" Height="108" IsHitTestVisible="False">
 
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="*" />
-                    <RowDefinition Height="26" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-
-                <!-- Canto de luz arriba y sombra abajo: lo que da el espesor del cristal. -->
-                <Border Grid.Row="0"
-                        Grid.RowSpan="3"
-                        VerticalAlignment="Top"
-                        Height="1"
-                        Margin="-13,-9,-7,0"
-                        Background="#14FFFFFF"
-                        IsHitTestVisible="False"
-                        Panel.ZIndex="9" />
-                <Border Grid.Row="0"
-                        Grid.RowSpan="3"
-                        VerticalAlignment="Bottom"
-                        Height="1"
-                        Margin="-13,0,-7,-7"
-                        Background="#66000000"
-                        IsHitTestVisible="False"
-                        Panel.ZIndex="9" />
-
-                <!-- Brillo del 46 % superior. Muy poco a propósito: si se ve, es plástico. -->
-                <Border Grid.Row="0"
-                        Grid.RowSpan="3"
-                        VerticalAlignment="Top"
-                        Height="52"
-                        Margin="-13,-9,-7,0"
-                        IsHitTestVisible="False"
-                        Panel.ZIndex="8">
-                    <Border.Background>
-                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                            <GradientStop Color="#0EFFFFFF" Offset="0" />
-                            <GradientStop Color="#00FFFFFF" Offset="1" />
-                        </LinearGradientBrush>
-                    </Border.Background>
-                </Border>
-
-                <TextBlock Grid.Row="0"
-                           Margin="0,0,5,2"
-                           Text="{Binding MessageText}"
-                           ToolTip="{Binding MessageText}"
-                           Foreground="{StaticResource TextPrimary}"
-                           FontFamily="{StaticResource UiFont}"
-                           FontSize="12.5"
-                           FontWeight="Medium"
-                           LineHeight="17"
-                           MaxHeight="36"
-                           TextWrapping="Wrap"
-                           TextTrimming="CharacterEllipsis"
-                           Visibility="{Binding IsMessageVisible, Converter={StaticResource BoolVisibility}}" />
-
-                <!--
-                    Listas de agenda, recordatorios o memoria. La burbuja crece a 168 px sólo mientras
-                    las muestra: sigue siendo temporal, nunca un panel fijo.
-                -->
-                <ItemsControl Grid.Row="0"
-                              Margin="0,0,5,2"
-                              ItemsSource="{Binding ListItems}"
-                              Visibility="{Binding AreListItemsVisible, Converter={StaticResource BoolVisibility}}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,0,0,2">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" MinWidth="62" />
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0"
-                                           Margin="0,0,8,0"
-                                           Text="{Binding When}"
-                                           Foreground="{StaticResource Cyan}"
-                                           FontFamily="Consolas"
-                                           FontSize="10"
-                                           VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1"
-                                           Text="{Binding What}"
-                                           ToolTip="{Binding What}"
-                                           Foreground="#FFE3EBF2"
-                                           FontFamily="{StaticResource UiFont}"
-                                           FontSize="11.5"
-                                           LineHeight="15"
-                                           TextTrimming="CharacterEllipsis"
-                                           VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="2"
-                                           Margin="8,0,0,0"
-                                           Text="{Binding Tag}"
-                                           Foreground="{StaticResource TextSecondary}"
-                                           FontFamily="Consolas"
-                                           FontSize="9"
-                                           VerticalAlignment="Center" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
-                <!--
-                    Pasos del turno. Reemplazan al mensaje mientras trabaja para que la espera muestre
-                    qué está haciendo, y sobre todo si una herramienta quedó bloqueada por la política.
-                -->
-                <ItemsControl Grid.Row="0"
-                              Margin="0,0,5,2"
-                              ItemsSource="{Binding Steps}"
-                              Visibility="{Binding AreStepsVisible, Converter={StaticResource BoolVisibility}}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,0,0,3">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="13" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Ellipse Grid.Column="0"
-                                         Width="5"
-                                         Height="5"
-                                         HorizontalAlignment="Left"
-                                         VerticalAlignment="Center">
-                                    <Ellipse.Style>
-                                        <Style TargetType="Ellipse">
-                                            <Setter Property="Fill" Value="#FF2E4055" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsDone}" Value="True">
-                                                    <Setter Property="Fill" Value="#FF72F0C0" />
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsBlocked}" Value="True">
-                                                    <Setter Property="Fill" Value="#FFFFB347" />
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                                    <Setter Property="Fill" Value="#FF9BB7FF" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Ellipse.Style>
-                                </Ellipse>
-                                <TextBlock Grid.Column="1"
-                                           Text="{Binding Label}"
-                                           ToolTip="{Binding Label}"
-                                           FontFamily="{StaticResource UiFont}"
-                                           FontSize="11"
-                                           LineHeight="15"
-                                           TextTrimming="CharacterEllipsis">
-                                    <TextBlock.Style>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="#FF62758A" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsDone}" Value="True">
-                                                    <Setter Property="Foreground" Value="#FF9DB0C2" />
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsBlocked}" Value="True">
-                                                    <Setter Property="Foreground" Value="#FFFFC56B" />
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                                    <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
-                                                    <Setter Property="FontWeight" Value="SemiBold" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </TextBlock.Style>
-                                </TextBlock>
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
-                <Grid Grid.Row="1">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-
-                    <TextBlock Grid.Column="0"
-                               Margin="0,0,4,0"
-                               VerticalAlignment="Center"
-                               Text="{Binding StatusText}"
-                               ToolTip="{Binding StatusText}"
-                               Foreground="{StaticResource TextSecondary}"
-                               FontFamily="{StaticResource UiFont}"
+            <Border x:Name="StatePill"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Top"
+                    Margin="0,-34,0,0"
+                    Height="27"
+                    Padding="10,0,12,0"
+                    CornerRadius="14"
+                    Background="#8C18181C"
+                    BorderBrush="#30FFFFFF"
+                    BorderThickness="1"
+                    Visibility="{Binding IsStateLabelVisible, Converter={StaticResource BoolVisibility}}">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Ellipse Width="6"
+                             Height="6"
+                             Margin="0,0,8,0"
+                             VerticalAlignment="Center"
+                             Fill="{Binding State, Converter={StaticResource StateBrush}}" />
+                    <TextBlock VerticalAlignment="Center"
+                               FontFamily="Consolas"
                                FontSize="9.5"
-                               TextTrimming="CharacterEllipsis" />
+                               Foreground="#FFEFEFF3"
+                               Text="{Binding StateShortLabel}" />
+                </StackPanel>
+            </Border>
 
-                    <StackPanel Grid.Column="1" Orientation="Horizontal">
-                        <Button Style="{StaticResource CompactCircleButton}"
-                                Width="26" Height="26"
-                                Command="{Binding ToggleMuteCommand}"
-                                Content="{Binding MuteGlyph}"
-                                ToolTip="{Binding MuteToolTip}"
-                                AutomationProperties.Name="{Binding MuteToolTip}" />
-                        <Button Style="{StaticResource CompactCircleButton}"
-                                Width="26" Height="26"
-                                Command="{Binding ToggleExpandedCommand}"
-                                Content="&#xE70D;"
-                                ToolTip="Escribir"
-                                AutomationProperties.Name="Abrir entrada de texto" />
-                        <Button Style="{StaticResource CompactCircleButton}"
-                                Width="26" Height="26"
-                                Click="HideButton_Click"
-                                Content="&#xE921;"
-                                ToolTip="Ocultar en la bandeja"
-                                AutomationProperties.Name="Ocultar en la bandeja" />
-                    </StackPanel>
-                </Grid>
-
-                <Border Grid.Row="2"
-                        Height="34"
-                        Margin="0,5,0,0"
-                        Padding="10,0,4,0"
-                        CornerRadius="11"
-                        Background="#76101820"
-                        BorderBrush="#30FFFFFF"
-                        BorderThickness="1"
-                        Visibility="{Binding IsInputAreaVisible, Converter={StaticResource BoolVisibility}}">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="30" />
-                        </Grid.ColumnDefinitions>
-                        <Grid Grid.Column="0">
-                            <TextBlock VerticalAlignment="Center"
-                                       Text="Escribí una instrucción…"
-                                       Foreground="#FF718293"
-                                       FontFamily="{StaticResource UiFont}"
-                                       FontSize="10.5"
-                                       IsHitTestVisible="False">
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Visibility" Value="Collapsed" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding InputText}" Value="">
-                                                <Setter Property="Visibility" Value="Visible" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
-                            <TextBox x:Name="PromptTextBox"
-                                     Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
-                                     VerticalContentAlignment="Center"
-                                     Background="Transparent"
-                                     BorderThickness="0"
-                                     Foreground="{StaticResource TextPrimary}"
-                                     CaretBrush="{StaticResource Cyan}"
-                                     FontFamily="{StaticResource UiFont}"
-                                     FontSize="11"
-                                     SpellCheck.IsEnabled="True"
-                                     KeyDown="PromptTextBox_KeyDown"
-                                     AutomationProperties.Name="Instrucción escrita" />
-                        </Grid>
-                        <Button Grid.Column="1"
-                                Width="26" Height="26"
-                                Command="{Binding SendCommand}"
-                                Content="&#xE122;"
-                                FontFamily="Segoe Fluent Icons"
-                                FontSize="10"
-                                Foreground="#FF14202A"
-                                Background="{StaticResource Cyan}"
-                                BorderThickness="0"
-                                Cursor="Hand"
-                                ToolTip="Enviar">
-                            <Button.Template>
-                                <ControlTemplate TargetType="Button">
-                                    <Border x:Name="SendSurface" Background="{TemplateBinding Background}" CornerRadius="9">
-                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                    </Border>
-                                    <ControlTemplate.Triggers>
-                                        <Trigger Property="IsEnabled" Value="False">
-                                            <Setter TargetName="SendSurface" Property="Opacity" Value="0.35" />
-                                        </Trigger>
-                                    </ControlTemplate.Triggers>
-                                </ControlTemplate>
-                            </Button.Template>
-                        </Button>
-                    </Grid>
-                </Border>
-
-                <Border Grid.Row="2"
-                        Height="34"
-                        Margin="0,5,0,0"
-                        Padding="9,0,4,0"
-                        CornerRadius="11"
-                        Background="#45FFC56B"
-                        BorderBrush="#88FFC56B"
-                        BorderThickness="1"
-                        ToolTip="{Binding ConfirmationDetail}"
-                        Visibility="{Binding IsConfirmationAreaVisible, Converter={StaticResource BoolVisibility}}">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="67" />
-                            <ColumnDefinition Width="27" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0"
-                                   VerticalAlignment="Center"
-                                   Text="{Binding ConfirmationTitle}"
-                                   Foreground="{StaticResource TextPrimary}"
-                                   FontFamily="{StaticResource UiFont}"
+            <!--
+                La burbuja de dictado. Nace pegada al orbe —la esquina chica apunta a él— y crece hacia
+                el lado libre. Está lista para recibir parciales; hoy el reconocedor entrega la frase
+                entera al soltar el micrófono.
+            -->
+            <Border x:Name="DictationBubble"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Bottom"
+                    Margin="2,0,0,116"
+                    Width="312"
+                    Padding="15,13,15,12"
+                    CornerRadius="20,20,20,7"
+                    Background="#8C18181C"
+                    BorderBrush="#30FFFFFF"
+                    BorderThickness="1"
+                    Visibility="{Binding IsDictationVisible, Converter={StaticResource BoolVisibility}}">
+                <Border.Effect>
+                    <DropShadowEffect Color="#FF000000" BlurRadius="42" Direction="270" ShadowDepth="12" Opacity="0.6" />
+                </Border.Effect>
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="6"
+                                 Height="6"
+                                 Margin="0,0,8,0"
+                                 VerticalAlignment="Center"
+                                 Fill="{Binding State, Converter={StaticResource StateBrush}}" />
+                        <TextBlock VerticalAlignment="Center"
+                                   FontFamily="Consolas"
                                    FontSize="9.5"
-                                   FontWeight="SemiBold"
-                                   TextTrimming="CharacterEllipsis" />
-                        <Button Grid.Column="1"
-                                Height="24"
-                                Margin="2,0"
-                                Command="{Binding ConfirmCommand}"
-                                Content="Confirmar"
-                                Foreground="#FF1A202A"
-                                Background="{StaticResource Amber}"
-                                BorderThickness="0"
-                                FontFamily="{StaticResource UiFont}"
-                                FontSize="9"
-                                FontWeight="SemiBold"
-                                Cursor="Hand">
-                            <Button.Template>
-                                <ControlTemplate TargetType="Button">
-                                    <Border Background="{TemplateBinding Background}" CornerRadius="8">
-                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                    </Border>
-                                </ControlTemplate>
-                            </Button.Template>
-                        </Button>
-                        <Button Grid.Column="2"
-                                Style="{StaticResource IconButton}"
-                                Width="26" Height="26"
-                                Command="{Binding DismissConfirmationCommand}"
-                                Content="&#xE711;"
-                                ToolTip="Cancelar" />
-                    </Grid>
-                </Border>
-            </Grid>
-        </Border>
-    </Grid>
+                                   Foreground="#FFAFAFB7"
+                                   Text="te escucho" />
+                        <Border Width="60"
+                                Height="3"
+                                Margin="10,0,0,0"
+                                VerticalAlignment="Center"
+                                CornerRadius="2"
+                                Background="#1FFFFFFF">
+                            <Border x:Name="DictationLevel"
+                                    HorizontalAlignment="Left"
+                                    Width="0"
+                                    CornerRadius="2"
+                                    Background="{Binding State, Converter={StaticResource StateBrush}}" />
+                        </Border>
+                    </StackPanel>
+                    <TextBlock Margin="0,7,0,0"
+                               FontFamily="{StaticResource UiFont}"
+                               FontSize="12.5"
+                               LineHeight="17"
+                               Foreground="#FFF4F4F7"
+                               TextWrapping="Wrap"
+                               MaxHeight="52"
+                               TextTrimming="CharacterEllipsis"
+                               Text="{Binding DictationText}" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Canvas>
 </Window>

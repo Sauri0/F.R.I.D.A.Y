@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Threading;
 using Viernes.App.Infrastructure;
 using Viernes.App.Services;
+using Viernes.App.Shell;
 
 namespace Viernes.App.ViewModels;
 
@@ -28,6 +30,20 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isPresentingResult;
     private BubbleListKind _listKind = BubbleListKind.Agenda;
     private CancellationTokenSource? _resultPresentationCancellation;
+    private PanelKind _activePanel = PanelKind.Escribir;
+    private PanelKind? _requestedPanel;
+    private bool _isPanelOpen;
+    private bool _isPanelHovered;
+    private bool _blockedByPolicy;
+    private double _panelLifeProgress;
+    private DispatcherTimer? _lifeTimer;
+    private DateTime _lifeTick;
+    private TimeSpan _lifeSpent;
+    private TimeSpan _lifeWall;
+    private string _dictationText = string.Empty;
+    private string _reminderTitle = string.Empty;
+    private string _reminderDetail = string.Empty;
+    private string _policyMessage = "No hay ninguna regla local frenando nada.";
 
     /// <summary>
     /// Si la conversación en curso se está llevando hablando o escribiendo. <c>null</c> mientras no
@@ -55,6 +71,8 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         ClearInputCommand = new RelayCommand(() => InputText = string.Empty, () => !string.IsNullOrEmpty(InputText));
         ConfirmCommand = new AsyncRelayCommand(ConfirmAsync, () => IsConfirmationVisible, ShowError);
         DismissConfirmationCommand = new RelayCommand(DismissConfirmation, () => IsConfirmationVisible);
+        ClosePanelCommand = new RelayCommand(ClosePanel);
+        CancelTurnCommand = new AsyncRelayCommand(CancelTurnAsync, () => true, ShowError);
     }
 
     public AssistantVisualState State
@@ -75,6 +93,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(IsError));
             OnPropertyChanged(nameof(IsStateLabelVisible));
             OnPropertyChanged(nameof(StateShortLabel));
+            OnPropertyChanged(nameof(IsDictationVisible));
             NotifyContentProperties();
         }
     }
@@ -241,55 +260,281 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsInputAreaVisible => IsExpanded && !IsConfirmationVisible;
     public bool IsConfirmationAreaVisible => IsExpanded && IsConfirmationVisible;
     public bool IsMessageVisible => !AreStepsVisible && !AreListItemsVisible;
+
+    /// <summary>Sólo el orbe, sin vidrio al lado.</summary>
+    public bool IsMinimalShellVisible => !IsPanelOpen;
+
+    /// <summary>Hay un desplegable a la vista.</summary>
+    public bool IsAssistantShellVisible => IsPanelOpen;
+
     /// <summary>
-    /// Durante una conversación hablada el orbe se queda solo: el color y el fluido ya dicen en qué
-    /// estado está, y desplegar la burbuja en cada turno convierte una charla en una ventana que
-    /// aparece y desaparece sin parar. La burbuja se abre al tocarla, o cuando hay que decidir algo.
+    /// Cuál de los trece desplegables está en el vidrio.
     /// </summary>
     /// <remarks>
-    /// Escrita es lo contrario: si escribiste la pregunta, la respuesta se lee, y encogerse a 108 px
-    /// la dejaba dibujada adentro de una burbuja colapsada. Sólo se veía cambiar el color del orbe.
-    /// Se notaba únicamente con el micrófono silenciado, porque ahí el runtime ni siquiera llega a
-    /// abrir la conversación y la burbuja quedaba visible por el otro camino.
+    /// Nunca hay dos: el vidrio es uno solo y cambia de forma. Por eso esto es un valor y no una
+    /// colección de banderas — con banderas basta olvidarse de bajar una para que queden dos paneles
+    /// dibujados uno encima del otro.
     /// </remarks>
-    public bool IsMinimalShellVisible =>
-        !IsExpanded &&
-        !IsConfirmationVisible &&
-        (IsConversationActive
-            ? _isSpokenConversation != false
-            : IsRestingState && !_isPresentingResult);
+    public PanelKind ActivePanel
+    {
+        get => _activePanel;
+        private set
+        {
+            if (SetProperty(ref _activePanel, value))
+            {
+                OnPropertyChanged(nameof(ActivePanelSpec));
+                OnPropertyChanged(nameof(PanelWidth));
+                OnPropertyChanged(nameof(PanelHeight));
+                OnPropertyChanged(nameof(PanelFamily));
+            }
+        }
+    }
+
+    /// <summary>La ficha del desplegable abierto: medida, familia y tiempo de vida.</summary>
+    public PanelSpec ActivePanelSpec => PanelCatalog.For(ActivePanel);
+
+    /// <summary>Ancho del vidrio. Lo anima el vidrio, no la ventana.</summary>
+    public double PanelWidth => ActivePanelSpec.Width;
+
+    /// <summary>Alto del vidrio. Lo anima el vidrio, no la ventana.</summary>
+    public double PanelHeight => ActivePanelSpec.Height;
+
+    /// <summary>Familia de vidrio del desplegable abierto.</summary>
+    public PanelFamily PanelFamily => ActivePanelSpec.Family;
+
+    /// <summary>Si hay un desplegable a la vista.</summary>
+    public bool IsPanelOpen
+    {
+        get => _isPanelOpen;
+        private set
+        {
+            if (SetProperty(ref _isPanelOpen, value))
+            {
+                OnPropertyChanged(nameof(IsAssistantShellVisible));
+                OnPropertyChanged(nameof(IsMinimalShellVisible));
+            }
+        }
+    }
+
+    /// <summary>Cuánto avanzó la barra de vida del panel, de 0 a 1.</summary>
+    public double PanelLifeProgress
+    {
+        get => _panelLifeProgress;
+        private set => SetProperty(ref _panelLifeProgress, value);
+    }
 
     /// <summary>
-    /// Reposo no es sólo <see cref="AssistantVisualState.Idle"/>: sin clave o sin red tampoco está
-    /// haciendo nada, y exigir Idle dejaba la burbuja abierta para siempre en una instalación a
-    /// medias —justo la que menos tiene para contar.
-    /// </summary>
-    private bool IsRestingState => State
-        is AssistantVisualState.Idle
-        or AssistantVisualState.Unconfigured
-        or AssistantVisualState.Offline;
-
-    public bool IsAssistantShellVisible => !IsMinimalShellVisible;
-    public double WidgetWidth => IsMinimalShellVisible ? 108 : IsExpanded ? 368 : 360;
-
-    /// <summary>
-    /// Dos formas para listas, no una: tira de 120 para la agenda, hoja de 176 para la memoria.
+    /// El puntero está adentro del panel. Mientras lo esté, el reloj de vida no corre.
     /// </summary>
     /// <remarks>
-    /// Una agenda es una línea de tiempo y se lee de un vistazo; una memoria son registros con
-    /// identificador y eso pide fila completa. Darle 176 px a una agenda de dos eventos deja un
-    /// vacío que se lee como error. Ninguna de las dos scrollea: el scroll invita a quedarse, y
-    /// quedarse es el panel permanente entrando por la ventana.
+    /// Un panel que se cierra mientras lo estás leyendo es peor que uno que se queda de más. El tope
+    /// de tres vidas existe para que apoyar el mouse encima no lo convierta en una ventana fija.
     /// </remarks>
-    public double WidgetHeight => IsMinimalShellVisible
-        ? 108
-        : IsExpanded
-            ? 168
-            : AreStepsVisible
-                ? 176
-                : AreListItemsVisible
-                    ? _listKind == BubbleListKind.Memoria ? 176 : 120
-                    : 120;
+    public bool IsPanelHovered
+    {
+        get => _isPanelHovered;
+        set => SetProperty(ref _isPanelHovered, value);
+    }
+
+    /// <summary>
+    /// Lo que se está dictando. Vacío mientras el micrófono todavía no devolvió palabras.
+    /// </summary>
+    /// <remarks>
+    /// Hoy el reconocedor entrega la frase entera al soltar el micrófono: el runtime arranca con
+    /// <c>EmitPartialTranscriptions = false</c> y no publica parciales. La burbuja está hecha para
+    /// recibirlas —se llena palabra por palabra y la última va en itálica hasta confirmarse—, así que
+    /// encenderla es publicar parciales, no rehacer nada de acá.
+    /// </remarks>
+    public string DictationText
+    {
+        get => _dictationText;
+        private set
+        {
+            if (SetProperty(ref _dictationText, value))
+            {
+                OnPropertyChanged(nameof(IsDictationVisible));
+            }
+        }
+    }
+
+    /// <summary>Si la burbuja de dictado está a la vista.</summary>
+    public bool IsDictationVisible =>
+        State == AssistantVisualState.Listening ||
+        (DictationText.Length > 0 && State == AssistantVisualState.Thinking && !IsPanelOpen);
+
+    /// <summary>Qué recordatorio llegó a su hora. Lo llena el pedido de presencia del runtime.</summary>
+    public string ReminderTitle
+    {
+        get => _reminderTitle;
+        private set => SetProperty(ref _reminderTitle, value);
+    }
+
+    /// <summary>El detalle del recordatorio: la hora, y hace cuánto venció.</summary>
+    public string ReminderDetail
+    {
+        get => _reminderDetail;
+        private set => SetProperty(ref _reminderDetail, value);
+    }
+
+    /// <summary>Qué regla local frenó la acción. Sale del paso bloqueado del turno.</summary>
+    public string PolicyMessage
+    {
+        get => _policyMessage;
+        private set => SetProperty(ref _policyMessage, value);
+    }
+
+    /// <summary>
+    /// Abre un desplegable a pedido. Es la puerta para todo lo que el runtime todavía no publica.
+    /// </summary>
+    /// <remarks>
+    /// Los paneles que se deducen del estado —escribir, trabajando, permiso, sin red, calendario,
+    /// memoria— se abren solos. Los que dependen de datos que el proyecto todavía no tiene —muestras,
+    /// caja, gastos, música, presupuesto— se abren llamando acá, y hasta que existan esos datos
+    /// muestran que no hay nada conectado en vez de inventar números.
+    /// </remarks>
+    public void ShowPanel(PanelKind kind)
+    {
+        _requestedPanel = kind;
+        RefreshPanel();
+    }
+
+    /// <summary>Cierra lo que esté abierto y vuelve al orbe solo.</summary>
+    public void ClosePanel()
+    {
+        _requestedPanel = null;
+        IsExpanded = false;
+        RefreshPanel();
+    }
+
+    /// <summary>
+    /// Decide qué desplegable corresponde ahora mismo, y si corresponde alguno.
+    /// </summary>
+    /// <remarks>
+    /// El orden es la prioridad: una decisión pendiente le gana a todo, porque es lo único que está
+    /// esperando al usuario. Lo pedido a mano va después de lo que exige una respuesta y antes de lo
+    /// que sólo informa.
+    /// </remarks>
+    private void RefreshPanel()
+    {
+        var kind = ResolvePanel();
+        if (kind is null)
+        {
+            _requestedPanel = null;
+            IsPanelOpen = false;
+            StopLifeClock();
+            return;
+        }
+
+        var changed = !IsPanelOpen || ActivePanel != kind.Value;
+        ActivePanel = kind.Value;
+        IsPanelOpen = true;
+
+        if (changed)
+        {
+            StartLifeClock();
+        }
+    }
+
+    private PanelKind? ResolvePanel()
+    {
+        if (IsConfirmationVisible)
+        {
+            return PanelKind.Permiso;
+        }
+
+        if (IsExpanded)
+        {
+            return PanelKind.Escribir;
+        }
+
+        if (AreStepsVisible)
+        {
+            return PanelKind.Trabajando;
+        }
+
+        if (_requestedPanel is { } requested)
+        {
+            return requested;
+        }
+
+        if (State == AssistantVisualState.Offline)
+        {
+            return PanelKind.SinRed;
+        }
+
+        if (AreListItemsVisible)
+        {
+            return _listKind == BubbleListKind.Memoria ? PanelKind.Memoria : PanelKind.Calendario;
+        }
+
+        if (_blockedByPolicy)
+        {
+            return PanelKind.Politica;
+        }
+
+        // El resultado de un turno vive unos segundos en el panel de conversación: si escribiste la
+        // pregunta, la respuesta se lee. Si la charla es hablada el orbe se queda solo —el color y el
+        // fluido ya dicen en qué estado está—, porque desplegar el vidrio en cada turno convierte una
+        // conversación en una ventana que aparece y desaparece sin parar.
+        return _isPresentingResult && _isSpokenConversation != true ? PanelKind.Escribir : null;
+    }
+
+    private void StartLifeClock()
+    {
+        StopLifeClock();
+        var life = ActivePanelSpec.LifeMs;
+        PanelLifeProgress = 0;
+        if (life <= 0)
+        {
+            return;
+        }
+
+        _lifeSpent = TimeSpan.Zero;
+        _lifeWall = TimeSpan.Zero;
+        _lifeTick = DateTime.UtcNow;
+        _lifeTimer = new DispatcherTimer(DispatcherPriority.Normal)
+        {
+            Interval = TimeSpan.FromMilliseconds(60)
+        };
+        _lifeTimer.Tick += (_, _) => TickLifeClock(life);
+        _lifeTimer.Start();
+    }
+
+    private void TickLifeClock(int lifeMs)
+    {
+        var now = DateTime.UtcNow;
+        var delta = now - _lifeTick;
+        _lifeTick = now;
+        _lifeWall += delta;
+
+        if (!IsPanelHovered)
+        {
+            _lifeSpent += delta;
+        }
+
+        var life = TimeSpan.FromMilliseconds(lifeMs);
+        PanelLifeProgress = Math.Clamp(_lifeSpent / life, 0, 1);
+
+        // El tope de tres vidas: apoyar el mouse encima estira la lectura, no convierte el panel en
+        // una ventana que hay que cerrar a mano.
+        if (_lifeSpent < life && _lifeWall < life * 3)
+        {
+            return;
+        }
+
+        StopLifeClock();
+        _requestedPanel = null;
+        _isPresentingResult = false;
+        _blockedByPolicy = false;
+        RefreshPanel();
+    }
+
+    private void StopLifeClock()
+    {
+        _lifeTimer?.Stop();
+        _lifeTimer = null;
+        PanelLifeProgress = 0;
+    }
 
     public string ConfirmationTitle
     {
@@ -366,6 +611,12 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand ClearInputCommand { get; }
     public ICommand ConfirmCommand { get; }
     public ICommand DismissConfirmationCommand { get; }
+
+    /// <summary>Retrae el desplegable sin tocar nada más.</summary>
+    public ICommand ClosePanelCommand { get; }
+
+    /// <summary>Corta el turno en curso. Vuelve al reposo sin dejar nada en pantalla.</summary>
+    public ICommand CancelTurnCommand { get; }
 
     public event EventHandler<ShellActivationRequest>? ActivationRequested;
 
@@ -504,7 +755,18 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void RuntimeOnActivationRequested(object? sender, ShellActivationRequest request) =>
         System.Windows.Application.Current?.Dispatcher.Invoke(() =>
-            ActivationRequested?.Invoke(this, request));
+        {
+            // Un recordatorio es el único desplegable que el usuario no pidió: llega, viene al frente
+            // y habla. Por eso se abre acá y no espera a que algo más lo deduzca.
+            if (request.Reason == ShellActivationReason.Reminder)
+            {
+                ReminderTitle = request.Title;
+                ReminderDetail = request.Detail;
+                ShowPanel(PanelKind.Recordatorio);
+            }
+
+            ActivationRequested?.Invoke(this, request);
+        });
 
     private void RuntimeOnUpdated(object? sender, AssistantRuntimeUpdate update)
     {
@@ -545,6 +807,16 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 MessageText = update.Message;
             }
 
+            // Lo que se dictó se muestra en la burbuja, no en el panel: abrir un desplegable para
+            // repetir lo que el usuario acaba de decir es ruido. Al empezar a escuchar se vacía.
+            DictationText = update.State switch
+            {
+                AssistantVisualState.Listening => string.Empty,
+                AssistantVisualState.Thinking when previousState == AssistantVisualState.Listening =>
+                    update.Message ?? string.Empty,
+                _ => DictationText
+            };
+
             if (update.MicrophoneActive.HasValue)
             {
                 IsMicrophoneActive = update.MicrophoneActive.Value;
@@ -572,6 +844,15 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 if (Steps.Count > previousCount)
                 {
                     StepAdvanced?.Invoke(this, EventArgs.Empty);
+                }
+
+                // Un paso frenado por la política no es un error del turno: es el sistema cumpliendo
+                // lo que prometió, y merece su propio desplegable en vez de perderse en una lista.
+                var blocked = Steps.FirstOrDefault(step => step.IsBlocked);
+                _blockedByPolicy = blocked is not null;
+                if (blocked is not null)
+                {
+                    PolicyMessage = blocked.Label;
                 }
 
                 NotifyContentProperties();
@@ -612,6 +893,8 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 // «me callé». Dejarla abierta contando lo que hizo se lee como que sigue trabajando.
                 _resultPresentationCancellation?.Cancel();
                 _isPresentingResult = false;
+                _requestedPanel = null;
+                _blockedByPolicy = false;
                 IsExpanded = false;
                 Steps.Clear();
                 ListItems.Clear();
@@ -637,6 +920,12 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     private Task ConfirmAsync(CancellationToken cancellationToken) =>
         _runtime.ConfirmPendingAsync(cancellationToken);
+
+    private Task CancelTurnAsync(CancellationToken cancellationToken)
+    {
+        ClosePanel();
+        return _runtime.EndConversationAsync("Turno cancelado", quiet: true, cancellationToken);
+    }
 
     private void DismissConfirmation()
     {
@@ -678,8 +967,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         OnPropertyChanged(nameof(IsMinimalShellVisible));
         OnPropertyChanged(nameof(IsAssistantShellVisible));
-        OnPropertyChanged(nameof(WidgetWidth));
-        OnPropertyChanged(nameof(WidgetHeight));
+        RefreshPanel();
     }
 
     private void NotifyContentProperties()
@@ -692,6 +980,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        StopLifeClock();
         _resultPresentationCancellation?.Cancel();
         _resultPresentationCancellation?.Dispose();
         _runtime.Updated -= RuntimeOnUpdated;
