@@ -118,6 +118,76 @@ public sealed class OrbDragFeelTests
     }
 
     [Fact]
+    public void SeLoPuedeArrojarAunqueLaManoSeDetengaUnInstanteAntesDeSoltar()
+    {
+        // ESTA es la prueba que faltaba, y la que explica «no lo puedo tirar».
+        //
+        // Las otras sueltan en el mismo cuadro en que dejan de mover, y nadie hace eso: levantar el
+        // dedo del botón lleva su tiempo, y en esos milisegundos el mouse ya está quieto. Un gesto
+        // real es «tiro fuerte, freno un instante, suelto».
+        var motion = new OrbMotion();
+        motion.Teleport(new Point(300, 500));
+        motion.BeginDrag();
+
+        var paso = 1.0 / 180;
+        var x = 300.0;
+
+        // El envión: 1400 px/s durante 250 ms.
+        for (var t = 0.0; t < 0.25; t += paso)
+        {
+            x += 1400 * paso;
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        // Y la pausa antes de soltar: 60 ms con la mano quieta. Nada extraordinario.
+        for (var t = 0.0; t < 0.060; t += paso)
+        {
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        motion.Drop();
+
+        Assert.True(
+            motion.Speed > 700,
+            $"Se murió en la pausa: salió a {motion.Speed:0} px/s después de un envión de 1400.");
+    }
+
+    [Fact]
+    public void UnaPausaLargaSiMataElTiro()
+    {
+        // El otro lado, y hace falta: si la ventana de tiempo fuera muy larga, apoyar el orbe en un
+        // rincón después de haberlo movido rápido lo dispararía. «Lo dejé quieto» y «lo tiré» tienen
+        // que ser distinguibles, y lo que los distingue es cuánto hace que la mano no se mueve.
+        var motion = new OrbMotion();
+        motion.Teleport(new Point(300, 500));
+        motion.BeginDrag();
+
+        var paso = 1.0 / 180;
+        var x = 300.0;
+        for (var t = 0.0; t < 0.25; t += paso)
+        {
+            x += 1400 * paso;
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        // Medio segundo quieto: ya no es un tiro, es haberlo apoyado.
+        for (var t = 0.0; t < 0.5; t += paso)
+        {
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        motion.Drop();
+
+        Assert.True(
+            motion.Speed < 60,
+            $"Salió disparado después de medio segundo quieto: {motion.Speed:0} px/s.");
+    }
+
+    [Fact]
     public void SeLoPuedeArrojar()
     {
         // El defecto que esto cierra: al soltar, el orbe salía con la velocidad del RESORTE. Con el

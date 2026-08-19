@@ -142,8 +142,32 @@ internal sealed class OrbMotion
     /// </remarks>
     public Vector HandVelocity { get; private set; }
 
-    /// <summary>Dónde estaba el objetivo el cuadro anterior, para derivar la velocidad de la mano.</summary>
-    private Point _lastTarget;
+    /// <summary>
+    /// Cuánto hacia atrás se mira para saber a qué velocidad venía la mano.
+    /// </summary>
+    /// <remarks>
+    /// No sale del boceto: es de acá, y sale de cómo se tira algo de verdad. <b>Nadie suelta el botón
+    /// en el mismo instante en que deja de mover el mouse</b>: levantar el dedo lleva su tiempo y en
+    /// esos milisegundos la mano ya está quieta. Un gesto real es «envión, freno un instante, suelto».
+    /// <para>
+    /// Acá había un promedio corrido con memoria por cuadro (0,72), que a 180 Hz da una constante de
+    /// tiempo de unos 17 ms: el envión se olvidaba en tres cuadros. Medido, con una pausa de 60 ms
+    /// antes de soltar —que es de lo más común— un envión de 1400 px/s salía a <b>19</b>. Eso es «lo
+    /// suelto y se queda en el lugar».
+    /// </para>
+    /// <para>
+    /// Con una ventana de tiempo la pausa corta no borra nada, porque el envión sigue adentro de los
+    /// últimos 120 ms; y una pausa larga sí lo borra, que es lo correcto: si apoyaste el orbe y te
+    /// quedaste, no lo estás tirando. Es lo mismo que hacen los sistemas de toque, por la misma razón.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan HandWindow = TimeSpan.FromMilliseconds(120);
+
+    /// <summary>Dónde estuvo la mano en los últimos <see cref="HandWindow"/>, para poder tirar.</summary>
+    private readonly List<(double At, Point Where)> _hand = [];
+
+    /// <summary>Reloj del arrastre, en segundos desde que se agarró.</summary>
+    private double _dragClock;
 
     private int _hitToken;
     private double _hitNormalX;
@@ -250,10 +274,12 @@ internal sealed class OrbMotion
         IsFlying = false;
         Target = Position;
 
-        // La medición de la mano arranca de cero, y desde donde está el orbe. Si el objetivo
-        // anterior quedara puesto, el primer cuadro derivaría una velocidad enorme entre dos puntos
+        // La medición de la mano arranca de cero, y desde donde está el orbe. Si quedaran las
+        // muestras del arrastre anterior, el primer cuadro derivaría una velocidad entre dos puntos
         // que no tienen nada que ver, y el orbe saldría disparado apenas lo agarrás.
-        _lastTarget = Position;
+        _hand.Clear();
+        _dragClock = 0;
+        _hand.Add((0, Position));
         HandVelocity = default;
     }
 
@@ -310,6 +336,7 @@ internal sealed class OrbMotion
         }
 
         HandVelocity = default;
+        _hand.Clear();
     }
 
     /// <summary>
@@ -331,26 +358,23 @@ internal sealed class OrbMotion
         // y el tiro sale de cuán rápido movías el cursor. Que es como se tira algo.
         if (IsDragging)
         {
-            // El divisor es el dt REAL, sin el piso de MinVelocitySpan.
-            //
-            // Ese piso está bien para la velocidad del cuerpo, donde un cuadro cortísimo puede
-            // inventar una velocidad enorme a partir de un movimiento de un píxel. Acá es al revés y
-            // hace daño: dividir un desplazamiento de 5,56 ms por 8 ms no protege de nada, subestima.
-            // En la pantalla de 180 Hz donde se probó esto el tiro salía al 70 % de lo que movía la
-            // mano, y a 240 Hz al 52 %. Medido: con la mano a 1400 px/s, el orbe salía a 729.
-            //
-            // El ruido de un cuadro suelto ya lo filtra el promedio corrido de abajo. Dos guardas
-            // para lo mismo, y la segunda sesgada, es peor que una.
-            var handSpan = Math.Max(0.0005, dt);
-            var handVelocity = new Vector(
-                (Target.X - _lastTarget.X) / handSpan,
-                (Target.Y - _lastTarget.Y) / handSpan);
+            _dragClock += dt;
+            _hand.Add((_dragClock, Target));
 
-            HandVelocity = new Vector(
-                (HandVelocity.X * VelocityMemory) + (handVelocity.X * (1 - VelocityMemory)),
-                (HandVelocity.Y * VelocityMemory) + (handVelocity.Y * (1 - VelocityMemory)));
+            // Se tiran las muestras viejas, pero se conserva SIEMPRE una del otro lado del borde de
+            // la ventana: sin ella, con la mano quieta se irían acumulando muestras iguales hasta
+            // que la más vieja también estuviera quieta, y la velocidad daría cero antes de tiempo.
+            var corte = _dragClock - HandWindow.TotalSeconds;
+            while (_hand.Count > 2 && _hand[1].At < corte)
+            {
+                _hand.RemoveAt(0);
+            }
 
-            _lastTarget = Target;
+            var desde = _hand[0];
+            var ventana = _dragClock - desde.At;
+            HandVelocity = ventana < 0.0005
+                ? default
+                : new Vector((Target.X - desde.Where.X) / ventana, (Target.Y - desde.Where.Y) / ventana);
         }
 
         var remaining = Math.Min(MaxFrame, dt);
