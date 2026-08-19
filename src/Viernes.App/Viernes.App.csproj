@@ -22,6 +22,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      El icono va ADEMAS como recurso y no solo como ApplicationIcon. ApplicationIcon lo mete en la
+      cabecera del ejecutable —de ahi lo saca el Explorador— pero la ventana y el icono de la bandeja
+      lo cargan en tiempo de ejecucion, y para eso tiene que estar adentro del ensamblado.
+    -->
+    <Resource Include="Assets\Viernes.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Viernes.Core\Viernes.Core.csproj" />
     <ProjectReference Include="..\Viernes.Memory\Viernes.Memory.csproj" />
     <ProjectReference Include="..\Viernes.Platform.Windows\Viernes.Platform.Windows.csproj" />

@@ -155,33 +155,43 @@ internal sealed class TrayIconService : IDisposable
         _icon.Dispose();
     }
 
+    /// <summary>
+    /// El icono de la bandeja: el mismo del producto, cargado del ensamblado.
+    /// </summary>
+    /// <remarks>
+    /// Acá había un dibujo hecho a mano con GDI+: un círculo azul oscuro, otro celeste adentro y una
+    /// «V» en el medio. No se parecía a nada de lo que la aplicación muestra —el orbe no es un
+    /// círculo ni tiene letras— así que en la bandeja el producto se presentaba con una identidad
+    /// que no era la suya.
+    /// <para>
+    /// Se pide el tamaño que Windows quiera para la bandeja en vez de fijar 32: en pantallas con
+    /// escalado pide 20 o 24, y un 32 achatado a 20 se ve peor que el de 16 puesto en su lugar. El
+    /// .ico trae los seis tamaños justamente para que esto pueda elegir.
+    /// </para>
+    /// </remarks>
     private static Icon CreateIcon()
     {
-        using var bitmap = new Bitmap(32, 32);
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        graphics.Clear(Color.Transparent);
+        var lado = Forms.SystemInformation.SmallIconSize.Width;
 
-        using var outer = new SolidBrush(Color.FromArgb(255, 25, 35, 45));
-        using var accent = new SolidBrush(Color.FromArgb(255, 114, 217, 255));
-        using var textBrush = new SolidBrush(Color.FromArgb(255, 18, 29, 38));
-        graphics.FillEllipse(outer, 1, 1, 30, 30);
-        graphics.FillEllipse(accent, 5, 5, 22, 22);
-
-        using var font = new Font("Segoe UI", 12, FontStyle.Bold, GraphicsUnit.Pixel);
-        var size = graphics.MeasureString("V", font);
-        graphics.DrawString("V", font, textBrush, (32 - size.Width) / 2f, (32 - size.Height) / 2f - 1);
-
-        var handle = bitmap.GetHicon();
         try
         {
-            using var temporary = Icon.FromHandle(handle);
-            return (Icon)temporary.Clone();
+            var recurso = System.Windows.Application.GetResourceStream(
+                new Uri("pack://application:,,,/Assets/Viernes.ico", UriKind.Absolute));
+
+            if (recurso is not null)
+            {
+                using var flujo = recurso.Stream;
+                return new Icon(flujo, new System.Drawing.Size(lado, lado));
+            }
         }
-        finally
+        catch (Exception excepcion) when (excepcion is System.IO.IOException
+            or ArgumentException
+            or System.Windows.Markup.XamlParseException)
         {
-            DestroyIcon(handle);
+            // Sin icono no se puede: la bandeja necesita uno para poder mostrarse.
         }
+
+        return SystemIcons.Application;
     }
 
     [DllImport("user32.dll", SetLastError = true)]
