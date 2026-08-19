@@ -43,46 +43,31 @@ internal sealed class OrbMotion
     private const double SubStep = 1.0 / 120;
     private const double MaxFrame = 0.05;
 
-    /// <summary>
-    /// Rigidez del resorte del arrastre. Más dura que la del fuente, y por lo que dijo el usuario.
-    /// </summary>
-    /// <remarks>
-    /// El fuente trae 146. Con eso —y ya amortiguado— el orbe tarda unos 250 ms en alcanzar la mano,
-    /// y sostener el cursor quieto se siente como que el orbe llega tarde a todos lados: «se tarda en
-    /// soltar, no reacciona bien al cursor mantenido».
-    /// <para>
-    /// En 300 la demora baja a unos 145 ms. Sigue habiendo retraso visible —el orbe cuelga de la
-    /// mano, no está pegado— pero deja de leerse como que hay que esperarlo. Es el segundo y último
-    /// número de la física que no sale de la referencia; el otro es su amortiguación, que va atada.
-    /// </para>
-    /// </remarks>
-    private const double DragStiffness = 300;
+    /// <summary>Rigidez del resorte del arrastre. De la referencia, y no se toca.</summary>
+    private const double DragStiffness = 146;
 
     /// <summary>
-    /// Amortiguación del resorte del arrastre. Crítica: sigue a la mano sin pasarse.
+    /// Amortiguación del arrastre. <b>Subamortiguada a propósito</b>, y de eso sale el tiro.
     /// </summary>
     /// <remarks>
-    /// El fuente trae 15,5 sobre una rigidez de 146. Acá está en 2·√300 ≈ 34,64, que es el valor
-    /// crítico para la rigidez de <see cref="DragStiffness"/>. Va atada a ella: si se cambia una hay
-    /// que recalcular la otra o vuelve el sobrepaso. Se cambió porque el usuario dijo que el arrastre
-    /// se sentía «tosco» y «medio raro».
+    /// ζ = 15,5 / (2·√146) ≈ 0,64. El orbe se queda atrás de la mano y al frenar la pasa y vuelve.
     /// <para>
-    /// Con 15,5 el amortiguamiento relativo es ζ ≈ 0,64: <b>subamortiguado</b>. El orbe no sólo se
-    /// queda atrás de la mano —eso es el peso, y es deliberado— sino que al frenar la <em>pasa</em> y
-    /// vuelve. Arrastrando en círculos eso se lee como que el orbe orbita alrededor del cursor en vez
-    /// de colgar de él, que es exactamente «no sigue tanto el mouse, es medio raro».
+    /// <b>Esto ya se «arregló» a crítico —2·√k— tres veces, y las tres el arrastre quedó peor.</b>
+    /// La razón es que las dos cosas que se sienten son la misma: un resorte que sigue a un objetivo
+    /// que va a velocidad constante se mueve, en régimen, <em>exactamente a esa velocidad</em>,
+    /// quedándose atrás una distancia fija de c·v/k —a 1400 px/s son 149 px—. O sea que
+    /// <see cref="Velocity"/> durante el arrastre <em>es</em> la velocidad de la mano: no hace falta
+    /// medir el cursor aparte para poder tirarlo, y por eso <see cref="Drop"/> alcanza con soltar.
     /// </para>
     /// <para>
-    /// En ζ = 1 la demora se conserva entera —la constante de tiempo pasa de 0,13 s a 0,083 s, sigue
-    /// habiendo retraso visible— y desaparece el sobrepaso. Es la diferencia entre algo que cuelga y
-    /// algo que rebota. El peso no era el sobrepaso.
-    /// </para>
-    /// <para>
-    /// El resorte de REPOSO (104/14,5, ζ ≈ 0,71) no se tocó: ahí el sobrepaso sí corresponde, porque
-    /// es el orbe acomodándose solo contra un borde y no siguiendo una mano.
+    /// Y cuando la mano se detiene el resorte sigue de largo: a los 60 ms conserva 1134 px/s de los
+    /// 1400 —el 81 %—, a los 100 ms 818, a los 200 ms 155. Esa curva es la gracia que hay que darle
+    /// a levantar el dedo, y sale sola de la física; con ζ = 1 se apaga en un suspiro y soltar deja
+    /// el orbe clavado donde estaba. El peso del arrastre y la fuerza del tiro son el mismo número.
     /// </para>
     /// </remarks>
-    private const double DragDamping = 34.64;
+    private const double DragDamping = 15.5;
+
     private const double RestStiffness = 104;
     private const double RestDamping = 14.5;
     private const double FlyFriction = 0.075;
@@ -146,94 +131,6 @@ internal sealed class OrbMotion
 
     /// <summary>Rapidez suavizada. Es la que decide si el vidrio se retrae.</summary>
     public double SmoothSpeed => Smoothed.Length;
-
-    /// <summary>
-    /// Cuán rápido venía moviéndose la mano. Es con lo que sale el orbe al soltarlo.
-    /// </summary>
-    /// <remarks>
-    /// No es <see cref="Velocity"/> ni <see cref="Smoothed"/>. Aquéllas describen al orbe; ésta
-    /// describe al cursor, que es quien lo tira. Ver <see cref="Drop"/>.
-    /// </remarks>
-    public Vector HandVelocity { get; private set; }
-
-    /// <summary>
-    /// Cuánto hacia atrás se mira para saber a qué velocidad venía la mano.
-    /// </summary>
-    /// <remarks>
-    /// No sale del boceto: es de acá, y sale de cómo se tira algo de verdad. <b>Nadie suelta el botón
-    /// en el mismo instante en que deja de mover el mouse</b>: levantar el dedo lleva su tiempo y en
-    /// esos milisegundos la mano ya está quieta. Un gesto real es «envión, freno un instante, suelto».
-    /// <para>
-    /// Acá había un promedio corrido con memoria por cuadro (0,72), que a 180 Hz da una constante de
-    /// tiempo de unos 17 ms: el envión se olvidaba en tres cuadros. Medido, con una pausa de 60 ms
-    /// antes de soltar —que es de lo más común— un envión de 1400 px/s salía a <b>19</b>. Eso es «lo
-    /// suelto y se queda en el lugar».
-    /// </para>
-    /// <para>
-    /// Con una ventana de tiempo la pausa corta no borra nada, porque el envión sigue adentro de los
-    /// últimos 120 ms; y una pausa larga sí lo borra, que es lo correcto: si apoyaste el orbe y te
-    /// quedaste, no lo estás tirando. Es lo mismo que hacen los sistemas de toque, por la misma razón.
-    /// </para>
-    /// </remarks>
-    private static readonly TimeSpan HandWindow = TimeSpan.FromMilliseconds(300);
-
-    /// <summary>
-    /// Cuánto tarda en apagarse un envión después de que la mano se detuvo.
-    /// </summary>
-    /// <remarks>
-    /// Con la ventana sola no alcanzaba, y está medido con trece tiros del usuario: el pico de la
-    /// mano daba entre 2469 y 6545 px/s y el tiro salía en CERO seis de trece veces. En todas ésas
-    /// el objetivo y el cursor coincidían exactamente al soltar, o sea que la mano ya estaba quieta.
-    /// <para>
-    /// El error era tomar el desplazamiento a lo largo de la ventana entera: una pausa dentro de la
-    /// ventana lo diluye, y una pausa más larga que la ventana lo borra. Pero frenar antes de soltar
-    /// no es arrepentirse —levantar el dedo lleva su tiempo— y lo que uno espera es que lo que
-    /// venías haciendo todavía cuente.
-    /// </para>
-    /// <para>
-    /// Ahora se busca el PICO de los últimos 300 ms y se lo apaga según hace cuánto fue, con una
-    /// gracia antes de empezar a apagarlo: hasta 80 ms sale entero, a 240 ms sale a la mitad, a
-    /// 400 ms ya no sale. Un envión seguido de una pausa normal tira; apoyarlo y quedarse quieto,
-    /// no. Es lo que hace la mano de verdad.
-    /// </para>
-    /// </remarks>
-    private static readonly TimeSpan HandFade = TimeSpan.FromMilliseconds(320);
-
-    /// <summary>Cuánto puede estar quieta la mano antes de que el envión empiece a apagarse.</summary>
-    private static readonly TimeSpan HandGrace = TimeSpan.FromMilliseconds(80);
-
-    /// <summary>Dónde estuvo la mano en los últimos <see cref="HandWindow"/>, para poder tirar.</summary>
-    private readonly List<(double At, Point Where)> _hand = [];
-
-    /// <summary>Reloj del arrastre, en segundos desde que se agarró.</summary>
-    private double _dragClock;
-
-    /// <summary>Cuándo entró la última muestra de la mano, en el reloj del arrastre.</summary>
-    private double _lastSampleAt;
-
-    /// <summary>Cuántas muestras de la mano hay en la ventana. Para poder mirar qué decidió el tiro.</summary>
-    public int HandSamples => _hand.Count;
-
-    /// <summary>La rapidez más alta que alcanzó la mano en este arrastre.</summary>
-    /// <remarks>
-    /// Es el número que separa las dos explicaciones posibles de «no lo puedo tirar»: si el pico fue
-    /// alto y el tiro salió en cero, el problema es la ventana de tiempo o la pausa; si el pico
-    /// también fue cero, el objetivo nunca siguió al cursor y el problema está antes.
-    /// </remarks>
-    public double HandPeak { get; private set; }
-
-    /// <summary>Cuánto duró el arrastre, en segundos.</summary>
-    public double DragSeconds => _dragClock;
-
-    /// <summary>
-    /// Cuánto hace que no entra una muestra de la mano, en segundos.
-    /// </summary>
-    /// <remarks>
-    /// Las muestras las pone el bucle de cuadro. Si el hilo de la interfaz está ocupado dibujando, el
-    /// bucle no corre, y el orbe se puede soltar con una foto de la mano vieja. Esto es lo que deja
-    /// verlo desde afuera en vez de deducirlo.
-    /// </remarks>
-    public double SinceLastSample => _dragClock - _lastSampleAt;
 
     private int _hitToken;
     private double _hitNormalX;
@@ -339,16 +236,6 @@ internal sealed class OrbMotion
         IsDragging = true;
         IsFlying = false;
         Target = Position;
-
-        // La medición de la mano arranca de cero, y desde donde está el orbe. Si quedaran las
-        // muestras del arrastre anterior, el primer cuadro derivaría una velocidad entre dos puntos
-        // que no tienen nada que ver, y el orbe saldría disparado apenas lo agarrás.
-        _hand.Clear();
-        _dragClock = 0;
-        _lastSampleAt = 0;
-        _hand.Add((0, Position));
-        HandVelocity = default;
-        HandPeak = 0;
     }
 
     /// <summary>
@@ -372,19 +259,13 @@ internal sealed class OrbMotion
     }
 
     /// <summary>
-    /// Suelta el orbe y lo tira con la velocidad que traía <b>la mano</b>.
+    /// Suelta el orbe con la velocidad que traía el resorte, que es la de la mano.
     /// </summary>
     /// <remarks>
-    /// Sale con <see cref="HandVelocity"/> y no con <see cref="Velocity"/>. Con la del resorte, un
-    /// arrastre bien amortiguado no se podía tirar: el orbe ya estaba encima del cursor y su
-    /// velocidad interna era casi cero, así que soltarlo lo dejaba caer ahí mismo. Y al revés, con un
-    /// resorte flojo el tiro salía de la inercia del propio resorte —o sea de lo mal que seguía a la
-    /// mano—, que es una forma rara de decidir con cuánta fuerza sale algo.
-    /// <para>
-    /// Con la de la mano las dos cosas quedan separadas y cada una hace lo suyo: el resorte decide
-    /// cómo se siente arrastrar, y el tiro sale de cuán rápido movías el cursor al soltar. Es lo que
-    /// hace cualquier cosa que uno arroja.
-    /// </para>
+    /// Acá hubo un aparato para medir el cursor aparte —ventana de 300 ms, búsqueda del tramo más
+    /// rápido, gracia y apagado— construido sobre la idea de que la velocidad del resorte era «de
+    /// casualidad». No lo era: ver <see cref="DragDamping"/>. Era una copia peor de lo que el
+    /// resorte ya hacía, y lo que hizo falta para arreglarlo fue borrarla.
     /// </remarks>
     public void Drop()
     {
@@ -395,16 +276,12 @@ internal sealed class OrbMotion
 
         IsDragging = false;
         IsFlying = true;
-        Velocity = HandVelocity;
 
         // Soltarlo casi quieto no debería mandarlo a ningún lado: el resto lo hace el imán.
         if (Speed < 60)
         {
             Velocity *= 0.5;
         }
-
-        HandVelocity = default;
-        _hand.Clear();
     }
 
     /// <summary>
@@ -413,78 +290,6 @@ internal sealed class OrbMotion
     public void Step(double dt, Rect bounds)
     {
         var previous = Position;
-
-        // Mientras se arrastra se mide la velocidad DE LA MANO, y con eso se tira después.
-        //
-        // Antes el tiro salía con la velocidad del resorte, y eso funcionaba de casualidad: el
-        // resorte iba tan atrás del cursor que siempre traía inercia. Con la amortiguación crítica
-        // llega al cursor y se queda, así que si uno frena aunque sea un instante antes de soltar
-        // —que es lo que hace todo el mundo— el resorte estaba parado y el orbe no salía a ningún
-        // lado. «No lo puedo tirar»: el peso y el tiro dependían del mismo defecto.
-        //
-        // Separadas, cada una hace lo suyo: la amortiguación decide cómo se siente seguir a la mano,
-        // y el tiro sale de cuán rápido movías el cursor. Que es como se tira algo.
-        if (IsDragging)
-        {
-            _dragClock += dt;
-            _hand.Add((_dragClock, Target));
-            _lastSampleAt = _dragClock;
-
-            // Se tiran las muestras viejas, pero se conserva SIEMPRE una del otro lado del borde de
-            // la ventana: sin ella, con la mano quieta se irían acumulando muestras iguales hasta
-            // que la más vieja también estuviera quieta, y la velocidad daría cero antes de tiempo.
-            var corte = _dragClock - HandWindow.TotalSeconds;
-            while (_hand.Count > 2 && _hand[1].At < corte)
-            {
-                _hand.RemoveAt(0);
-            }
-
-            // El envión es el tramo MÁS RÁPIDO de la ventana, no el promedio de toda ella. Se mide
-            // sobre pares de muestras separadas al menos 30 ms —menos que eso es ruido de un cuadro
-            // suelto— y se apaga según hace cuánto pasó.
-            var mejor = default(Vector);
-            var mejorRapidez = 0.0;
-            var mejorFin = 0.0;
-
-            for (var i = 0; i < _hand.Count; i++)
-            {
-                for (var j = i + 1; j < _hand.Count; j++)
-                {
-                    var tramo = _hand[j].At - _hand[i].At;
-                    if (tramo < 0.030)
-                    {
-                        continue;
-                    }
-
-                    var v = new Vector(
-                        (_hand[j].Where.X - _hand[i].Where.X) / tramo,
-                        (_hand[j].Where.Y - _hand[i].Where.Y) / tramo);
-
-                    // Mayor o IGUAL, no mayor: con la mano a velocidad pareja todos los tramos
-                    // empatan, y como los pares se recorren de viejo a nuevo, con «mayor» ganaba el
-                    // más viejo y la decadencia lo castigaba por algo que seguía pasando. Empate va
-                    // al más reciente.
-                    if (v.Length >= mejorRapidez)
-                    {
-                        mejorRapidez = v.Length;
-                        mejor = v;
-                        mejorFin = _hand[j].At;
-                    }
-                }
-            }
-
-            // Primero una gracia, y recién después el apagado. Levantar el dedo del botón lleva su
-            // tiempo y en esos milisegundos la mano ya está quieta: castigar eso es castigar la
-            // mecánica de soltar, no un cambio de intención.
-            var desdeElPico = _dragClock - mejorFin;
-            var vigencia = Math.Clamp(
-                1 - ((desdeElPico - HandGrace.TotalSeconds) / HandFade.TotalSeconds),
-                0,
-                1);
-
-            HandVelocity = mejor * vigencia;
-            HandPeak = Math.Max(HandPeak, mejorRapidez);
-        }
 
         var remaining = Math.Min(MaxFrame, dt);
         while (remaining > 0.0001)
@@ -518,14 +323,9 @@ internal sealed class OrbMotion
     /// El resorte del arrastre: duro, para seguir al dedo, pero resorte al fin.
     /// </summary>
     /// <remarks>
-    /// Es más duro que el de reposo —146 contra 104— porque tiene que alcanzar la mano, y aun así se
-    /// queda atrás al arrancar. Esa demora <em>es</em> el peso del orbe: con <c>DragMove()</c> no
-    /// había forma de tenerla, porque Windows pega la ventana al cursor.
-    /// <para>
-    /// Lo que <b>no</b> es el peso es pasarse al frenar. Acá decía que se pasaba «un poco» y lo daba
-    /// por parte del efecto; no lo es. Ver <see cref="DragDamping"/>: la amortiguación es crítica y
-    /// el orbe llega al cursor sin cruzarlo.
-    /// </para>
+    /// Es más duro que el de reposo —146 contra 104— porque tiene que alcanzar la mano; y aun así se
+    /// queda atrás al arrancar y se pasa un poco al frenar. Esa demora <em>es</em> el peso del orbe.
+    /// Con <c>DragMove()</c> no había forma de tenerla: Windows pega la ventana al cursor.
     /// </remarks>
     private void StepDrag(double h)
     {
