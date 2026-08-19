@@ -245,8 +245,21 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     /// voz se corta igual. Es de un solo sentido: no le dice nada al servidor, sólo calla los
     /// parlantes; el turno lo sigue cerrando el servidor con su <c>turnComplete</c>.
     /// </para>
+    /// <para>
+    /// <b>Vaciar el parlante no alcanza</b>, y durante un tiempo esto fue sólo eso. El servidor sigue
+    /// mandando el audio que ya despachó, el turno seguía en <c>Responding</c> así que ese audio se
+    /// encolaba igual, y el parlante volvía a arrancar solo: la voz se cortaba un instante y seguía.
+    /// Marcar el turno como interrumpido de este lado es lo que hace que lo que viene en camino se
+    /// descarte. Los dos pasos, o no calla.
+    /// </para>
     /// </remarks>
-    public void SilenceNow() => _sink.Flush();
+    public void SilenceNow()
+    {
+        // Primero el turno y después la cola. Al revés, el audio que entre entre las dos líneas se
+        // encola detrás de lo que se acaba de vaciar y queda sonando justo lo que había que tirar.
+        _turns.InterruptLocally();
+        _sink.Flush();
+    }
 
     /// <summary>Manda texto escrito y cierra el turno para que conteste.</summary>
     public Task<bool> SendTextAsync(string text, CancellationToken cancellationToken = default) =>
@@ -291,6 +304,18 @@ public sealed class GeminiLiveClient : IAsyncDisposable
 
         _sink.Flush();
         _turns.Reset();
+
+        // El handle de reanudación se tira acá y sólo acá.
+        //
+        // Sirve para que un corte de transporte —el goAway del servidor— no le haga perder el hilo
+        // a la persona: se reconecta y sigue la misma charla. Pero ese camino entra derecho por
+        // ConnectAsync y nunca pasa por acá, así que llegar a StopAsync significa que la charla se
+        // dio por terminada de verdad. Guardarlo igual hacía que la charla SIGUIENTE mandara el
+        // handle de la anterior y el servidor continuara aquel historial: preguntabas algo nuevo y
+        // contestaba arrastrando lo de antes, con los turnos locales ya destilados y vaciados. Y un
+        // handle vencido es además una forma más de que el setup rebote y se caiga al camino viejo.
+        _resumptionHandle = null;
+        _reconnectWhenIdle = false;
     }
 
     /// <inheritdoc />

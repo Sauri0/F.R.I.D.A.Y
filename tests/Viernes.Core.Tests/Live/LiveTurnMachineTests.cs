@@ -155,4 +155,66 @@ public sealed class LiveTurnMachineTests
         Assert.False(transition.FlushPlayback);
         Assert.False(transition.TurnEnded);
     }
+
+    [Fact]
+    public void CortarlaDeEsteLado_DescartaElAudioQueYaVenia()
+    {
+        var machine = new LiveTurnMachine();
+        machine.Apply(Audio());
+
+        Assert.True(machine.InterruptLocally());
+        Assert.Equal(LiveTurnState.Interrupted, machine.State);
+
+        // Acá está el punto: el servidor sigue mandando lo que ya despachó. Si esto volviera a
+        // Responding, el parlante arrancaría de nuevo y la voz se cortaría un instante y seguiría,
+        // que es exactamente lo que pasaba cuando cortar era sólo vaciar la cola.
+        machine.Apply(Audio());
+        Assert.Equal(LiveTurnState.Interrupted, machine.State);
+    }
+
+    [Fact]
+    public void CortarlaMientrasVacia_TambienCuenta()
+    {
+        var machine = new LiveTurnMachine();
+        machine.Apply(Audio());
+        machine.Apply(Flag(generationComplete: true));
+        Assert.Equal(LiveTurnState.Draining, machine.State);
+
+        // El servidor terminó de generar pero los parlantes siguen sonando: es el tramo donde más
+        // se la corta, porque es cuando ya se entendió lo que iba a decir.
+        Assert.True(machine.InterruptLocally());
+        Assert.Equal(LiveTurnState.Interrupted, machine.State);
+    }
+
+    [Fact]
+    public void CortarlaSinNadaSonando_NoHaceNada()
+    {
+        var machine = new LiveTurnMachine();
+
+        Assert.False(machine.InterruptLocally());
+        Assert.Equal(LiveTurnState.Idle, machine.State);
+        Assert.Equal(0, machine.InterruptionCount);
+
+        // Y el turno siguiente arranca sano. Si interrumpir en reposo dejara la máquina en
+        // Interrupted, el próximo turno —el que la persona acaba de pedir— nacería descartando su
+        // propio audio y se quedaría muda sin que nada fallara.
+        machine.Apply(Audio());
+        Assert.Equal(LiveTurnState.Responding, machine.State);
+    }
+
+    [Fact]
+    public void ElServidorCierraElTurnoIgual_DespuesDeCortarlaDeEsteLado()
+    {
+        var machine = new LiveTurnMachine();
+        machine.Apply(Audio());
+        machine.InterruptLocally();
+
+        // Cortar de este lado no le avisa al servidor: el turno lo sigue cerrando él, y ahí la
+        // máquina vuelve a reposo sola. Sin esto quedaría descartando audio para siempre.
+        machine.Apply(Flag(turnComplete: true));
+
+        Assert.Equal(LiveTurnState.Idle, machine.State);
+        Assert.Equal(1, machine.CompletedTurns);
+        Assert.Equal(1, machine.InterruptionCount);
+    }
 }

@@ -458,7 +458,11 @@ internal sealed partial class AssistantRuntime
     {
         try
         {
-            RuntimeTrace.Write("vivo.cierre.hablado", transcript);
+            // La frase NO se escribe. La traza es un archivo de texto plano que queda en el disco y
+            // que se pega en un reporte cuando algo falla; lo que se dijo en voz alta adentro de la
+            // casa no tiene por qué terminar ahí. Para depurar el cierre hablado alcanza con saber
+            // que se reconoció uno y cuánto medía.
+            RuntimeTrace.Write("vivo.cierre.hablado", $"palabras={transcript.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length}");
 
             // Los turnos se retiran antes de cerrar, porque el cierre los descarta.
             var turns = TakeConversationTurns();

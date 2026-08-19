@@ -1006,6 +1006,13 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         // hablando a la única que sí.
         SilenceLive();
 
+        // Y silenciar CIERRA la charla en vivo, no la calla nada más. Con sólo callarla, la sesión
+        // quedaba abierta y el micrófono seguía capturando y subiendo a la nube mientras esta misma
+        // función publicaba «micrófono apagado». Que la pantalla diga una cosa y el micrófono haga
+        // otra es lo peor que puede hacer un asistente que vive escuchando, y no es un detalle de
+        // implementación: es lo único que el usuario tiene para confiar en el botón.
+        await StopLiveAsync("silenciada").ConfigureAwait(false);
+
         await SilenceVoiceAsync(cancellationToken).ConfigureAwait(false);
         _orchestrator.SetListening(false);
         Publish(new AssistantRuntimeUpdate(

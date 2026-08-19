@@ -71,6 +71,33 @@ public sealed class LiveTurnMachine
     public void Reset() => State = LiveTurnState.Idle;
 
     /// <summary>
+    /// La cortan de este lado, sin que el servidor haya avisado. Devuelve si había algo que cortar.
+    /// </summary>
+    /// <remarks>
+    /// Vaciar el parlante no alcanza para callarla, y esa era exactamente la falla: el servidor
+    /// sigue mandando el audio que ya despachó, <see cref="Apply"/> lo encola porque el turno todavía
+    /// está en <see cref="LiveTurnState.Responding"/>, el parlante vuelve a arrancar solo y la voz
+    /// se corta un instante y sigue. Poner el turno en <see cref="LiveTurnState.Interrupted"/> es lo
+    /// que hace que ese audio se descarte hasta el <c>turnComplete</c>.
+    /// <para>
+    /// Sólo corta si hay un turno en vuelo. Interrumpir con el turno en <see cref="LiveTurnState.Idle"/>
+    /// dejaría la máquina esperando un <c>turnComplete</c> que todavía no tiene dueño, y el próximo
+    /// turno —el que la persona acaba de pedir— nacería descartando su propio audio.
+    /// </para>
+    /// </remarks>
+    public bool InterruptLocally()
+    {
+        if (State is not (LiveTurnState.Responding or LiveTurnState.Draining))
+        {
+            return false;
+        }
+
+        InterruptionCount++;
+        State = LiveTurnState.Interrupted;
+        return true;
+    }
+
+    /// <summary>
     /// Hace avanzar el turno con lo que llegó.
     /// </summary>
     /// <remarks>
