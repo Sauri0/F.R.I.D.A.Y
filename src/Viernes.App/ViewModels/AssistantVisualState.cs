@@ -100,3 +100,45 @@ internal enum AssistantVisualState
     /// </remarks>
     Deaf
 }
+
+/// <summary>
+/// La única definición de «no está haciendo nada».
+/// </summary>
+/// <remarks>
+/// Vive al lado del enum porque la necesitan los dos extremos y ninguno de los dos es dueño: el
+/// runtime la usa para saber si el vigía de fondo tiene lugar para publicar, y la interfaz para
+/// saber si un turno terminó. Ponerla en cualquiera de los dos obligaría al otro a mirar hacia
+/// arriba; acá los dos miran al mismo lado, que es donde ya miran por el enum.
+/// </remarks>
+internal static class AssistantVisualStates
+{
+    /// <summary>
+    /// Si este estado se puede pisar sin tapar nada que esté pasando.
+    /// </summary>
+    /// <remarks>
+    /// <b>Estaba escrita dos veces y las dos listas no coincidían.</b> A la del ViewModel le
+    /// faltaban <see cref="AssistantVisualState.Unconfigured"/>, <see cref="AssistantVisualState.Offline"/>
+    /// e <see cref="AssistantVisualState.Interrupted"/>, y por esa grieta una instalación sin
+    /// <c>OPENROUTER_API_KEY</c> no mostraba nunca las respuestas escritas: el turno terminaba
+    /// publicando «sin clave», la interfaz no lo leía como fin de turno y la respuesta no llegaba a
+    /// verse. Sin clave es justo el estado en que arranca cualquiera que instale Viernes por primera
+    /// vez. Si mañana aparece un estado nuevo de fondo, se agrega acá una vez y aparece en los dos
+    /// lados; volver a copiar la lista «para no depender de esto» es volver al bug.
+    /// <para>
+    /// <see cref="AssistantVisualState.Interrupted"/> entra aunque no sea reposo: es un corte, entra
+    /// de golpe y se apaga solo. El vigía no lo toca mientras el turno sigue vivo —sale antes por la
+    /// bandera de pedido activo—, así que lo único que hace acá es garantizar que no quede pegado si
+    /// el turno termina por un camino que no publica nada.
+    /// </para>
+    /// </remarks>
+    internal static bool IsResting(this AssistantVisualState state) => state is
+        AssistantVisualState.Idle or
+        AssistantVisualState.Interrupted or
+        AssistantVisualState.Watching or
+        AssistantVisualState.Background or
+        AssistantVisualState.WaitingForYou or
+        AssistantVisualState.ProjectWaiting or
+        AssistantVisualState.Deaf or
+        AssistantVisualState.Unconfigured or
+        AssistantVisualState.Offline;
+}

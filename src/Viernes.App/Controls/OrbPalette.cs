@@ -524,21 +524,37 @@ internal static class OrbPalette
     /// Un anillo roto no es medio anillo roto, y un golpeteo no es media respiración. Los gestos y
     /// las banderas se toman del destino y punto: el salto queda tapado por la transición cromática,
     /// que es la que el ojo mira.
+    /// <para>
+    /// <b>Los dos factores de <see cref="OrbBlend"/> no son intercambiables y el reparto sale del
+    /// fuente, no del gusto:</b> los dos colores van con el recortado y la geometría con el crudo.
+    /// La firma pide un <see cref="OrbBlend"/> y no un <c>double</c> justamente para que no se pueda
+    /// volver a pasar un solo número —cuando se pasaba uno solo, y encima recortado, la anticipación
+    /// de la curva <c>anti</c> moría antes de llegar a la pantalla y la transición más
+    /// característica del repertorio se veía como un fundido.
+    /// </para>
     /// </remarks>
-    internal static OrbStateProfile Lerp(OrbStateProfile start, OrbStateProfile target, double t) => target with
+    internal static OrbStateProfile Lerp(OrbStateProfile start, OrbStateProfile target, OrbBlend blend) => target with
     {
-        Body = LerpColor(start.Body, target.Body, t),
-        Depth = LerpColor(start.Depth, target.Depth, t),
-        Dispersion = Mix(start.Dispersion, target.Dispersion, t),
-        Wobble = Mix(start.Wobble, target.Wobble, t),
-        Tilt = Mix(start.Tilt, target.Tilt, t),
-        RingScale = Mix(start.RingScale, target.RingScale, t),
-        DustRadius = Mix(start.DustRadius, target.DustRadius, t),
-        DustSpeed = Mix(start.DustSpeed, target.DustSpeed, t),
-        Turbulence = Mix(start.Turbulence, target.Turbulence, t),
-        Alpha = Mix(start.Alpha, target.Alpha, t),
-        DropAmplitude = Mix(start.DropAmplitude, target.DropAmplitude, t),
-        DropSpeed = Mix(start.DropSpeed, target.DropSpeed, t)
+        // b y d del fuente: los únicos dos que van con el factor recortado.
+        Body = LerpColor(start.Body, target.Body, blend.Tint),
+        Depth = LerpColor(start.Depth, target.Depth, blend.Tint),
+
+        // disp / wob / tilt / rs / dr / dv / tb de la nube.
+        Dispersion = Mix(start.Dispersion, target.Dispersion, blend.Shape),
+        Wobble = Mix(start.Wobble, target.Wobble, blend.Shape),
+        Tilt = Mix(start.Tilt, target.Tilt, blend.Shape),
+        RingScale = Mix(start.RingScale, target.RingScale, blend.Shape),
+        DustRadius = Mix(start.DustRadius, target.DustRadius, blend.Shape),
+        DustSpeed = Mix(start.DustSpeed, target.DustSpeed, blend.Shape),
+        Turbulence = Mix(start.Turbulence, target.Turbulence, blend.Shape),
+
+        // am / a / s de la gota. El fuente mezcla los tres con el factor crudo, y el brillo que se
+        // pasa de largo al asentarse es parte del gesto: el halo de la nube lo lee. Lo único que se
+        // le pone es un piso, porque de acá sale una opacidad y a WPF no se le puede pedir un alfa
+        // negativo — un techo, en cambio, se comería el sobrepaso.
+        Alpha = Math.Max(0, Mix(start.Alpha, target.Alpha, blend.Shape)),
+        DropAmplitude = Mix(start.DropAmplitude, target.DropAmplitude, blend.Shape),
+        DropSpeed = Mix(start.DropSpeed, target.DropSpeed, blend.Shape)
     };
 
     /// <summary>Interpolación coseno: arranca y termina quieta.</summary>

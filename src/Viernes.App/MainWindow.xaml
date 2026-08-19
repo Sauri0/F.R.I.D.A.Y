@@ -900,15 +900,16 @@
                 encima de un orbe que ya está dibujando. Sus cuatro propiedades se enganchan en el
                 código de la ventana, junto con las de los dos cuerpos.
 
-                Los márgenes laterales negativos ensanchan la celda: este contenedor mide lo que mide
-                el orbe —108— y «un proyecto te espera» mide más que eso. Sin ellos WPF recorta la
-                píldora al ancho del orbe y la etiqueta más larga, que es justo la que más importa,
-                sale cortada a la mitad.
+                El Margin NO está acá: lo pone MeasurePillSlack() al construir la ventana, midiendo
+                la píldora. Este contenedor mide lo que mide el orbe —108— y la etiqueta más larga
+                mide más; sin ensanchar la celda WPF le pone un clip de layout y la corta. Estuvo
+                escrito a mano como -110 a cada lado, que es un número probado hasta que dejó de
+                verse el corte: aguanta hasta que alguien agregue un estado de nombre más largo, y
+                ahí vuelve a fallar en silencio.
             -->
             <controls:StatePill x:Name="Pill"
                                 HorizontalAlignment="Center"
-                                VerticalAlignment="Top"
-                                Margin="-110,-36,-110,0" />
+                                VerticalAlignment="Top" />
 
             <!--
                 La burbuja de dictado. Nace pegada al orbe —la esquina chica apunta a él— y crece hacia

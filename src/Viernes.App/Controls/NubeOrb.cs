@@ -103,6 +103,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
     private AssistantVisualState _shown = AssistantVisualState.Idle;
     private int _moodToken;
 
+    /// <summary>La última transición del canal que este cuerpo llegó a adoptar.</summary>
+    private int _transitionToken;
+
     /// <summary>Cuánto entró la antigüedad de la pregunta sin contestar, de 0 a 1.</summary>
     private double _age;
 
@@ -262,6 +265,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         {
             _channel = value;
             _moodToken = value.MoodToken;
+            _transitionToken = value.TransitionToken;
         }
     }
 
@@ -328,20 +332,33 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
     private void Advance(double delta)
     {
         _wallClock += delta;
-        _channel.Poll();
 
-        if (_channel.State != _shown)
+        // El estado pedido se reafirma en cada cuadro. Ver OrbStateChannel.Poll(AssistantVisualState):
+        // la propiedad es el pedido, el canal es lo que se ve, y sin volver a preguntar una
+        // divergencia entre los dos no tiene forma de arreglarse sola.
+        _channel.Poll(State);
+
+        // Quién cambió y cuándo lo decide el canal. El cuerpo no vuelve a resolver el par ni arranca
+        // su propio reloj: si lo hiciera, dos cambios entre dos cuadros le darían otra entrada de la
+        // tabla que la que el canal midió, y el reloj empezaría a contar recién cuando el cuerpo se
+        // entera —que con el control descargado puede ser nunca.
+        if (_channel.TransitionToken != _transitionToken || _channel.State != _shown)
         {
+            _transitionToken = _channel.TransitionToken;
+
             // Se sale desde lo que se está viendo y no desde el estado anterior nominal: si el
             // cambio llega a mitad de una transición, no hay salto.
-            _from = OrbPalette.Lerp(_from, Target(), _transition.EasedClamped);
-            _transition.Begin(_shown, _channel.State);
+            _from = OrbPalette.Lerp(_from, Target(), _transition.Blend);
             _shown = _channel.State;
+            _transition.Begin(_channel.Transition, _channel.TransitionElapsed);
             EnterTransition();
         }
+        else
+        {
+            _transition.Sync(_channel.TransitionElapsed);
+        }
 
-        _transition.Advance(delta);
-        _profile = OrbPalette.Lerp(_from, Target(), _transition.EasedClamped);
+        _profile = OrbPalette.Lerp(_from, Target(), _transition.Blend);
         _age = _shown == AssistantVisualState.WaitingForYou ? OrbAge.Strength(_channel.WaitingAge) : 0;
 
         if (_channel.MoodToken != _moodToken)

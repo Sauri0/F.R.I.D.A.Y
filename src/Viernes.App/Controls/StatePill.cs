@@ -408,13 +408,27 @@ internal sealed class StatePill : FrameworkElement, IOrbBody
 
     private void RefreshDetail()
     {
-        _channel.Poll();
+        // Reafirma el pedido en cada cuadro, igual que los cuerpos: la propiedad es el pedido y el
+        // canal es lo que se ve, y volver a escribirle el mismo valor a la propiedad no notifica
+        // nada. Sin esto, una divergencia entre los dos se queda pegada.
+        _channel.Poll(State);
         Refresh();
     }
 
+    /// <summary>
+    /// Engancha el bucle de render, pero sólo si la píldora está en el árbol.
+    /// </summary>
+    /// <remarks>
+    /// La guarda de <see cref="FrameworkElement.IsLoaded"/> no es de más. <c>Unloaded</c> suelta los
+    /// dos eventos y para el reloj, pero los callbacks de las propiedades siguen vivos: cualquier
+    /// enlace que le escriba <see cref="State"/> o <see cref="IsSuppressed"/> después de sacarla del
+    /// árbol llega igual a <c>Refresh</c>, y de ahí acá. Y <see cref="CompositionTarget.Rendering"/>
+    /// es estático: suscribirse desde un elemento descargado lo vuelve a enraizar y lo deja
+    /// dibujando —e invalidando visual— hasta que se cierre la aplicación.
+    /// </remarks>
     private void Start()
     {
-        if (_isRunning)
+        if (_isRunning || !IsLoaded)
         {
             return;
         }

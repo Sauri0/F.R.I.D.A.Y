@@ -76,6 +76,9 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     private AssistantVisualState _shown = AssistantVisualState.Idle;
     private int _moodToken;
 
+    /// <summary>La última transición del canal que este cuerpo llegó a adoptar.</summary>
+    private int _transitionToken;
+
     /// <summary>Cuánto entró la antigüedad de la pregunta sin contestar, de 0 a 1.</summary>
     private double _age;
 
@@ -85,7 +88,24 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     /// </summary>
     private double _voiceEpoch;
 
-    /// <summary>La gota que se desprendió en el corte, si hay una viva.</summary>
+    /// <summary>
+    /// La gota que se desprendió en el corte, si hay una viva. Una sola, y a propósito.
+    /// </summary>
+    /// <remarks>
+    /// El fuente desprende gotas en ocho lugares y acá está implementado <b>uno</b>: el del corte de
+    /// «hablando → interrumpida», que es el único donde el satélite <em>significa</em> algo —es la
+    /// parte de la frase que ya había salido del cuerpo cuando le pediste que pare, y por eso sigue
+    /// viajando y muere afuera—. Los otros siete son adorno de movimiento: cuatro de los ánimos
+    /// (¡listo! desprende seis de una, urgente dos, no salió y hola una cada uno), uno del estado
+    /// error mientras el cuerpo está roto, y dos de la física —al golpear contra un borde y al
+    /// arrastrar rápido—.
+    /// <para>
+    /// Portarlos pide convertir esto en una lista acotada, porque <c>spawn(6, …)</c> no entra en un
+    /// campo que guarda uno. Se anota entero para que la próxima persona sepa qué falta de verdad:
+    /// una lista de omisiones incompleta es peor que no tenerla, porque se lee como si estuviera
+    /// todo declarado.
+    /// </para>
+    /// </remarks>
     private Satellite? _tail;
 
     private double _phase;
@@ -174,33 +194,12 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         {
             _channel = value;
             _moodToken = value.MoodToken;
+            _transitionToken = value.TransitionToken;
         }
     }
 
     /// <inheritdoc />
     public void ShowMood(OrbMood mood) => _channel.RequestMood(mood);
-
-    /// <summary>
-    /// Micrófono armado pero sin capturar. No dibuja geometría nueva: tiñe de verde el rebote que
-    /// ya existía, porque a 108 px cualquier anillo compite con el borde oscuro que da densidad.
-    /// </summary>
-    /// <remarks>
-    /// Desde que existe <see cref="AssistantVisualState.Watching"/> esto es redundante y se
-    /// conserva por compatibilidad con el enlace del shell: guardia dice lo mismo con el cuerpo
-    /// entero, que es mucho más difícil de pasar por alto que un tinte en un reflejo.
-    /// </remarks>
-    public static readonly DependencyProperty IsMicrophoneArmedProperty = DependencyProperty.Register(
-        nameof(IsMicrophoneArmed),
-        typeof(bool),
-        typeof(LiquidOrb),
-        new PropertyMetadata(false));
-
-    /// <summary>Micrófono armado pero sin capturar.</summary>
-    internal bool IsMicrophoneArmed
-    {
-        get => (bool)GetValue(IsMicrophoneArmedProperty);
-        set => SetValue(IsMicrophoneArmedProperty, value);
-    }
 
     /// <summary>Hay autorización de gasto viva. Tiñe el borde de cálido mientras dure.</summary>
     public static readonly DependencyProperty HasSpendAuthorizationProperty = DependencyProperty.Register(
@@ -214,20 +213,6 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     {
         get => (bool)GetValue(HasSpendAuthorizationProperty);
         set => SetValue(HasSpendAuthorizationProperty, value);
-    }
-
-    /// <summary>Conservada por compatibilidad con el enlace del shell.</summary>
-    public static readonly DependencyProperty IsMicrophoneActiveProperty = DependencyProperty.Register(
-        nameof(IsMicrophoneActive),
-        typeof(bool),
-        typeof(LiquidOrb),
-        new PropertyMetadata(false));
-
-    /// <summary>Conservada por compatibilidad con el enlace del shell.</summary>
-    internal bool IsMicrophoneActive
-    {
-        get => (bool)GetValue(IsMicrophoneActiveProperty);
-        set => SetValue(IsMicrophoneActiveProperty, value);
     }
 
     /// <summary>
@@ -334,22 +319,36 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         // Un cuadro perdido no puede empujar la fase varios segundos de golpe.
         delta = Math.Clamp(delta, 0, 0.1);
         _clock += delta;
-        _channel.Poll();
 
-        if (_channel.State != _shown)
+        // El estado pedido se reafirma en cada cuadro. Ver OrbStateChannel.Poll(AssistantVisualState):
+        // la propiedad es el pedido, el canal es lo que se ve, y sin volver a preguntar una
+        // divergencia entre los dos no tiene forma de arreglarse sola.
+        _channel.Poll(State);
+
+        // Quién cambió y cuándo lo decide el canal. El cuerpo no vuelve a resolver el par ni arranca
+        // su propio reloj: si lo hiciera, dos cambios entre dos cuadros le darían otra entrada de la
+        // tabla que la que el canal midió, y el reloj empezaría a contar recién cuando el cuerpo se
+        // entera —que con el control descargado puede ser nunca.
+        if (_channel.TransitionToken != _transitionToken || _channel.State != _shown)
         {
+            _transitionToken = _channel.TransitionToken;
+
             // Se sale desde lo que se está viendo y no desde el estado anterior nominal: si el
             // cambio llega a mitad de una transición, no hay salto.
-            _from = OrbPalette.Lerp(_from, Target(), _transition.EasedClamped);
-            _transition.Begin(_shown, _channel.State);
+            _from = OrbPalette.Lerp(_from, Target(), _transition.Blend);
             _shown = _channel.State;
+            _transition.Begin(_channel.Transition, _channel.TransitionElapsed);
             EnterTransition();
         }
+        else
+        {
+            _transition.Sync(_channel.TransitionElapsed);
+        }
 
-        _transition.Advance(delta);
-
+        // El recortado, y sólo el recortado, para los sobres: aliento, temblor y voz no anticipan.
+        // La anticipación de la curva entra por el otro factor de Blend, que es el que mueve la forma.
         var eased = _transition.EasedClamped;
-        var profile = OrbPalette.Lerp(_from, Target(), eased);
+        var profile = OrbPalette.Lerp(_from, Target(), _transition.Blend);
         _age = _shown == AssistantVisualState.WaitingForYou ? OrbAge.Strength(_channel.WaitingAge) : 0;
 
         if (_channel.MoodToken != _moodToken)
@@ -376,10 +375,20 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
         // La velocidad del estado acelera el reloj de la ondulación, no su amplitud.
         var speed = OrbNight.Speed(NightMode) * profile.DropSpeed;
+
+        // La patada de giro de la transición, igual que en la nube: entra de golpe y se apaga a la
+        // décima. En la gota no gira ningún anillo, así que empuja las cinco fases armónicas —cada
+        // una a su ritmo y con su signo—, y el contorno entero pega el respingo.
+        var burst = _transition.ConsumeSpin(delta);
+
         _phase += delta * speed;
         for (var i = 0; i < Harmonics.Length; i++)
         {
             _harmonicPhase[i] += delta * speed * HarmonicRates[i] * 0.9;
+            if (burst > 0)
+            {
+                _harmonicPhase[i] += delta * burst * 3.2 * HarmonicRates[i];
+            }
         }
 
         // La escala es un resorte crítico: los golpes entran como velocidad y vuelven solos.
@@ -818,12 +827,15 @@ internal partial class LiquidOrb : UserControl, IOrbBody
             StopRim.Color = OrbPalette.Lighten(StopRim.Color, 0.18 * _beat);
         }
 
-        // Armado: verde sobre la luz que ya existe, en vez de geometría nueva.
-        var armed = IsMicrophoneArmed && _shown == AssistantVisualState.Idle;
-        var bounce = armed ? Color.FromRgb(0x72, 0xF0, 0xC0) : body;
-        var strength = armed ? 0x4D : 0x57;
-        BounceCore.Color = Color.FromArgb((byte)strength, bounce.R, bounce.G, bounce.B);
-        BounceEdge.Color = Color.FromArgb(0x00, bounce.R, bounce.G, bounce.B);
+        // El rebote toma el color del cuerpo y nada más.
+        //
+        // Acá había un aro verde propio para «micrófono armado», de cuando el armado era una bandera
+        // encima de reposo y no un estado. Ahora es «guardia», con su fila entera en la tabla —color
+        // 5F B3 9A, dispersión, giro, la píldora—, y la lleva la nube igual que la gota. Dejar el aro
+        // era teñir de verde un orbe que ya estaba verde, y con la condición vieja
+        // —armado && reposo— ni siquiera se encendía: el armado ya no publica reposo.
+        BounceCore.Color = Color.FromArgb(0x57, body.R, body.G, body.B);
+        BounceEdge.Color = Color.FromArgb(0x00, body.R, body.G, body.B);
 
         // La gota desprendida es del mismo líquido: mismo color, con el borde un poco más hundido
         // porque ya no le llega la luz del cuerpo.

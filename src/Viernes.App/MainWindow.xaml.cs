@@ -49,11 +49,13 @@ public partial class MainWindow : Window
     /// Cada cuánto se vuelve a mirar la hora y el tema del escritorio.
     /// </summary>
     /// <remarks>
-    /// <see cref="OrbNight.For"/> sube y baja con una rampa de una hora en los bordes, así que dos
-    /// minutos de resolución sobran: el paso más grande que puede dar el modo madrugada entre una
-    /// lectura y la siguiente es un 3 %, que a ojo no existe. Preguntarlo por cuadro sería leer el
-    /// registro de Windows sesenta veces por segundo para enterarse de algo que cambia dos veces
-    /// al día.
+    /// <b>Este número no sale del boceto</b>: el boceto corre en un navegador y no tiene ni hora ni
+    /// tema del escritorio que releer. Se deduce de lo único que cambia con la hora acá adentro.
+    /// <see cref="OrbNight.For"/> sube de 0 a 1 en la rampa de 22 a 23 y baja de 1 a 0 en la de 5 a
+    /// 6 —una hora cada una—, así que el paso más grande que puede dar el modo madrugada entre una
+    /// lectura y la siguiente es 2/60, un 3,3 %, y a ojo eso no existe. Preguntarlo por cuadro sería
+    /// leer el registro de Windows sesenta veces por segundo para enterarse de algo que cambia dos
+    /// veces al día.
     /// </remarks>
     private static readonly TimeSpan AmbienceInterval = TimeSpan.FromMinutes(2);
 
@@ -115,24 +117,68 @@ public partial class MainWindow : Window
 
         ApplyOrbShape(viewModel.OrbShape);
         ApplySide(opensRight: true, force: true);
+        MeasurePillSlack();
+
+        // Los tres se sueltan en Window_Closed. El ViewModel vive más que la ventana —lo crea la
+        // aplicación y sobrevive a esconderse en la bandeja—, así que una ventana cerrada que
+        // siguiera colgada de sus eventos se quedaría repartiendo latidos y ánimos a un árbol
+        // visual muerto. Con una sola ventana por sesión no se nota; el día que se recree, sí.
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
+        _viewModel.StepAdvanced += ViewModelOnStepAdvanced;
+        _viewModel.MoodShown += ViewModelOnMoodShown;
+    }
 
-        // El latido sólo existe en la gota: la nube tiene su propio vocabulario y no lo comparte.
-        _viewModel.StepAdvanced += (_, _) => OrbHost.Children
-            .OfType<LiquidOrb>()
-            .FirstOrDefault()
-            ?.Beat();
+    /// <summary>El latido sólo existe en la gota: la nube tiene su propio vocabulario y no lo comparte.</summary>
+    private void ViewModelOnStepAdvanced(object? sender, EventArgs e) => OrbHost.Children
+        .OfType<LiquidOrb>()
+        .FirstOrDefault()
+        ?.Beat();
 
-        // El ánimo va a los dos cuerpos y a la píldora por la misma puerta: quien lo dispara no
-        // tiene que saber cuál de los dos cuerpos está puesto ni acordarse de que además hay
-        // píldora. Nadie lo apaga —dura lo que dice su tabla y se va solo—.
-        _viewModel.MoodShown += (_, mood) =>
+    /// <summary>
+    /// El ánimo va a los dos cuerpos y a la píldora por la misma puerta.
+    /// </summary>
+    /// <remarks>
+    /// Quien lo dispara no tiene que saber cuál de los dos cuerpos está puesto ni acordarse de que
+    /// además hay píldora. Nadie lo apaga —dura lo que dice su tabla y se va solo—.
+    /// </remarks>
+    private void ViewModelOnMoodShown(object? sender, OrbMood mood)
+    {
+        foreach (var body in Bodies())
         {
-            foreach (var body in Bodies())
-            {
-                body.ShowMood(mood);
-            }
-        };
+            body.ShowMood(mood);
+        }
+    }
+
+    /// <summary>
+    /// Dónde va la píldora respecto del borde de arriba del orbe. Sale del boceto.
+    /// </summary>
+    /// <remarks>
+    /// En el fuente se posiciona con <c>left:54px; top:-36px</c> y <c>translateX(-50%)</c> sobre un
+    /// orbe de 108: centrada, y 36 px por encima del borde superior.
+    /// </remarks>
+    private const double PillTop = -36;
+
+    /// <summary>
+    /// Le abre a la píldora el ancho que necesita, en una celda que mide lo que mide el orbe.
+    /// </summary>
+    /// <remarks>
+    /// El contenedor de la píldora mide 108 —lo que mide el orbe, que es a lo que tiene que seguir—
+    /// y las etiquetas largas miden bastante más. Cuando un hijo pide más ancho que su lugar, WPF le
+    /// pone un clip de layout: la píldora sale cortada, y justo la etiqueta más larga es la que más
+    /// importa que se lea. El margen lateral negativo ensancha el lugar sin mover el centro.
+    /// <para>
+    /// El número sale de preguntarle a la píldora cuánto mide, no de probar hasta que dejó de verse
+    /// el corte. <see cref="StatePill"/> se mide con la combinación más larga posible —estado, ánimo
+    /// y detalle, incluidas las del modo quieto—, así que una sola medición alcanza para siempre y
+    /// un estado nuevo de nombre largo entra solo. Antes acá había un −110 a cada lado escrito a
+    /// mano; el día que la etiqueta más larga pase de 328 px, ese número falla sin avisar.
+    /// </para>
+    /// </remarks>
+    private void MeasurePillSlack()
+    {
+        Pill.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var slack = Math.Max(0, (Pill.DesiredSize.Width - ShellLayout.OrbSize) / 2);
+        Pill.Margin = new Thickness(-slack, PillTop, -slack, 0);
     }
 
     /// <summary>
@@ -193,9 +239,8 @@ public partial class MainWindow : Window
 
         var gota = new LiquidOrb();
         gota.SetBinding(LiquidOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
-        gota.SetBinding(
-            LiquidOrb.IsMicrophoneArmedProperty,
-            new Binding(nameof(MainViewModel.IsMicrophoneActive)) { Source = _viewModel });
+        // No hay enlace de «micrófono armado»: eso ahora es un estado —guardia— y entra por State,
+        // igual que los otros catorce y en los dos cuerpos.
         gota.SetBinding(
             LiquidOrb.AudioLevelProperty,
             new Binding(nameof(MainViewModel.AudioLevel)) { Source = _viewModel });
@@ -650,7 +695,12 @@ public partial class MainWindow : Window
         CompositionTarget.Rendering -= OnRendering;
         _followTimer?.Stop();
         _ambienceTimer?.Stop();
+
+        // Los tres, no uno. Se soltaban sólo los cambios de propiedad y quedaban colgados el latido
+        // y el ánimo, que capturan el árbol visual de esta ventana.
         _viewModel.PropertyChanged -= ViewModelOnPropertyChanged;
+        _viewModel.StepAdvanced -= ViewModelOnStepAdvanced;
+        _viewModel.MoodShown -= ViewModelOnMoodShown;
     }
 
     private void ViewModelOnPropertyChanged(object? sender, PropertyChangedEventArgs e)

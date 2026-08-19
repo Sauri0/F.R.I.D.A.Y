@@ -43,10 +43,25 @@ internal sealed class OrbStateChannel
     /// <summary>Cuánto dura el aviso de una combinación prohibida.</summary>
     private const double RejectionSeconds = 2.6;
 
+    /// <summary>
+    /// Cuánto hace que terminó la transición cuando todavía no hubo ninguna.
+    /// </summary>
+    /// <remarks>
+    /// Más que la más larga del repertorio —«cualquiera → esperándote», 960 ms— por varios órdenes.
+    /// Es lo que hace que el primer cuadro dibuje un estado y no el final de una transición que
+    /// nunca existió.
+    /// </remarks>
+    private const double SettledSeconds = 3600;
+
     private AssistantVisualState _state = AssistantVisualState.Idle;
     private double _stateSince = Now;
     private double _transitionEnd;
     private int _transitionPriority;
+
+    private OrbTransition _transition = OrbTransitions.Default;
+    private AssistantVisualState _transitionFrom = AssistantVisualState.Idle;
+    private double _transitionStart;
+    private int _transitionToken;
 
     private OrbMood? _mood;
     private double _moodEnd;
@@ -65,6 +80,35 @@ internal sealed class OrbStateChannel
 
     /// <summary>El estado que está esperando a que termine la transición en vuelo. Uno, o ninguno.</summary>
     internal AssistantVisualState? QueuedState { get; private set; }
+
+    /// <summary>
+    /// La transición en vuelo, o la última que hubo. La elige el canal y nadie más.
+    /// </summary>
+    /// <remarks>
+    /// El canal ya la resolvía para saber cuándo soltar la cola; publicarla es lo que evita que el
+    /// cuerpo la vuelva a resolver por su cuenta con un <c>desde</c> viejo y termine dibujando otra
+    /// entrada de la tabla que la que el canal midió.
+    /// </remarks>
+    internal OrbTransition Transition => _transition;
+
+    /// <summary>De dónde salió <see cref="Transition"/>.</summary>
+    internal AssistantVisualState TransitionFrom => _transitionFrom;
+
+    /// <summary>
+    /// Cuántos segundos lleva <see cref="Transition"/>, contados desde que el canal la decidió.
+    /// </summary>
+    /// <remarks>
+    /// Y no desde que el cuerpo se enteró, que es lo que hacía antes. Con el control descargado el
+    /// bucle de render se corta, el canal vence igual la transición y suelta la cola; si el reloj
+    /// del cuerpo arrancara al volver, dibujaría una transición que el canal ya dio por terminada.
+    /// </remarks>
+    internal double TransitionElapsed => _transitionToken == 0 ? SettledSeconds : Now - _transitionStart;
+
+    /// <summary>
+    /// Sube uno por transición. Es cómo el cuerpo se entera de que hay una nueva aunque el par de
+    /// estados sea el mismo que el de la anterior.
+    /// </summary>
+    internal int TransitionToken => _transitionToken;
 
     /// <summary>El ánimo vivo.</summary>
     internal OrbMood? Mood => _mood;
@@ -120,13 +164,25 @@ internal sealed class OrbStateChannel
     /// </summary>
     /// <param name="state">El estado que se quiere mostrar.</param>
     /// <param name="force">
-    /// Entra sí o sí, sin mirar prioridades. Lo usa la cola al soltar lo que tenía guardado y
-    /// cualquier secuencia guionada, que ya sabe en qué orden quiere las cosas.
+    /// Entra sí o sí, sin mirar prioridades. Es para una secuencia guionada, que ya sabe en qué
+    /// orden quiere las cosas. <b>La cola no lo usa</b> y no hay que volver a dárselo: soltar lo
+    /// encolado forzando es saltearse el arbitraje justo en el momento en que más hace falta.
     /// </param>
     internal void Request(AssistantVisualState state, bool force = false)
     {
         Poll();
+        Apply(state, force);
+    }
 
+    /// <summary>
+    /// El cuerpo del pedido, sin pasar por <see cref="Poll"/>.
+    /// </summary>
+    /// <remarks>
+    /// Separado para que <see cref="Poll"/> pueda soltar la cola y reafirmar el pedido vigente sin
+    /// llamarse a sí mismo de vuelta.
+    /// </remarks>
+    private void Apply(AssistantVisualState state, bool force)
+    {
         if (state == _state)
         {
             return;
@@ -142,9 +198,12 @@ internal sealed class OrbStateChannel
             return;
         }
 
-        var spec = OrbTransitions.For(_state, state);
-        _transitionEnd = now + spec.Seconds;
+        _transition = OrbTransitions.For(_state, state);
+        _transitionFrom = _state;
+        _transitionStart = now;
+        _transitionEnd = now + _transition.Seconds;
         _transitionPriority = priority;
+        _transitionToken++;
         _stateSince = now;
         _state = state;
 
@@ -155,10 +214,15 @@ internal sealed class OrbStateChannel
             _retryAttempt = null;
         }
 
-        if (QueuedState == state)
-        {
-            QueuedState = null;
-        }
+        // La cola se limpia SIEMPRE que algo entra, no sólo cuando lo que entra es lo encolado. Esta
+        // línea parece redundante y no lo es: lo encolado esperaba detrás de OTRA cosa, y si un corte
+        // por prioridad se llevó esa cosa, lo que esperaba atrás quedó pidiendo un turno en una fila
+        // que ya no existe. Sin esto, «pensando» + «volvé a reposo» encolado + «error» terminaba con
+        // el orbe abandonando el error solo, a los 270 ms, sin que nadie lo pidiera: la propiedad
+        // decía error y el canal decía reposo, y como la propiedad no había cambiado, volver a
+        // escribirle error no disparaba nada. El orbe se quedaba en reposo para siempre mientras la
+        // app creía estar mostrando una falla.
+        QueuedState = null;
 
         Changed?.Invoke(this, EventArgs.Empty);
     }
@@ -244,7 +308,12 @@ internal sealed class OrbStateChannel
         if (QueuedState is { } queuedState && now >= _transitionEnd + QueueGraceSeconds)
         {
             QueuedState = null;
-            Request(queuedState, force: true);
+
+            // Se suelta por la puerta de siempre y sin forzar: la cola entra cuando le toca, no
+            // saltándose el arbitraje. Forzar acá era además la segunda mitad del bug de arriba —el
+            // force pasaba por encima de la comparación de prioridades y metía en pantalla algo que
+            // ya nadie estaba pidiendo.
+            Apply(queuedState, force: false);
             return;
         }
 
@@ -252,6 +321,39 @@ internal sealed class OrbStateChannel
         {
             Changed?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    /// <summary>
+    /// Lo mismo que <see cref="Poll()"/>, y además reafirma el pedido vigente.
+    /// </summary>
+    /// <param name="requested">
+    /// Lo que el pedido —la <c>DependencyProperty</c> del cuerpo o de la píldora— dice que hay que
+    /// mostrar ahora mismo.
+    /// </param>
+    /// <remarks>
+    /// La propiedad es un <b>pedido</b> y el canal es lo que se muestra, y son dos cosas que pueden
+    /// quedar diciendo distinto. El problema no es que se separen: es que hasta acá no había forma
+    /// de volver a preguntar. Escribir de nuevo el mismo valor en la propiedad no dispara nada
+    /// —WPF no notifica cuando el valor no cambió—, así que una divergencia de un cuadro quedaba
+    /// pegada para toda la sesión.
+    /// <para>
+    /// Con esto el cuerpo vuelve a preguntar en cada cuadro y lo peor que puede hacer cualquier bug
+    /// futuro de arbitraje es un parpadeo. Es la parte que importa del arreglo: la otra tapa el
+    /// agujero que se encontró, esta hace que el próximo no sea permanente.
+    /// </para>
+    /// </remarks>
+    internal void Poll(AssistantVisualState requested)
+    {
+        Poll();
+
+        // Ya está puesto, o ya está pedido y esperando su turno: no hay nada que reafirmar. Sin esta
+        // guarda la reafirmación volvería a encolar lo mismo sesenta veces por segundo.
+        if (requested == _state || requested == QueuedState)
+        {
+            return;
+        }
+
+        Apply(requested, force: false);
     }
 
     private void StartMood(OrbMood mood)

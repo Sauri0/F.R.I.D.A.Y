@@ -800,7 +800,12 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        // Y el resto por la misma puerta, por la misma razón. Acá llegan también los estados de
+        // fondo, que los publica un System.Threading.Timer: su callback corre en el threadpool, y
+        // un Invoke bloqueante desde ahí es el cuelgue que este proyecto ya se comió dos veces.
+        // Es el peor lugar posible para tenerlo, porque nadie iba a poder decir qué lo causó: no
+        // hubo ninguna acción del usuario. Nada de este camino necesita esperar la respuesta.
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
             var previousState = State;
             State = update.State;
@@ -921,10 +926,15 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 ListItems.Clear();
                 NotifyContentProperties();
             }
-            else if (IsResting(update.State) &&
+            else if (update.State.IsResting() &&
                 previousState == AssistantVisualState.Thinking &&
                 !string.IsNullOrWhiteSpace(update.Message))
             {
+                // «Terminó el turno» es volver al reposo, y reposo no es un solo estado: se puede
+                // volver a guardia, a esperándote, a sin clave. Acá hubo dos bugs seguidos por
+                // recortar esa lista —primero comparando contra Idle a secas, después con una copia
+                // propia a la que le faltaba «sin clave»—, y los dos se veían igual: la respuesta
+                // escrita no se mostraba nunca. Por eso la lista es una sola y vive con el enum.
                 PresentResultBriefly();
             }
 
@@ -937,23 +947,6 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             }
         });
     }
-
-    /// <summary>
-    /// Si el turno terminó, mire lo que mire el orbe.
-    /// </summary>
-    /// <remarks>
-    /// Antes acá decía <c>== Idle</c>, y alcanzaba porque volver al reposo era el único final
-    /// posible. Ahora terminar un turno puede dejar el orbe en guardia, esperándote o trabajando de
-    /// fondo, y comparar contra reposo se leía como que el turno nunca cerraba: la respuesta no
-    /// llegaba a mostrarse.
-    /// </remarks>
-    private static bool IsResting(AssistantVisualState state) => state is
-        AssistantVisualState.Idle or
-        AssistantVisualState.Watching or
-        AssistantVisualState.Background or
-        AssistantVisualState.WaitingForYou or
-        AssistantVisualState.ProjectWaiting or
-        AssistantVisualState.Deaf;
 
     private void ShowError(Exception exception)
     {

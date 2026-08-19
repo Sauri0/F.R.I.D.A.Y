@@ -164,6 +164,12 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// Compartirla no es una optimización: el libro cachea en memoria lo que leyó del disco, así que
     /// dos instancias serían dos verdades. El orbe diría «te espero» sobre una pregunta que la
     /// herramienta ya dio por contestada.
+    /// <para>
+    /// El caché no se invalida nunca —<c>MissionBook</c> lee el archivo una sola vez y después
+    /// devuelve la lista que tiene—, así que compartir la instancia no es una comodidad: es lo único
+    /// que hace que el orbe vea lo que hizo la herramienta. Lo que <b>no</b> se ve es un
+    /// <c>misiones.json</c> editado por fuera con Viernes abierto; eso pide reiniciar.
+    /// </para>
     /// </remarks>
     private readonly MissionBook _missionBook = new();
 
@@ -245,12 +251,17 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private volatile bool _projectWaiting;
 
     /// <summary>
-    /// Distinto de cero mientras el micrófono no entrega señal.
+    /// El último veredicto sobre el oído: distinto de cero si la última vez que se supo algo, el
+    /// micrófono no entregaba señal.
     /// </summary>
     /// <remarks>
     /// Sorda no es error y no es mute: el dispositivo está —o debería estar— tomando y no entra
     /// nada. Se enciende cuando Windows niega el micrófono o cuando una captura falla por el
-    /// dispositivo, y se apaga en cuanto el detector de voz vuelve a ver señal o el oído arranca.
+    /// dispositivo.
+    /// <para>
+    /// <b>Es memoria, no estado: nadie la lea directamente.</b> Se lee por <see cref="IsDeaf"/>, que
+    /// la contrasta contra el oído real antes de creerle. Ahí está explicado por qué.
+    /// </para>
     /// </remarks>
     private int _deaf;
 
@@ -2582,8 +2593,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     {
         if (e.IsVoice)
         {
-            // El detector vio voz: entra audio, y sorda deja de valer en este mismo cuadro. Es la
-            // contracara exacta de cómo se enciende, y por eso no puede quedarse pegada.
+            // El detector vio voz: entra audio, y sorda deja de valer en este mismo cuadro. No es la
+            // contracara exacta de cómo se enciende —esto sólo corre mientras el dictado captura, y
+            // la sordera se enciende también fuera de ahí—; lo que garantiza que no quede pegada es
+            // IsDeaf(), que la contrasta contra el wake.
             Volatile.Write(ref _deaf, 0);
         }
 
@@ -2680,6 +2693,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         var deaf = e.ErrorCode is SpeechErrorCode.DeviceError or SpeechErrorCode.Unavailable;
         if (deaf)
         {
+            // El aviso sale igual aunque el wake siga escuchando: el usuario acaba de apretar para
+            // hablar y no lo oímos, y eso hay que decirlo cuando pasa. Lo que no puede pasar es que
+            // quede dicho para siempre —el fallo era del dictado, no del oído—, y de eso se ocupa
+            // IsDeaf(): en el próximo barrido el fondo vuelve a guardia solo.
             Volatile.Write(ref _deaf, 1);
         }
 
@@ -2694,7 +2711,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     {
         // Armar o soltar el oído es exactamente lo que separa guardia de reposo, así que si el orbe
         // está quieto se recalcula el fondo acá mismo en vez de esperar al vigía.
-        var state = IsRestingState(_lastVisualState) ? Resting() : _lastVisualState;
+        var state = _lastVisualState.IsResting() ? Resting() : _lastVisualState;
         Publish(new AssistantRuntimeUpdate(
             state,
             e.IsActive && _isWakeWordEnabled
@@ -2756,14 +2773,55 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     }
 
     /// <summary>
+    /// Si ahora mismo el oído no entrega audio.
+    /// </summary>
+    /// <remarks>
+    /// No alcanza con leer <see cref="_deaf"/>. La bandera se enciende desde un evento —el error del
+    /// proveedor de reconocimiento, una captura que falla por el dispositivo— y todos sus apagadores
+    /// viven en el camino del dictado: el nivel de audio, la actividad del micrófono, la captura que
+    /// sale bien. En reposo ese camino no corre. Bastaba con que otra aplicación se quedara con el
+    /// micrófono un segundo durante un push-to-talk para que la bandera quedara encendida sobre un
+    /// wake word que nunca se cayó: el orbe decía «no te oigo» mientras el oído escuchaba
+    /// perfectamente, y no quedaba nadie que pudiera bajarla.
+    /// <para>
+    /// Por eso acá se recalcula antes de creerle a la memoria: <b>si el wake está escuchando, no hay
+    /// sordera</b> —Windows no sostiene una captura continua sobre un dispositivo que no entrega—, y
+    /// el veredicto viejo se borra en el acto. Es el único estado de fondo que se enciende por un
+    /// evento en vez de por una condición mirable, así que es el único que puede quedarse pegado, y
+    /// esto es exactamente lo que se lo impide. Quien vuelva a leer la bandera sola porque «es un
+    /// int y esto sobra», trae el bug de vuelta.
+    /// </para>
+    /// <para>
+    /// Con el wake apagado —push-to-talk puro— no hay nada que mirar y manda la memoria. Ahí la
+    /// sordera se apaga sola en el próximo push, apenas el micrófono vuelva a entregar.
+    /// </para>
+    /// </remarks>
+    private bool IsDeaf()
+    {
+        if (!IsMuted && _isWakeWordEnabled && _wakeWord?.State == WakeWordServiceState.Listening)
+        {
+            Volatile.Write(ref _deaf, 0);
+            return false;
+        }
+
+        return Volatile.Read(ref _deaf) != 0;
+    }
+
+    /// <summary>
     /// Qué muestra el orbe cuando no está haciendo nada.
     /// </summary>
     /// <remarks>
     /// «Nada» no es un solo estado: puede haber una pregunta sin contestar, un proyecto frenado, una
     /// misión avanzando de fondo o un micrófono que no oye. Ninguna de esas cosas es una actividad
     /// —no hay turno en curso— y todas tienen que verse, así que reposo es el último de la lista y no
-    /// el único. Como se recalcula entero en cada publicación, un estado de fondo se apaga solo en
-    /// cuanto su condición deja de valer: no hay nada que acordarse de bajar.
+    /// el único. Se recalcula entero en cada publicación, así que un estado de fondo se apaga solo en
+    /// cuanto su condición deja de valer.
+    /// <para>
+    /// Todos menos sorda salen de mirar algo que se puede volver a mirar —el libro de misiones, el
+    /// vigía de proyectos, el estado del wake—. Sorda es la excepción: se enciende por un evento, y
+    /// por eso <see cref="IsDeaf"/> existe. Es el único que hay que acordarse de bajar, y ahí está
+    /// escrito quién lo baja.
+    /// </para>
     /// <para>
     /// El orden es el de <c>PRI</c> del boceto: sorda 5, esperándote y proyecto y sin clave 3,
     /// trabajando sin vos y guardia 1, reposo 0.
@@ -2772,7 +2830,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private AssistantVisualState Resting()
     {
         // Sorda gana: dibujar cualquier otra cosa mientras no entra audio es prometer que escucha.
-        if (Volatile.Read(ref _deaf) != 0)
+        if (IsDeaf())
         {
             return AssistantVisualState.Deaf;
         }
@@ -2809,31 +2867,18 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     }
 
     /// <summary>
-    /// Si este estado es de los que se pueden pisar sin tapar nada que esté pasando.
-    /// </summary>
-    /// <remarks>
-    /// «Interrumpida» entra en la lista aunque no sea reposo: es un corte, entra de golpe y se apaga
-    /// sola. El vigía no la toca mientras el turno sigue vivo —se sale antes por
-    /// <c>_requestActive</c>—, así que lo único que hace acá es garantizar que no quede pegada si el
-    /// turno termina por un camino que no publica nada.
-    /// </remarks>
-    private static bool IsRestingState(AssistantVisualState state) => state is
-        AssistantVisualState.Idle or
-        AssistantVisualState.Interrupted or
-        AssistantVisualState.Watching or
-        AssistantVisualState.Background or
-        AssistantVisualState.WaitingForYou or
-        AssistantVisualState.ProjectWaiting or
-        AssistantVisualState.Deaf or
-        AssistantVisualState.Unconfigured or
-        AssistantVisualState.Offline;
-
-    /// <summary>
     /// Mira lo que enciende los estados de fondo y, si el orbe está quieto, lo pone al día.
     /// </summary>
     /// <remarks>
     /// Sólo pisa estados de reposo. Si hay un turno pensando, una respuesta sonando o una
     /// confirmación esperando, eso es lo que está pasando y el fondo puede esperar a que termine.
+    /// <para>
+    /// Cada cinco segundos no relee el disco: <c>ListAsync</c> devuelve el caché del libro, que se
+    /// llenó una vez y no se invalida. Barato es barato de verdad —es memoria del proceso— pero eso
+    /// también quiere decir que ve los cambios de la herramienta <c>mision</c> y no vería el archivo
+    /// tocado por fuera. Lo que sí se paga cada tanto es el vigía de proyectos, y por eso va con su
+    /// propio período.
+    /// </para>
     /// </remarks>
     private async Task RefreshAmbientAsync()
     {
@@ -2848,6 +2893,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             var missions = await _missionBook
                 .ListAsync(onlyOpen: true, CancellationToken.None)
                 .ConfigureAwait(false);
+
+            // Dispose no espera al barrido en vuelo: Timer.Dispose() no lo hace, y este arranca
+            // fire-and-forget. Un barrido que ya había pasado la guarda de entrada seguía después
+            // del await y publicaba sobre un dispatcher apagado. Revalidar acá es lo único que
+            // separa un apagado limpio de una excepción que nadie ve.
+            if (_isDisposed)
+            {
+                return;
+            }
+
             _missionWaiting = missions.Any(mission =>
                 mission.State == MissionState.Esperando && mission.Question is not null);
             _missionRunning = missions.Any(mission => mission.State == MissionState.EnCurso);
@@ -2866,9 +2921,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
             PublishResting();
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception)
         {
             // Mirar de fondo no puede tumbar el asistente ni hacerse notar por fallar.
+            //
+            // Acá NO va el filtro «when (exception is not OperationCanceledException)» que estaba
+            // antes. Dejar pasar las canceladas tiene sentido cuando alguien espera la tarea y va a
+            // ver la cancelación; este barrido sale con `_ = RefreshAmbientAsync()` y no lo espera
+            // nadie, así que lo único que conseguía el filtro era convertir en excepción no
+            // observada justo la que más aparece: TaskCanceledException, la que tira el dispatcher
+            // ya apagado, que además DERIVA de OperationCanceledException y por eso se colaba.
             RuntimeTrace.Write("fondo.excepcion", exception.GetType().Name);
         }
         finally
@@ -2885,7 +2947,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             Volatile.Read(ref _distilling) != 0 ||
             _conversationActive ||
             HasPendingConfirmation ||
-            !IsRestingState(_lastVisualState))
+            !_lastVisualState.IsResting())
         {
             return;
         }

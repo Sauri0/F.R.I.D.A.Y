@@ -311,12 +311,51 @@ internal static class OrbTransitions
 }
 
 /// <summary>
+/// Los dos factores de una transición: el recortado y el crudo. Nunca uno solo.
+/// </summary>
+/// <remarks>
+/// Existe para que no se pueda mezclar un estado con otro pasando <b>un</b> factor, porque eso ya
+/// pasó una vez: los dos cuerpos le daban a <see cref="OrbPalette.Lerp"/> el avance recortado y con
+/// ese mismo número movían la geometría, así que la anticipación de
+/// <see cref="OrbTransitionCurve.Anti"/> —el −13 % que hace que el orbe tome impulso antes de
+/// moverse— se aplastaba contra cero y el primer quinto de «guardia → te escucho» quedaba plano.
+/// <para>
+/// En el fuente son dos variables distintas desde siempre: <c>eaC</c> para los dos colores y
+/// <c>ea</c> —sin recortar— para <c>disp/wob/tilt/rs/dr/dv/tb</c> de la nube y <c>a/s/am</c> de la
+/// gota. Acá son dos campos de un solo tipo por la misma razón: si la firma admitiera un
+/// <c>double</c> suelto, alguien lo va a volver a pasar.
+/// </para>
+/// </remarks>
+internal readonly record struct OrbBlend
+{
+    private OrbBlend(double tint, double shape)
+    {
+        Tint = tint;
+        Shape = shape;
+    }
+
+    /// <summary>Para lo que termina en un color o en una opacidad. Siempre dentro de 0..1.</summary>
+    internal double Tint { get; }
+
+    /// <summary>
+    /// Para la geometría. Se sale de 0..1 a propósito y ahí está la mitad del gesto: la
+    /// anticipación por abajo y el sobrepaso por arriba.
+    /// </summary>
+    internal double Shape { get; }
+
+    /// <summary>Parte un avance de la curva en sus dos factores. Es la única forma de armar uno.</summary>
+    internal static OrbBlend Split(double eased) => new(Math.Clamp(eased, 0, 1), eased);
+}
+
+/// <summary>
 /// El reloj de una transición en vuelo: cuánto lleva, dónde va la curva y qué queda de la patada.
 /// </summary>
 /// <remarks>
-/// Vive fuera de los cuerpos porque la nube y la gota tienen que estar en el mismo punto de la misma
-/// transición aunque dibujen cosas distintas. Y arranca terminado a propósito: en el primer cuadro
-/// no hay transición de nada, hay un estado.
+/// Vive fuera de los cuerpos porque cada cuerpo tiene el suyo y lo pone en hora con el canal, que es
+/// el único que sabe cuándo empezó el cambio y de dónde venía. <b>No se comparte entre cuerpos</b>:
+/// <see cref="ConsumeSpin"/> es destructiva, así que si dos cuerpos leyeran el mismo reloj el
+/// segundo en llamar se quedaría sin patada. Y arranca terminado a propósito: en el primer cuadro no
+/// hay transición de nada, hay un estado.
 /// </remarks>
 internal sealed class OrbTransitionClock
 {
@@ -338,8 +377,14 @@ internal sealed class OrbTransitionClock
     /// <summary>Cuánto lleva recorrido en forma. Puede salirse de 0..1: ver <see cref="OrbTransitions.Shape"/>.</summary>
     internal double Eased => OrbTransitions.Shape(Spec.Curve, Progress);
 
-    /// <summary>Lo mismo, recortado. Es lo que se usa para mezclar colores.</summary>
+    /// <summary>Lo mismo, recortado. Sirve para los sobres —aliento, temblor, voz— que no anticipan.</summary>
     internal double EasedClamped => Math.Clamp(Eased, 0, 1);
+
+    /// <summary>
+    /// El avance partido en sus dos factores. Es lo único que hay que pasarle a
+    /// <see cref="OrbPalette.Lerp"/>: ver <see cref="OrbBlend"/>.
+    /// </summary>
+    internal OrbBlend Blend => OrbBlend.Split(Eased);
 
     /// <summary>
     /// La patada de entrada: uno al arrancar, cero al 95 % de la duración, al cuadrado en el medio.
@@ -353,19 +398,31 @@ internal sealed class OrbTransitionClock
     /// <summary>El polvo todavía está corriendo hacia atrás.</summary>
     internal bool IsLookingBack => Spec.LooksBack && _elapsed < OrbTransitions.LookBackSeconds;
 
-    /// <summary>Arranca la transición que corresponda a este cambio.</summary>
-    internal void Begin(AssistantVisualState? from, AssistantVisualState to)
+    /// <summary>
+    /// Toma la transición que decidió el canal y se pone en su hora.
+    /// </summary>
+    /// <param name="spec">La transición, ya elegida. El reloj <b>no</b> la busca en la tabla.</param>
+    /// <param name="elapsed">Cuánto lleva andando según el canal, que es quien la arrancó.</param>
+    /// <remarks>
+    /// El par (desde, hasta) no se resuelve acá a propósito. Cuando lo resolvía el cuerpo al
+    /// dibujar, dos cambios entre dos cuadros le hacían leer una entrada distinta de la tabla que la
+    /// que había medido el canal —«hablando → interrumpida» dura 80 ms y «cualquiera → interrumpida»
+    /// 95—, y encima el reloj arrancaba cuando el cuerpo se enteraba y no cuando el cambio pasó.
+    /// </remarks>
+    internal void Begin(OrbTransition spec, double elapsed)
     {
-        Spec = OrbTransitions.For(from, to);
-        _elapsed = 0;
+        Spec = spec;
+        _elapsed = Math.Max(0, elapsed);
 
         // La patada de giro no la aplica el reloj: la consume el cuerpo, que es el que sabe cuántos
-        // anillos tiene y para qué lado gira cada uno.
-        _spinBurst = Spec.SpinKick;
+        // anillos o cuántos armónicos tiene y para qué lado va cada uno. Va descontado lo que el
+        // canal ya llevaba andando, así que un cuerpo que se entera tarde recibe lo que queda de la
+        // patada y no la patada entera.
+        _spinBurst = spec.SpinKick * Math.Pow(0.05, _elapsed);
     }
 
-    /// <summary>Avanza el reloj.</summary>
-    internal void Advance(double delta) => _elapsed += delta;
+    /// <summary>Pone el reloj en la hora del canal. Una sola fuente para el tiempo, como para el par.</summary>
+    internal void Sync(double elapsed) => _elapsed = elapsed;
 
     /// <summary>
     /// Toma lo que queda de la patada de giro y la apaga un poco más.

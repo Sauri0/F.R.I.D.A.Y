@@ -28,25 +28,48 @@ internal static class OrbSnapshot
     private const int Zoom = 3;
     private const double Dpi = 96 * Zoom;
 
-    private static readonly (AssistantVisualState State, double Seconds, bool Microphone)[] Frames =
+    /// <summary>
+    /// Los quince, en el orden en que pasan.
+    /// </summary>
+    /// <remarks>
+    /// Ya no hay columna de micrófono. El armado era una bandera encima de reposo y ahora es
+    /// <see cref="AssistantVisualState.Watching"/>, con su fila entera en la tabla: se renderiza
+    /// como cualquier otro.
+    /// <para>
+    /// Los tres que se parecen de reojo —trabajando sin vos, un proyecto te espera y esperándote—
+    /// van seguidos a propósito. Separarlos era lo que la referencia dejó sin decidir, y se
+    /// decidieron por presencia; la hoja de contactos es donde se comprueba si de verdad se
+    /// distinguen. Mirarlos de a uno no sirve para eso.
+    /// </para>
+    /// </remarks>
+    private static readonly (AssistantVisualState State, double Seconds)[] Frames =
     [
-        (AssistantVisualState.Idle, 0.4, false),
-        (AssistantVisualState.Idle, 1.0, true),
-        (AssistantVisualState.Listening, 1.2, true),
-        (AssistantVisualState.Thinking, 1.2, false),
-        (AssistantVisualState.Speaking, 1.2, false),
-        (AssistantVisualState.Attention, 1.2, false),
-        (AssistantVisualState.Error, 1.2, false),
+        (AssistantVisualState.Idle, 0.4),
+        (AssistantVisualState.Watching, 1.0),
+        (AssistantVisualState.Listening, 1.2),
+        (AssistantVisualState.Thinking, 1.2),
+        (AssistantVisualState.Speaking, 1.2),
+        (AssistantVisualState.Interrupted, 0.6),
 
-        // Los dos de capacidad reducida van juntos y al final: la prueba de que se distinguen de un
+        // Los tres del trío, uno detrás del otro.
+        (AssistantVisualState.Background, 1.2),
+        (AssistantVisualState.ProjectWaiting, 1.2),
+        (AssistantVisualState.WaitingForYou, 1.2),
+
+        (AssistantVisualState.Attention, 1.2),
+        (AssistantVisualState.AskingPermission, 1.2),
+
+        // Los tres de capacidad reducida van juntos y al final: la prueba de que se distinguen de un
         // error no es mirarlos solos, es verlos al lado del rojo.
-        (AssistantVisualState.Unconfigured, 1.2, false),
-        (AssistantVisualState.Offline, 1.2, false),
+        (AssistantVisualState.Error, 1.2),
+        (AssistantVisualState.Deaf, 1.2),
+        (AssistantVisualState.Unconfigured, 1.2),
+        (AssistantVisualState.Offline, 1.2),
 
         // Tarea larga: el sedimento se acumula abajo. Tres momentos, para verlo subir.
-        (AssistantVisualState.Thinking, 14, false),
-        (AssistantVisualState.Thinking, 30, false),
-        (AssistantVisualState.Thinking, 70, false)
+        (AssistantVisualState.Thinking, 14),
+        (AssistantVisualState.Thinking, 30),
+        (AssistantVisualState.Thinking, 70)
     ];
 
     public static async Task<string> RunAsync(string outputDirectory, OrbShape shape = OrbShape.Gota)
@@ -75,12 +98,11 @@ internal static class OrbSnapshot
 
         var shots = new List<(BitmapSource Image, string Caption)>();
         var index = 0;
-        foreach (var (state, seconds, microphone) in Frames)
+        foreach (var (state, seconds) in Frames)
         {
             if (gota is not null)
             {
                 gota.State = state;
-                gota.IsMicrophoneArmed = microphone;
             }
 
             if (nube is not null)
@@ -100,7 +122,9 @@ internal static class OrbSnapshot
             var target = new RenderTargetBitmap(Cell * Zoom, Cell * Zoom, Dpi, Dpi, PixelFormats.Pbgra32);
             target.Render(orb);
             target.Freeze();
-            shots.Add((target, $"{state}{(microphone ? " · mic" : string.Empty)} · {seconds:0.0}s"));
+            // El nombre de la tabla y no el del enum: la hoja se mira para decidir si dos estados se
+            // distinguen, y para eso hace falta leer «un proyecto te espera», no «ProjectWaiting».
+            shots.Add((target, $"{OrbPalette.For(state).Name} · {seconds:0.0}s"));
         }
 
         host.Close();
