@@ -235,6 +235,48 @@
             </Setter>
         </Style>
 
+        <!--
+            El item que además dice en cuál estás. Es su propio estilo y no un IsCheckable sobre el
+            de arriba porque aquella plantilla no tiene dónde poner la marca: el ContentPresenter
+            ocupa el ancho entero, así que un IsChecked ahí no se vería y la opción obligaría a
+            probarla para saber cómo estaba puesta. Los items sin marca siguen usando el otro y no
+            se corren: la columna de la marca sólo existe acá.
+        -->
+        <Style x:Key="ItemTildadoDelMenu" TargetType="MenuItem" BasedOn="{StaticResource ItemDelMenu}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Border x:Name="Fondo" Background="Transparent" Padding="15,6" MinWidth="190">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="17" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="Tilde"
+                                           Text="✓"
+                                           Opacity="0"
+                                           FontFamily="{TemplateBinding FontFamily}"
+                                           FontSize="{TemplateBinding FontSize}"
+                                           Foreground="{TemplateBinding Foreground}"
+                                           VerticalAlignment="Center" />
+                                <ContentPresenter Grid.Column="1"
+                                                  ContentSource="Header"
+                                                  VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Tilde" Property="Opacity" Value="1" />
+                            </Trigger>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Fondo" Property="Background" Value="#18FFFFFF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="RayaDelMenu" TargetType="Separator">
             <Setter Property="Height" Value="1" />
             <Setter Property="Margin" Value="13,5" />
@@ -1543,7 +1585,7 @@
                 La píldora. Centrada sobre el orbe y 36 px por encima de su borde superior, que es
                 donde la pone el boceto (left:54px, top:-36px sobre un orbe de 108). Morfea de ancho
                 en vez de aparecer y desaparecer, y por eso es un control y no un Border con un
-                binding: el ancho se dibuja adentro para no pedir layout sesenta veces por segundo
+                binding: el ancho se dibuja adentro para no pedir layout una vez por cuadro
                 encima de un orbe que ya está dibujando. Sus cuatro propiedades se enganchan en el
                 código de la ventana, junto con las de los dos cuerpos.
 

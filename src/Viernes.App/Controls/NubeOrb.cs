@@ -52,15 +52,39 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     private const double CameraTilt = 0.34;
 
     /// <summary>
-    /// 30 cuadros por segundo. El boceto es explícito: 30 fps con estela se lee mejor que 60 sin ella.
+    /// 30 cuadros por segundo, <b>y sólo con el orbe quieto</b>. Ver <see cref="OnRendering"/>.
     /// </summary>
     /// <remarks>
-    /// Acá no hay estela —eso pide un <c>RenderTargetBitmap</c> redibujado sobre sí mismo y es lo
-    /// primero que el propio boceto autoriza a resignar—, pero el techo se mantiene igual: a 108 px
-    /// nadie distingue 30 de 60 en una nube, y la mitad de los cuadros es la mitad del consumo en
-    /// una aplicación que está encendida todo el día.
+    /// El boceto es explícito: 30 fps con estela se lee mejor que 60 sin ella. Acá no hay estela
+    /// —eso pide un <c>RenderTargetBitmap</c> redibujado sobre sí mismo y es lo primero que el propio
+    /// boceto autoriza a resignar—, y el techo se mantuvo con el argumento de que a 108 px nadie
+    /// distingue 30 de 60 en una nube.
+    /// <para>
+    /// Ese argumento es cierto para el orbe <em>quieto</em>, que es el caso para el que se escribió,
+    /// y falso para el orbe en movimiento. Medido en esta máquina con <c>--medir-fluidez</c>: con el
+    /// orbe paseándose, la ventana se movía 78 veces por segundo y el cuerpo se dibujaba 22. Uno de
+    /// cada 3,6 cuadros. La forma dibujada —el achatamiento, la inclinación hacia donde va, el
+    /// polvo— quedaba hasta 45 ms atrasada respecto de dónde estaba la ventana, y a 800 px/s eso son
+    /// 36 px de desfase entre el cuerpo y su propio borde. Eso es lo que se siente áspero.
+    /// </para>
+    /// <para>
+    /// Así que el techo queda como decisión explícita y no como número heredado: <b>vale quieta, no
+    /// vale moviéndose</b>. Quieta ahorra la mitad de los cuadros en una aplicación que está
+    /// encendida todo el día; moviéndose no ahorra nada que valga lo que cuesta.
+    /// </para>
     /// </remarks>
     private const double FrameSeconds = 1.0 / 30.0;
+
+    /// <summary>
+    /// A partir de esta rapidez de la ventana el techo de cuadros se levanta, en px/s.
+    /// </summary>
+    /// <remarks>
+    /// <b>Este número no sale del fuente.</b> Sale de la única cuenta que lo justifica: al techo de
+    /// <see cref="FrameSeconds"/> pasan 33,3 ms entre dibujo y dibujo, y algo que en ese rato se
+    /// corrió menos de un píxel no puede leerse a los saltos. Un píxel cada 1/30 de segundo son 30
+    /// px/s. Por debajo de eso el techo no le saca nada a nadie.
+    /// </remarks>
+    private const double UncappedSpeed = 30;
 
     private const int DepthBuckets = 6;
 
@@ -98,7 +122,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     /// </summary>
     /// <remarks>
     /// Va aparte y no adentro de <c>DustPoint</c> y compañía porque aquéllos son inmutables —se
-    /// arman una vez y describen la forma— y esto cambia sesenta veces por segundo. Mezclarlos
+    /// arman una vez y describen la forma— y esto cambia una vez por cuadro. Mezclarlos
     /// obligaría a reescribir el arreglo entero de puntos por cuadro para mover un desplazamiento.
     /// </remarks>
     private readonly Smear[] _coreSmear;
@@ -141,6 +165,32 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     private double _pending;
     private long _lastTicks;
     private bool _isRunning;
+
+    /// <summary>
+    /// Piso del paso mientras se mueve. Se ajusta solo a lo que esta máquina puede dibujar.
+    /// </summary>
+    /// <remarks>
+    /// Arranca en cero —dibujar todos los cuadros— y sube si no llega. La razón es que <b>una
+    /// cadencia que alterna 180 y 90 se ve peor que una pareja de 90</b>: el ojo no mide cuántos
+    /// cuadros hay, mide si el intervalo entre ellos es regular. Levantar el techo de 30 llevó a la
+    /// nube de 21 dibujos por segundo a 145, pero con uno de cada cinco cuadros llegando tarde: el
+    /// desfase con la ventana se arregló y la irregularidad quedó.
+    /// <para>
+    /// No hay número fijo posible: la gota dibuja 72 muestras y la nube 380 puntos por dos figuras
+    /// cada uno, y cuánto tarda eso depende de la máquina. Así que se mide el dibujo de verdad y se
+    /// elige el submúltiplo más rápido que se pueda sostener.
+    /// </para>
+    /// </remarks>
+    private double _movingFloor;
+
+    /// <summary>Cuánto tardó el último dibujo, suavizado. Es lo que decide el piso.</summary>
+    private double _drawSeconds;
+
+    /// <summary>Cuánto dura un cuadro en esta pantalla, suavizado. No se supone: se mide.</summary>
+    private double _frameSeconds;
+
+    /// <summary>El piso vigente, ya en el submúltiplo del cuadro que esta máquina sostiene.</summary>
+    private double MovingFloor => _movingFloor;
 
     /// <summary>Quién decide qué se muestra. Ver <see cref="Channel"/>.</summary>
     private OrbStateChannel _channel = new();
@@ -375,6 +425,18 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     }
 
     /// <summary>
+    /// Si el orbe se está moviendo lo suficiente como para que el techo de cuadros se note.
+    /// </summary>
+    /// <remarks>
+    /// Agarrado cuenta siempre, aunque la mano esté detenida: soltar es un evento y el cuerpo tiene
+    /// que estar corriendo a la frecuencia del cuadro cuando llegue, no enterarse 33 ms después.
+    /// </remarks>
+    private bool Moving =>
+        _windowMotion.IsDragging ||
+        (_windowMotion.VelocityX * _windowMotion.VelocityX) +
+        (_windowMotion.VelocityY * _windowMotion.VelocityY) >= UncappedSpeed * UncappedSpeed;
+
+    /// <summary>
     /// La estela: cada partícula queda atrás de la ventana y vuelve por su propio resorte.
     /// </summary>
     /// <remarks>
@@ -537,18 +599,33 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
         // Un cuadro perdido no puede empujar la fase varios segundos de golpe.
         delta = Math.Clamp(delta, 0, 0.09);
         _pending += delta;
-        if (_pending < FrameSeconds)
+
+        // La duración del cuadro se mide, no se supone: esta máquina tiene una pantalla de 180 Hz y
+        // otra de 60, y DWM compone las dos a la más alta. Cualquier constante acá sería falsa en
+        // alguna de las dos, y en la máquina del que venga después.
+        if (delta > 0)
+        {
+            _frameSeconds = _frameSeconds <= 0 ? delta : (_frameSeconds * 0.9) + (delta * 0.1);
+        }
+
+        // El techo de cuadros se levanta mientras el orbe se mueve. Con la ventana viajando, el
+        // cuerpo tiene que dibujarse en el mismo cuadro en que la ventana se movió o la forma se
+        // atrasa respecto de su propio borde; quieto, no hay nada que seguir y 30 alcanzan.
+        // El porqué, con los números medidos, está en FrameSeconds.
+        if (_pending < (Moving ? MovingFloor : FrameSeconds))
         {
             return;
         }
 
-        // FrameSeconds es el PISO del paso, no el techo: acá se sale mientras _pending no llegue a
-        // 1/30, y lo que se integra es _pending entero. Como se entra con menos de 1/30 acumulado y
-        // se le suma un delta de hasta 0,09, el paso más largo que puede recibir Advance —y con él
-        // los resortes de RelaxSmear— es 1/30 + 0,09 ≈ 0,123 s. Con la rigidez máxima de Smear.New
-        // (28) eso da dt·ω ≈ 0,65, no el 0,18 que sale de suponer un paso fijo de 1/30. Sigue
-        // sobrando margen para Euler semi-implícito, que aguanta hasta 2, pero el que suba el tope
-        // del clamp o la rigidez tiene que hacer la cuenta con 0,123 y no con 0,033.
+        // Con el orbe quieto, FrameSeconds es el PISO del paso, no el techo: se sale mientras
+        // _pending no llegue a 1/30, y lo que se integra es _pending entero. Como se entra con menos
+        // de 1/30 acumulado y se le suma un delta de hasta 0,09, el paso más largo que puede recibir
+        // Advance —y con él los resortes de RelaxSmear— es 1/30 + 0,09 ≈ 0,123 s. Con la rigidez
+        // máxima de Smear.New (28) eso da dt·ω ≈ 0,65, no el 0,18 que sale de suponer un paso fijo
+        // de 1/30. Sigue sobrando margen para Euler semi-implícito, que aguanta hasta 2, pero el que
+        // suba el tope del clamp o la rigidez tiene que hacer la cuenta con 0,123 y no con 0,033.
+        // Moviéndose el paso es el del cuadro y el peor caso baja, así que este cálculo sigue siendo
+        // el que manda.
         Advance(_pending);
         _pending = 0;
         InvalidateVisual();
@@ -738,6 +815,14 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
         return value * 0.072;
     }
 
+    /// <summary>Cuántas veces se repintó el cuerpo. Sólo la lee el banco de fluidez.</summary>
+    /// <remarks>
+    /// Es el número que hace falta para discutir la compuerta de <see cref="FrameSeconds"/>: sin él,
+    /// «la nube va a los tirones» y «la ventana va a los tirones» son la misma queja y no hay forma
+    /// de saber cuál de las dos se está viendo.
+    /// </remarks>
+    internal long DrawnFrames { get; private set; }
+
     protected override void OnRender(DrawingContext context)
     {
         var side = Math.Min(ActualWidth, ActualHeight);
@@ -745,6 +830,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
         {
             return;
         }
+
+        DrawnFrames++;
+        var reloj = System.Diagnostics.Stopwatch.GetTimestamp();
 
         var profile = _profile;
         var spec = _transition.Spec;
@@ -854,6 +942,44 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
         DrawFringe(context, profile, dustColor, alpha, light, dispersion, extra, turbulence);
 
         context.Pop();
+        NoteDrawCost(reloj);
+    }
+
+    /// <summary>
+    /// Anota cuánto costó este dibujo y elige el piso del paso para el próximo.
+    /// </summary>
+    /// <remarks>
+    /// El costo se suaviza porque un solo cuadro caro —una recolección de basura, otra aplicación
+    /// pidiendo la placa— no puede bajarle la cadencia a toda la sesión, y un solo cuadro barato no
+    /// puede subirla.
+    /// <para>
+    /// El margen de 1,25 no sale del boceto: es de acá, y sale de que apuntar al límite exacto
+    /// garantiza pasarse. Si el dibujo cuesta el 80 % del cuadro, el 20 % restante tiene que
+    /// alcanzar para todo lo demás que pasa en ese cuadro —la física, la ventana, el resto del árbol
+    /// visual— y no alcanza. Pidiendo un cuarto de margen, el piso salta al submúltiplo siguiente
+    /// antes de que empiece a alternar.
+    /// </para>
+    /// <para>
+    /// Se redondea a un submúltiplo entero del cuadro y no a un número libre: con un piso de, por
+    /// ejemplo, 7 ms sobre cuadros de 5,56, la nube dibujaría en el segundo cuadro a veces y en el
+    /// tercero otras, que es la alternancia que esto viene a evitar.
+    /// </para>
+    /// </remarks>
+    private void NoteDrawCost(long startedAt)
+    {
+        var costo = (System.Diagnostics.Stopwatch.GetTimestamp() - startedAt) /
+            (double)System.Diagnostics.Stopwatch.Frequency;
+
+        _drawSeconds = _drawSeconds <= 0 ? costo : (_drawSeconds * 0.85) + (costo * 0.15);
+
+        // Sin un cuadro medido todavía no hay nada que decidir: se sigue pidiendo todos.
+        if (_frameSeconds <= 0)
+        {
+            return;
+        }
+
+        var cuantos = (int)Math.Ceiling(_drawSeconds * 1.25 / _frameSeconds);
+        _movingFloor = cuantos <= 1 ? 0 : (cuantos - 0.5) * _frameSeconds;
     }
 
     /// <summary>

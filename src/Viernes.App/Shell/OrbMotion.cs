@@ -8,10 +8,24 @@ namespace Viernes.App.Shell;
 /// La física del orbe: arrastre con inercia, rebote contra los bordes e imán en las esquinas.
 /// </summary>
 /// <remarks>
-/// Todo se integra con pasos fijos de 1/120 s y no con el <c>dt</c> del cuadro. Es la única forma de
-/// que un resorte se sienta igual a 30 fps que a 144: con paso variable, un cuadro largo mete un
-/// salto grande, el resorte se pasa y el rebote cambia de altura según lo ocupada que esté la
-/// máquina. Un objeto que rebota distinto cada vez deja de leerse como objeto.
+/// El paso de integración tiene <b>techo</b> en 1/120 s: nunca es más largo que eso, aunque el
+/// cuadro lo sea. Con paso libre, un cuadro largo mete un salto grande, el resorte se pasa y el
+/// rebote cambia de altura según lo ocupada que esté la máquina; un objeto que rebota distinto cada
+/// vez deja de leerse como objeto.
+/// <para>
+/// <b>Techo y no piso</b>, y la diferencia importa: acá decía «pasos fijos de 1/120 s y no el
+/// <c>dt</c> del cuadro», y eso es falso por arriba de 120 Hz. En el monitor de 180 Hz donde se
+/// midió esto el cuadro dura 5,56 ms —menos que los 8,33 del subpaso—, así que el bucle corre un
+/// solo paso y ese paso es el del cuadro. Está bien que así sea: hacerlo piso pondría la física a
+/// 120 mientras la ventana se dibuja a 180, y el orbe se movería en dos de cada tres cuadros, que
+/// es exactamente el desfase del que se quejó el usuario.
+/// </para>
+/// <para>
+/// Lo que el techo promete —que el pique se vea igual a cualquier frecuencia— está medido en
+/// <c>OrbBounceRateTests</c>: entre 30 y 240 Hz el pique da entre 197,6 y 203,5 px, un 3 %. 30 y 60
+/// dan exactamente lo mismo porque sus cuadros son múltiplos enteros del subpaso; las que dejan
+/// resto se separan ese poco.
+/// </para>
 /// <para>
 /// Las constantes salen medidas de la referencia ejecutable y no son intercambiables entre sí: el
 /// resorte del arrastre es más duro que el de reposo porque tiene que seguir al dedo, y el
@@ -68,6 +82,16 @@ internal sealed class OrbMotion
 
     /// <summary>Si viene de ser soltado y todavía tiene inercia.</summary>
     public bool IsFlying { get; private set; }
+
+    /// <summary>
+    /// Si ya terminó de moverse: ni agarrado, ni volando, y el resorte de reposo ya lo dejó.
+    /// </summary>
+    /// <remarks>
+    /// Usa <see cref="SettleSpeed"/>, el mismo umbral con el que <see cref="StepFlight"/> decide que
+    /// el vuelo se acabó, y no un número nuevo: «dejó de volar» y «se quedó quieto» tienen que ser
+    /// la misma frontera o hay un tramo en el que no es ninguna de las dos cosas.
+    /// </remarks>
+    public bool IsAtRest => !IsDragging && !IsFlying && Speed < SettleSpeed;
 
     /// <summary>Rapidez instantánea del integrador. Es la que decide si sigue volando y cuánto rebota.</summary>
     public double Speed => Velocity.Length;

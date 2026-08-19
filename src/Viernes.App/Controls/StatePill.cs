@@ -206,7 +206,7 @@ internal sealed class StatePill : FrameworkElement, IOrbBody
     {
         // Se mide una vez con la combinación más larga de todas y ya no vuelve a pedir layout: el
         // ancho que morfea se dibuja adentro, centrado. Animar el tamaño de un elemento obliga a
-        // rehacer el layout sesenta veces por segundo, y esto está encima de un orbe que ya está
+        // rehacer el layout una vez por cuadro, y esto está encima de un orbe que ya está
         // dibujando.
         if (_maxWidth <= 0)
         {
@@ -382,7 +382,7 @@ internal sealed class StatePill : FrameworkElement, IOrbBody
     /// </summary>
     /// <remarks>
     /// Una cuenta regresiva es un reloj, no una animación. Colgarla del bucle de render obligaría a
-    /// Viernes a dibujar sesenta veces por segundo mientras espera —y esperar es justo lo que hace
+    /// Viernes a dibujar una vez por cuadro mientras espera —y esperar es justo lo que hace
     /// la mayor parte del día—, para mover un número cada mil milisegundos.
     /// </remarks>
     private void SyncDetailClock(AssistantVisualState state, bool visible)

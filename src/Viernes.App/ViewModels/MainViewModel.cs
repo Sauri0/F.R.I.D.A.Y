@@ -24,6 +24,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isConfirmationVisible;
     private bool _isListeningWhileHidden = true;
     private Controls.OrbShape _orbShape = Controls.OrbShape.Gota;
+    private bool _followsActiveMonitor;
     private bool _isConversationActive;
     private double _audioLevel;
     private string _confirmationTitle = "Confirmación necesaria";
@@ -213,6 +214,19 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         await _runtime.SetOrbShapeAsync(shape, cancellationToken);
         OrbShape = _runtime.OrbShape;
+    }
+
+    /// <summary>Si el orbe se muda solo al monitor donde estás. Apagada de fábrica.</summary>
+    public bool FollowsActiveMonitor
+    {
+        get => _followsActiveMonitor;
+        private set => SetProperty(ref _followsActiveMonitor, value);
+    }
+
+    public async Task SetFollowActiveMonitorAsync(bool follow, CancellationToken cancellationToken)
+    {
+        await _runtime.SetFollowActiveMonitorAsync(follow, cancellationToken);
+        FollowsActiveMonitor = _runtime.FollowsActiveMonitor;
     }
 
     public bool IsListeningWhileHidden
@@ -769,6 +783,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         IsWakeWordEnabled = _runtime.IsWakeWordEnabled;
         IsListeningWhileHidden = _runtime.IsListeningWhileHidden;
         OrbShape = _runtime.OrbShape;
+        FollowsActiveMonitor = _runtime.FollowsActiveMonitor;
 
         // El nombre recién se conoce acá: la ventana y la bandeja ya se dibujaron con el de fábrica
         // y se enteran del elegido por este aviso.

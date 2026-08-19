@@ -1,4 +1,4 @@
-using System.Net.Http;
+﻿using System.Net.Http;
 using Viernes.App.Controls;
 using Viernes.App.Diagnostics;
 using Viernes.App.ViewModels;
@@ -598,6 +598,25 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
     public OrbShape OrbShape { get; private set; } = OrbShape.Gota;
 
+    /// <inheritdoc />
+    public bool FollowsActiveMonitor { get; private set; }
+
+    /// <inheritdoc />
+    public async Task SetFollowActiveMonitorAsync(bool follow, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        if (FollowsActiveMonitor == follow)
+        {
+            return;
+        }
+
+        FollowsActiveMonitor = follow;
+        await PersistVoiceSettingsAsync(cancellationToken).ConfigureAwait(false);
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            follow ? "Te sigo entre pantallas" : "Me quedo donde me dejes"));
+    }
+
     public async Task SetOrbShapeAsync(OrbShape shape, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -647,6 +666,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         OrbShape = string.Equals(_settings.OrbShape, "Nube", StringComparison.OrdinalIgnoreCase)
             ? OrbShape.Nube
             : OrbShape.Gota;
+        FollowsActiveMonitor = _settings.FollowActiveMonitor;
 
         // Recién acá, con el archivo leído, se sabe qué voz eligió el usuario. Es el único lugar
         // donde se fija: las opciones con las que se construye el sintetizador.
@@ -2722,6 +2742,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             // seguiría despertando con el nombre viejo. Sólo se guardan si alguien las eligió a mano.
             ListenWhileHidden = _listenWhileHidden,
             OrbShape = OrbShape.ToString(),
+            FollowActiveMonitor = FollowsActiveMonitor,
             PreferredRecognitionProvider = _recognition?.Info.Kind ?? _settings.PreferredRecognitionProvider
         };
         await _settingsStore.SaveAsync(_settings, cancellationToken).ConfigureAwait(false);

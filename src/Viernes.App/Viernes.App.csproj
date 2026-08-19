@@ -12,6 +12,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!--
+      La geometría del shell —quién es vecino de quién, por dónde se pasa de una pantalla a otra—
+      es interna y no se puede probar desde afuera sin esto. Y hay que poder probarla: los casos que
+      importan (dos monitores de distinta altura, un hueco en el escritorio virtual) no se pueden
+      reproducir con los monitores que tenga enchufada la máquina donde se compila.
+    -->
+    <InternalsVisibleTo Include="Viernes.App.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Viernes.Core\Viernes.Core.csproj" />
     <ProjectReference Include="..\Viernes.Memory\Viernes.Memory.csproj" />
     <ProjectReference Include="..\Viernes.Platform.Windows\Viernes.Platform.Windows.csproj" />

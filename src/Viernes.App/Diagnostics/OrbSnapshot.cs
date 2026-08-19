@@ -435,7 +435,17 @@ internal static class OrbSnapshot
             }
 
             var ticks = rendering.RenderingTime.Ticks;
-            var delta = lastTicks == 0 ? 1.0 / 60 : (ticks - lastTicks) / (double)TimeSpan.TicksPerSecond;
+
+            // El primer cuadro pone el reloj en hora y no se integra. Acá había un 1,0/60 supuesto;
+            // medido en la máquina donde se escribió esto, el cuadro dura 5,56 ms —180 Hz— así que
+            // ese paso era tres veces el real y el banco arrancaba con el dedo ya adelantado 25 px.
+            if (lastTicks == 0)
+            {
+                lastTicks = ticks;
+                return;
+            }
+
+            var delta = (ticks - lastTicks) / (double)TimeSpan.TicksPerSecond;
             lastTicks = ticks;
             delta = Math.Clamp(delta, 0, 0.05);
 

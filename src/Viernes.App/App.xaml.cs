@@ -19,7 +19,10 @@ public partial class App : System.Windows.Application
     private TrayIconService? _trayIcon;
     private PanicSwitch? _panicSwitch;
     private Controls.EdgeMark? _edgeMark;
-    private readonly MonitorSlots _monitorSlots = new();
+    // Acá había un segundo MonitorSlots. Leía y escribía el MISMO archivo que el de la ventana, con
+    // otro significado: allá se guarda la esquina del orbe y acá se usaba para poner la esquina de
+    // la ventana, que mide 528 de ancho contra los 108 del orbe. La memoria de posición por monitor
+    // vive en un solo lado desde que la mudanza la resuelve MainWindow.MoveToCursorMonitor.
 
     public new static App Current => (App)System.Windows.Application.Current;
 
@@ -50,6 +53,16 @@ public partial class App : System.Windows.Application
             var lab = new Diagnostics.MicrophoneLab();
             lab.Closed += (_, _) => Shutdown();
             lab.Show();
+            return;
+        }
+
+        // Banco de fluidez: corre el mismo movimiento de las dos maneras posibles y saca los
+        // números. Va acá arriba, con los otros diagnósticos, porque no toca voz ni preferencias ni
+        // el mutex de instancia única: se puede correr con Viernes abierta.
+        if (e.Args.Contains("--medir-fluidez"))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            _ = MeasureMotionAndExitAsync();
             return;
         }
 
@@ -146,6 +159,26 @@ public partial class App : System.Windows.Application
         }
     }
 
+    private async Task MeasureMotionAndExitAsync()
+    {
+        try
+        {
+            var report = await Diagnostics.MotionBench.RunAsync();
+            var path = Path.Combine(Path.GetTempPath(), "viernes-fluidez.txt");
+            await File.WriteAllTextAsync(path, report);
+            Console.WriteLine(report);
+            Console.WriteLine(path);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"El banco de fluidez falló: {exception}");
+        }
+        finally
+        {
+            Shutdown();
+        }
+    }
+
     private async Task RenderOrbAndExitAsync(string outputDirectory)
     {
         try
@@ -169,45 +202,6 @@ public partial class App : System.Windows.Application
     /// Muestra u oculta la marca según la única regla que la justifica: si el micrófono puede tomar
     /// audio y el orbe no está a la vista, tiene que haber algo en pantalla.
     /// </summary>
-    /// <summary>
-    /// Lleva el orbe al monitor donde está el cursor, a la posición que recordaba de ese monitor.
-    /// </summary>
-    /// <remarks>
-    /// Si ya está en ese monitor no toca nada: mover el orbe sin motivo es movimiento gratuito, y a
-    /// las ocho horas de uso el movimiento gratuito es el enemigo. Sólo se reubica cuando lo llamaste
-    /// desde otra pantalla, que es el caso donde hacerte buscarlo sería peor.
-    /// </remarks>
-    private void MoveToCursorMonitor()
-    {
-        if (_window is null)
-        {
-            return;
-        }
-
-        try
-        {
-            var (targetKey, workArea) = MonitorSlots.MonitorUnderCursor();
-            var currentCentre = new System.Windows.Point(
-                _window.Left + (_window.Width / 2),
-                _window.Top + (_window.Height / 2));
-            var (currentKey, _) = MonitorSlots.MonitorAt(currentCentre);
-
-            if (string.Equals(currentKey, targetKey, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            var size = new System.Windows.Size(_window.Width, _window.Height);
-            var slot = _monitorSlots.SlotFor(targetKey, workArea, size);
-            _window.Left = slot.X;
-            _window.Top = slot.Y;
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            // Si la topología de pantallas cambió justo ahora, quedarse donde está es aceptable.
-        }
-    }
-
     private void UpdateEdgeMark()
     {
         if (_window is null || _viewModel is null)
@@ -352,9 +346,24 @@ public partial class App : System.Windows.Application
         // Nada de mudarse de monitor con una pantalla completa adelante: mueve un cuerpo que no se
         // va a dibujar, y la mudanza necesita el bucle de cuadro, que con la ventana tapada por un
         // juego WPF deja de disparar.
-        if (!underFullScreen)
+        //
+        // Y sólo se muda de monitor cuando LA LLAMARON, nunca cuando ella llama.
+        //
+        // Éste es el camino que hace que el orbe aparezca donde estás con el seguimiento apagado, y
+        // se sostiene únicamente para la palabra de activación: ahí el cursor dice dónde estás
+        // porque acabás de hablarle. Con un recordatorio no dice nada —no la llamó nadie, es ella la
+        // que avisa— y mudarse ahí es exactamente lo que el usuario pidió que dejara de pasar: el
+        // orbe se iba solo a la pantalla del mouse, sin que nadie apretara nada, cada vez que
+        // vencía un recordatorio.
+        //
+        // El comentario que estaba acá decía «el cursor SÍ dice dónde estás porque acabás de
+        // llamarla», sin distinguir el motivo. Era cierto para la mitad de los casos y hacía parecer
+        // deliberado el otro.
+        if (!underFullScreen && request.Reason == ShellActivationReason.WakeWord)
         {
-            MoveToCursorMonitor();
+            // Guardado en la bandeja aparece del otro lado sin viajar: lo que se ve enseguida es la
+            // llegada desde la bandeja, y dos animaciones sobre la misma posición se pisan.
+            _window.MoveToCursorMonitor(teleport: wasHidden);
         }
 
         // La ventana decide qué se ve: el cuerpo entero, o la píldora y nada más. Topmost ya no se

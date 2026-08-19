@@ -347,7 +347,7 @@ internal sealed class OrbStateChannel
         Poll();
 
         // Ya está puesto, o ya está pedido y esperando su turno: no hay nada que reafirmar. Sin esta
-        // guarda la reafirmación volvería a encolar lo mismo sesenta veces por segundo.
+        // guarda la reafirmación volvería a encolar lo mismo una vez por cuadro.
         if (requested == _state || requested == QueuedState)
         {
             return;

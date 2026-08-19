@@ -521,7 +521,17 @@ internal partial class LiquidOrb : UserControl, IOrbBody, IOrbMotionSink
 
         ApplyGeometry(profile, eased);
         ApplyPalette(profile);
+        DrawnFrames++;
     }
+
+    /// <summary>Cuántas veces se rehízo la forma. Sólo la lee el banco de fluidez.</summary>
+    /// <remarks>
+    /// La gota no tiene <c>OnRender</c> propio: mueve propiedades de dependencia del XAML, así que
+    /// «se dibujó» y «corrió el cuadro» son lo mismo acá. En la nube no: ella tiene una compuerta y
+    /// por eso su contador va en el <c>OnRender</c> de verdad. Los dos números se comparan igual
+    /// —cuántas veces por segundo cambió lo que se ve— y ésa es la pregunta del banco.
+    /// </remarks>
+    internal long DrawnFrames { get; private set; }
 
     /// <summary>Las ondas que salen del centro, sumadas para un radio dado.</summary>
     private double RippleAt(double radius)

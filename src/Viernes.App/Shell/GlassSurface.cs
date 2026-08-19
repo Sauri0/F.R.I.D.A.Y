@@ -26,7 +26,7 @@ namespace Viernes.App.Shell;
 /// <para>
 /// El barrido —la banda de luz que cruza cada 12 s— no está acá: vive como hijo, porque animar un
 /// <see cref="System.Windows.Media.TranslateTransform"/> lo compone la GPU sin repintar el panel, y
-/// repintar ocho capas sesenta veces por segundo para mover un reflejo no vale la pena.
+/// repintar ocho capas una vez por cuadro para mover un reflejo no vale la pena.
 /// </para>
 /// </remarks>
 internal sealed class GlassSurface : Decorator

@@ -127,6 +127,16 @@ internal interface IAssistantRuntime : IAsyncDisposable
 
     Task SetOrbShapeAsync(Controls.OrbShape shape, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Si el orbe se muda solo al monitor donde el usuario está trabajando. Preferencia, se persiste.
+    /// </summary>
+    /// <remarks>
+    /// Apagada de fábrica. El porqué está en <c>ViernesLocalSettings.FollowActiveMonitor</c>.
+    /// </remarks>
+    bool FollowsActiveMonitor { get; }
+
+    Task SetFollowActiveMonitorAsync(bool follow, CancellationToken cancellationToken);
+
     bool IsWakeWordDemo { get; }
 
     string RecognitionProviderName { get; }

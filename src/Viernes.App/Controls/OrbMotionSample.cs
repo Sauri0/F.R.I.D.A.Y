@@ -14,9 +14,9 @@ namespace Viernes.App.Controls;
 /// </para>
 /// <para>
 /// El golpe viaja por <paramref name="HitToken"/> y no por una bandera: una bandera hay que apagarla
-/// y el cuerpo dibuja en su propio reloj —la nube a 30 cuadros, la gota a los que haya—, así que un
-/// golpe podía quedar encendido dos cuadros o perderse entero. Un número que sólo crece se compara
-/// contra el último visto y no se pierde ni se repite.
+/// y el cuerpo dibuja en su propio reloj —la nube pone techo de 30 cuando está quieta, la gota corre
+/// a los cuadros que haya—, así que un golpe podía quedar encendido dos cuadros o perderse entero.
+/// Un número que sólo crece se compara contra el último visto y no se pierde ni se repite.
 /// </para>
 /// </remarks>
 /// <param name="VelocityX">Velocidad horizontal de la ventana, px/s, ya suavizada.</param>
@@ -69,7 +69,8 @@ internal interface IOrbMotionSink
     /// </summary>
     /// <remarks>
     /// Sólo anota: consumir esto acá haría el trabajo en el cuadro de la ventana y no en el del
-    /// cuerpo, que son dos relojes distintos —la nube corre a 30—. El cuerpo lo lee cuando dibuja.
+    /// cuerpo, que pueden ser dos relojes distintos —la nube se queda en 30 mientras está quieta—.
+    /// El cuerpo lo lee cuando dibuja.
     /// </remarks>
     void ReportMotion(in OrbMotionSample motion);
 }

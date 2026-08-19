@@ -11,13 +11,18 @@ using Size = System.Windows.Size;
 namespace Viernes.App.Services;
 
 /// <summary>
-/// Recuerda dónde va el orbe <b>en cada monitor</b>, y decide en cuál aparecer cuando lo llamás.
+/// Recuerda dónde va el orbe <b>en cada monitor</b>, para cuando vuelve a ése.
 /// </summary>
 /// <remarks>
-/// Aparece donde está el cursor, no donde quedó él. El cursor es la mejor aproximación disponible a
-/// dónde estás mirando, y hacerte buscar el orbe en la otra pantalla es pedirte trabajo por una
-/// decisión que el código puede tomar solo. Para un asistente de voz, contestar en un monitor que no
-/// estás mirando es no contestar.
+/// <b>Esto no decide cuándo mudarse</b>, y antes el comentario de acá decía que sí: «aparece donde
+/// está el cursor». Eso valía cuando el orbe seguía al mouse solo, que es la queja que originó la
+/// preferencia <c>FollowActiveMonitor</c>. Ahora quien decide es <c>MainWindow</c>, y por omisión
+/// sólo se muda cuando el usuario actúa: cuando lo llama —ahí el cursor sí es la mejor aproximación
+/// disponible a dónde está mirando, porque acaba de hablarle— y cuando lo arrastra.
+/// <para>
+/// Lo que sigue valiendo es por qué existe este archivo: si al volver a una pantalla el orbe
+/// apareciera siempre en el mismo rincón, mudarse tendría costo y volver no sería volver.
+/// </para>
 /// <para>
 /// La clave del slot es el nombre del dispositivo más su resolución: si cambiás de resolución o
 /// desenchufás una pantalla, la posición guardada dejó de significar lo mismo y conviene recalcular
@@ -38,21 +43,20 @@ internal sealed class MonitorSlots
 
     public MonitorSlots() => Load();
 
-    /// <summary>Monitor donde está el cursor, con su área de trabajo y su clave de slot.</summary>
-    public static (string Key, Rect WorkArea) MonitorUnderCursor()
-    {
-        var position = System.Windows.Forms.Cursor.Position;
-        var screen = System.Windows.Forms.Screen.FromPoint(position);
-        return (KeyFor(screen), ToRect(screen.WorkingArea));
-    }
-
-    /// <summary>Monitor que contiene un punto dado, para saber en cuál está el orbe ahora.</summary>
-    public static (string Key, Rect WorkArea) MonitorAt(Point point)
-    {
-        var screen = System.Windows.Forms.Screen.FromPoint(
-            new System.Drawing.Point((int)point.X, (int)point.Y));
-        return (KeyFor(screen), ToRect(screen.WorkingArea));
-    }
+    /// <summary>
+    /// La clave de slot de un monitor: su nombre de dispositivo y su resolución.
+    /// </summary>
+    /// <remarks>
+    /// Acá vivían además <c>MonitorUnderCursor()</c> y <c>MonitorAt(Point)</c>, que devolvían el
+    /// área útil en <b>píxeles físicos</b> y, la segunda, recibía un punto en unidades de WPF y se
+    /// lo pasaba tal cual a <c>Screen.FromPoint</c>. Las dos escalas mezcladas en la misma línea: en
+    /// un escritorio al 100 % da igual y al 150 % contesta el monitor equivocado. Se fueron las dos.
+    /// Ahora quien tiene que resolver «qué monitor es éste» convierte primero —la ventana es la
+    /// única que sabe con qué escala interpreta WPF su <c>Left</c>— y después pregunta acá nada más
+    /// que por la clave, que es lo único de este archivo que no tiene unidades.
+    /// </remarks>
+    internal static string KeyFor(System.Windows.Forms.Screen screen) =>
+        $"{screen.DeviceName}@{screen.Bounds.Width}x{screen.Bounds.Height}";
 
     /// <summary>
     /// Dónde poner el orbe en ese monitor. Sin historial, esquina inferior derecha.
@@ -81,50 +85,16 @@ internal sealed class MonitorSlots
         Save();
     }
 
-    /// <summary>
-    /// Imanta al borde si lo soltaste cerca. Devuelve la posición final, ya recortada al área útil.
-    /// </summary>
-    public static Point Magnetize(Point position, Rect workArea, Size orbSize)
-    {
-        const double SnapDistance = 32;
-        var left = position.X;
-        var top = position.Y;
-
-        if (Math.Abs(left - workArea.Left) < SnapDistance)
-        {
-            left = workArea.Left + Margin;
-        }
-        else if (Math.Abs(workArea.Right - (left + orbSize.Width)) < SnapDistance)
-        {
-            left = workArea.Right - orbSize.Width - Margin;
-        }
-
-        if (Math.Abs(top - workArea.Top) < SnapDistance)
-        {
-            top = workArea.Top + Margin;
-        }
-        else if (Math.Abs(workArea.Bottom - (top + orbSize.Height)) < SnapDistance)
-        {
-            top = workArea.Bottom - orbSize.Height - Margin;
-        }
-
-        // Nunca fuera de pantalla ni a medias entre dos: se recorta siempre, aunque no haya imantado.
-        return new Point(
-            Math.Clamp(left, workArea.Left, Math.Max(workArea.Left, workArea.Right - orbSize.Width)),
-            Math.Clamp(top, workArea.Top, Math.Max(workArea.Top, workArea.Bottom - orbSize.Height)));
-    }
+    // Acá había un Magnetize(position, workArea, orbSize) con su propia distancia de imantado de 32
+    // px y su propio margen. No lo llamaba nadie: el imán del orbe es OrbMotion.Magnetize, con
+    // MagnetRange = 58, y corre dentro del bucle de física. Dos imanes con dos números distintos
+    // para la misma cosa es la clase de cosa que después alguien "arregla" tocando el que no se usa.
 
     private static bool Contains(Rect workArea, Point position, Size orbSize) =>
         position.X >= workArea.Left - 1 &&
         position.Y >= workArea.Top - 1 &&
         position.X + orbSize.Width <= workArea.Right + 1 &&
         position.Y + orbSize.Height <= workArea.Bottom + 1;
-
-    private static string KeyFor(System.Windows.Forms.Screen screen) =>
-        $"{screen.DeviceName}@{screen.Bounds.Width}x{screen.Bounds.Height}";
-
-    private static Rect ToRect(System.Drawing.Rectangle rectangle) =>
-        new(rectangle.Left, rectangle.Top, rectangle.Width, rectangle.Height);
 
     private void Load()
     {

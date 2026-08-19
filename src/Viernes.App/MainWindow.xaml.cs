@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -58,8 +58,8 @@ public partial class MainWindow : Window
     /// <see cref="OrbNight.For"/> sube de 0 a 1 en la rampa de 22 a 23 y baja de 1 a 0 en la de 5 a
     /// 6 —una hora cada una—, así que el paso más grande que puede dar el modo madrugada entre una
     /// lectura y la siguiente es 2/60, un 3,3 %, y a ojo eso no existe. Preguntarlo por cuadro sería
-    /// leer el registro de Windows sesenta veces por segundo para enterarse de algo que cambia dos
-    /// veces al día.
+    /// leer el registro de Windows una vez por cuadro para enterarse de algo que cambia dos veces
+    /// al día.
     /// </remarks>
     private static readonly TimeSpan AmbienceInterval = TimeSpan.FromMinutes(2);
 
@@ -76,6 +76,10 @@ public partial class MainWindow : Window
     private bool _fastMove;
     private bool _hidingToTray;
     private Rect _workArea = Rect.Empty;
+
+    /// <summary>El escritorio entero, para saber por dónde se pasa de una pantalla a la otra.</summary>
+    /// <remarks>Se remide junto con el área útil y por los mismos motivos. Ver <see cref="CachedWorkArea"/>.</remarks>
+    private DesktopField? _field;
     private int _workAreaAge;
     private double _writtenLeft = double.NaN;
     private double _writtenTop = double.NaN;
@@ -95,7 +99,7 @@ public partial class MainWindow : Window
     /// </summary>
     /// <remarks>
     /// Se guarda en vez de buscarlo en <c>OrbHost.Children</c> cada cuadro: recorrer una colección
-    /// de WPF sesenta veces por segundo asigna un enumerador cada vez para encontrar siempre al
+    /// de WPF una vez por cuadro asigna un enumerador cada vez para encontrar siempre al
     /// mismo hijo. Lo escribe <see cref="ApplyOrbShape"/>, que es el único que cambia el cuerpo.
     /// </remarks>
     private IOrbMotionSink? _orbMotion;
@@ -116,11 +120,22 @@ public partial class MainWindow : Window
     private int _stableTicks;
 
     /// <summary>
+    /// Si en el cuadro anterior el orbe ya estaba quieto. Ver <see cref="UpdateResting"/>.
+    /// </summary>
+    /// <remarks>
+    /// Arranca en <c>false</c> aunque el orbe todavía no se haya movido: así el primer cuadro cuenta
+    /// como «acaba de quedarse quieto» y anota la posición <em>restaurada y recortada</em>. Sin eso,
+    /// un archivo guardado con una posición que ya no entra —porque desenchufaste el monitor donde
+    /// estaba— se queda escrito así hasta que alguien mueva el orbe a mano.
+    /// </remarks>
+    private bool _atRest;
+
+    /// <summary>
     /// Cada cuánto se pregunta si lo que está adelante ocupa el monitor entero.
     /// </summary>
     /// <remarks>
     /// Un segundo. Son tres llamadas al sistema y una comparación de rectángulos, y entrar o salir de
-    /// pantalla completa es algo que el usuario hace, no algo que pasa sesenta veces por segundo.
+    /// pantalla completa es algo que el usuario hace, no algo que pasa una vez por cuadro.
     /// <para>
     /// Se eligió preguntar y no engancharse a <c>SetWinEventHook</c> por costo de riesgo, no de CPU:
     /// un <em>hook</em> global mete una llamada de vuelta del sistema en el hilo de la interfaz, y si
@@ -228,9 +243,85 @@ public partial class MainWindow : Window
         AddPanelItem(menu, "Muestras", PanelKind.Muestras);
         AddPanelItem(menu, "Música", PanelKind.Musica);
         AddSeparator(menu);
+
+        // Los dos son excluyentes y los dos muestran una marca, así que se ve cuál está puesto sin
+        // tener que probarlo. Se pidieron textuales: «que en el menú desplegable que se abre con el
+        // click derecho sobre el orbe esté la opción de elegir seguir al usuario o quedarse fijo».
+        _stayPutItem = AddCheckedItem(
+            menu,
+            "Quedarme donde me dejes",
+            () => SetFollowActiveMonitor(false));
+        _followItem = AddCheckedItem(
+            menu,
+            "Seguirte entre pantallas",
+            () => SetFollowActiveMonitor(true));
+
+        // La marca se refresca al abrir el menú y no una sola vez al armarlo: la preferencia se lee
+        // del archivo después de que esto corre —InitializeAsync llega más tarde—, así que un tilde
+        // puesto acá diría lo de fábrica para siempre.
+        menu.Opened += (_, _) => RefreshFollowItems();
+
+        AddSeparator(menu);
         AddSimpleItem(menu, "Guardarse en la bandeja", HideToTray);
 
         OrbDragSurface.ContextMenu = menu;
+        RefreshFollowItems();
+    }
+
+    private MenuItem? _followItem;
+    private MenuItem? _stayPutItem;
+
+    private void RefreshFollowItems()
+    {
+        var follows = _viewModel.FollowsActiveMonitor;
+        if (_followItem is not null)
+        {
+            _followItem.IsChecked = follows;
+        }
+
+        if (_stayPutItem is not null)
+        {
+            _stayPutItem.IsChecked = !follows;
+        }
+    }
+
+    /// <summary>
+    /// Cambia la preferencia y deja el vigía como corresponde, sin esperar a que se guarde.
+    /// </summary>
+    /// <remarks>
+    /// El reloj se arranca y se para acá mismo y no dentro de la tarea: guardar el archivo es una
+    /// operación de disco y el usuario acaba de elegir en un menú. Que la opción tarde en surtir
+    /// efecto lo que tarde el disco sería el mismo problema que tiene una opción que no dice en qué
+    /// estado está.
+    /// </remarks>
+    private void SetFollowActiveMonitor(bool follow)
+    {
+        ApplyFollowPreference(follow);
+        RefreshFollowItems();
+
+        // Nada de async void en un manejador: se lanza y se le miran las fallas por continuación.
+        // Este proyecto ya se tumbó una vez con un async void en un evento.
+        _ = _viewModel.SetFollowActiveMonitorAsync(follow, CancellationToken.None)
+            .ContinueWith(
+                task => System.Diagnostics.Debug.WriteLine(
+                    $"No se pudo guardar el seguimiento: {task.Exception?.GetType().Name}"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    private MenuItem AddCheckedItem(ContextMenu menu, string header, Action action)
+    {
+        var item = new MenuItem
+        {
+            Header = header,
+            IsCheckable = false,
+            Style = (Style)FindResource("ItemTildadoDelMenu")
+        };
+
+        item.Click += (_, _) => action();
+        menu.Items.Add(item);
+        return item;
     }
 
     private void AddPanelItem(ContextMenu menu, string header, PanelKind kind)
@@ -499,7 +590,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dt = _lastRender == default ? 1.0 / 60 : (rendering.RenderingTime - _lastRender).TotalSeconds;
+        // El primer cuadro no se integra: se usa para poner el reloj en hora y nada más. Acá había
+        // un 1,0/60 supuesto, que es exactamente la clase de número que este archivo no puede tener:
+        // medido en esta máquina el cuadro dura 5,56 ms —180 Hz—, así que ese primer paso era tres
+        // veces más largo que el real. Es un solo cuadro y casi no se ve, pero la regla es que nada
+        // suponga una frecuencia, y un cuadro que no se integra no supone ninguna.
+        if (_lastRender == default)
+        {
+            _lastRender = rendering.RenderingTime;
+            return;
+        }
+
+        var dt = (rendering.RenderingTime - _lastRender).TotalSeconds;
         _lastRender = rendering.RenderingTime;
         if (dt <= 0)
         {
@@ -510,7 +612,12 @@ public partial class MainWindow : Window
 
         // Mudándose, el orbe puede estar en cualquiera de los dos monitores. Recortarlo al de origen
         // cuadro a cuadro es lo que impedía que el viaje arrancara.
-        var bounds = _travel?.Bounds ?? ShellLayout.OrbBounds(workArea);
+        //
+        // Y fuera de la mudanza, los límites no son los del monitor sino los del monitor con los
+        // bordes compartidos abiertos: el borde que une las dos pantallas no es una pared. Quién
+        // decide eso, y por qué se decide en la posición donde el orbe está cruzando y no para el
+        // borde entero, está en DesktopField.
+        var bounds = _travel?.Bounds ?? Field().Reach(workArea, _motion.Position);
 
         // Mientras se arrastra no se adopta ni se recorta. Adoptar sería leer la posición que este
         // mismo bucle acaba de escribir, y recortar contra el área útil le sacaría al resorte
@@ -528,6 +635,7 @@ public partial class MainWindow : Window
             SettleTravel();
         }
 
+        UpdateResting();
         WriteWindowPosition();
 
         // La costura. El cuerpo se entera de que se está moviendo acá y en ningún otro lado: de esto
@@ -551,19 +659,112 @@ public partial class MainWindow : Window
     /// El área útil, medida una vez cada veinte cuadros.
     /// </summary>
     /// <remarks>
-    /// Averiguarla cuesta tres llamadas al sistema —el handle, el monitor, el DPI— y en el bucle de
-    /// cuadro eso es sesenta veces por segundo para un dato que cambia cuando enchufás un monitor.
-    /// Un tercio de segundo de desfase no se nota; lo que sí se nota es el orbe pagando ese peaje.
+    /// Averiguarla cuesta tres llamadas al sistema —el handle, el monitor, el DPI— por cuadro, para
+    /// un dato que cambia cuando enchufás un monitor. <b>Y un cuadro no dura lo que uno cree</b>:
+    /// medido acá con <c>--medir-fluidez</c>, 5,56 ms —180 Hz—, así que uno de cada veinte son 111
+    /// ms y no el tercio de segundo que decía este comentario cuando se suponían 60.
+    /// <para>
+    /// Ese desfase es aceptable para el área útil —cambia cuando movés la barra de tareas— pero no
+    /// para saber en qué monitor está el orbe: por eso además se remide apenas el centro del orbe se
+    /// va del rectángulo que dice la caché, que cuesta un <c>Contains</c>.
+    /// </para>
     /// </remarks>
     private Rect CachedWorkArea()
     {
-        if (_workAreaAge++ % 20 == 0 || _workArea.IsEmpty)
+        // Se remide antes de tiempo si el orbe se fue del monitor que decía la caché. Sin esto, un
+        // cruce de pantalla se seguía resolviendo durante hasta veinte cuadros con el área útil del
+        // monitor de donde salió, y a 180 Hz veinte cuadros son 111 ms: el tiempo justo para que el
+        // desplegable eligiera el lado con la pantalla equivocada. Cuesta un Contains por cuadro.
+        if (_workAreaAge++ % 20 == 0 || _workArea.IsEmpty || !_workArea.Contains(OrbCentre()))
         {
+            var dpi = Dpi();
             _workArea = CurrentWorkArea;
+            _field = DesktopField.Measure(dpi.DpiScaleX, dpi.DpiScaleY);
         }
 
         return _workArea;
     }
+
+    /// <summary>
+    /// Cuando el orbe termina de moverse, anota dónde quedó y en qué pantalla.
+    /// </summary>
+    /// <remarks>
+    /// Hasta acá, en qué monitor vivía el orbe sólo se escribía cuando la mudanza automática lo
+    /// llevaba: si lo cruzabas a mano —arrastrándolo por el borde compartido, o tirándolo para que
+    /// pase de largo— el orbe terminaba en la otra pantalla y <c>_currentMonitor</c> seguía diciendo
+    /// la de antes. Con eso, la memoria por monitor guardaba la posición nueva bajo la clave vieja,
+    /// y el vigía —cuando está encendido— comparaba el cursor contra una pantalla donde ya no hay
+    /// nada.
+    /// <para>
+    /// Se hace en el flanco y no por cuadro: <see cref="Services.MonitorSlots.Remember"/> escribe un
+    /// archivo, y escribirlo 180 veces por segundo sería moler el disco para anotar lo mismo.
+    /// </para>
+    /// </remarks>
+    private void UpdateResting()
+    {
+        var resting = _travel is null && _motion.IsAtRest;
+        if (resting == _atRest)
+        {
+            return;
+        }
+
+        _atRest = resting;
+        if (!resting)
+        {
+            return;
+        }
+
+        var key = Field().KeyAt(_motion.Position);
+        if (!string.Equals(key, _currentMonitor, StringComparison.Ordinal))
+        {
+            Diagnostics.RuntimeTrace.Write(
+                "monitor.cruce",
+                $"a mano · {_currentMonitor} → {key} en ({_motion.Position.X:0};{_motion.Position.Y:0})");
+            _currentMonitor = key;
+        }
+
+        _monitors.Remember(key, _motion.Position);
+
+        // Y también la posición de arranque, que hasta acá se guardaba en EndDrag: o sea en el
+        // mismo cuadro en que se suelta, ANTES de que el vuelo y el imán terminen de acomodarlo.
+        // Medido soltándolo contra el borde derecho: window.json quedaba con 1863 —la posición del
+        // dedo, fuera de los límites— y el orbe terminaba en 1792. No se veía porque al arrancar se
+        // recorta igual, pero lo que se guardaba no era dónde quedó.
+        SaveOrbPlacement();
+    }
+
+    /// <summary>El escritorio medido, midiéndolo si todavía no lo estaba.</summary>
+    private DesktopField Field()
+    {
+        if (_field is not null)
+        {
+            return _field;
+        }
+
+        var dpi = Dpi();
+        return _field = DesktopField.Measure(dpi.DpiScaleX, dpi.DpiScaleY);
+    }
+
+    private DpiScale Dpi() => VisualTreeHelper.GetDpi(this);
+
+    /// <summary>
+    /// El centro del orbe: por dónde se retira al esconderse y en qué monitor cae.
+    /// </summary>
+    /// <remarks>
+    /// Estaba escrito a mano en cinco lugares —esconderse, pantalla completa, retraer la píldora,
+    /// guardarse en la bandeja y saber en qué pantalla está—, todos con la misma cuenta. Cinco
+    /// copias de una cuenta son cinco lugares donde arreglarla el día que el orbe deje de medir 108.
+    /// </remarks>
+    private Point OrbCentre() => new(
+        _motion.Position.X + (ShellLayout.OrbSize / 2),
+        _motion.Position.Y + (ShellLayout.OrbSize / 2));
+
+    // En qué monitor está el orbe lo contesta DesktopField.KeyAt, que ya tiene medidas las áreas
+    // útiles en unidades de WPF y mide con el CENTRO del orbe. Antes eso era
+    // MonitorSlots.MonitorAt(_motion.Position): recibía unidades de WPF y se las pasaba a
+    // Screen.FromPoint como si fueran píxeles físicos —en un escritorio escalado contestaba el
+    // monitor de al lado— y además preguntaba por la esquina, así que un orbe apoyado contra la
+    // costura ya se declaraba del otro lado estando entero de éste.
 
     /// <summary>
     /// Si alguien más movió la ventana —el vigía de monitores, la llegada desde la bandeja—, la
@@ -808,20 +1009,30 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Lleva el orbe al monitor donde estás trabajando, sin perseguir el mouse.
+    /// Prepara el vigía que lleva el orbe al monitor donde estás trabajando. <b>Arranca parado.</b>
     /// </summary>
     /// <remarks>
-    /// Se mide el monitor bajo el cursor, pero no se salta apenas cambia: hay que quedarse ahí un
-    /// rato. Cruzar la pantalla para llegar a un botón no es «me mudé de monitor», y un orbe que
-    /// sigue al mouse en tiempo real es un moscardón.
+    /// Esto era el comportamiento y ahora es una opción, apagada de fábrica. El usuario lo dijo
+    /// así: «no debe siempre ir a donde está el mouse, salvo que el usuario presione en la otra
+    /// pantalla; actualmente sigue el mouse, si se va de la pantalla ella también, incluso si no se
+    /// presiona». El vigía no se borró —quien lo quiera lo prende desde el menú del orbe— pero deja
+    /// de ser lo que pasa sin que nadie lo pida.
     /// <para>
-    /// La posición de cada monitor se recuerda por separado. Y no se mueve mientras hay un panel
-    /// abierto: sería sacarle de las manos algo que estás leyendo.
+    /// Con la opción apagada el orbe se muda igual, pero sólo cuando el usuario <em>actúa</em>:
+    /// cuando lo llama —y ahí el cursor sí dice dónde está, porque acaba de hablarle— y cuando lo
+    /// arrastra con la mano.
+    /// </para>
+    /// <para>
+    /// Encendido, se mide el monitor bajo el cursor pero no se salta apenas cambia: hay que quedarse
+    /// ahí un rato. Cruzar la pantalla para llegar a un botón no es «me mudé de monitor», y un orbe
+    /// que sigue al mouse en tiempo real es un moscardón. La posición de cada monitor se recuerda
+    /// por separado, y no se mueve mientras hay un panel abierto: sería sacarte de las manos algo
+    /// que estás leyendo.
     /// </para>
     /// </remarks>
     private void StartFollowingActiveMonitor()
     {
-        _currentMonitor = Services.MonitorSlots.MonitorAt(_motion.Position).Key;
+        _currentMonitor = Field().KeyAt(_motion.Position);
 
         _followTimer = new System.Windows.Threading.DispatcherTimer
         {
@@ -839,7 +1050,8 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var (key, _) = Services.MonitorSlots.MonitorUnderCursor();
+            var screen = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position);
+            var key = Services.MonitorSlots.KeyFor(screen);
             if (key == _currentMonitor)
             {
                 _stableTicks = 0;
@@ -855,10 +1067,93 @@ public partial class MainWindow : Window
 
             _stableTicks = 0;
             _monitors.Remember(_currentMonitor, _motion.Position);
-            MoveToMonitor(key, System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position));
+            MoveToMonitor(key, screen);
         };
 
-        _followTimer.Start();
+        ApplyFollowPreference(_viewModel.FollowsActiveMonitor);
+    }
+
+    /// <summary>Prende o apaga el vigía según la preferencia.</summary>
+    /// <remarks>
+    /// El reloj se para de verdad y no se le pone una guarda adentro del tic: un
+    /// <c>DispatcherTimer</c> parado no despierta al hilo de la interfaz cada 700 ms para preguntar
+    /// algo cuya respuesta no se va a usar, y esta aplicación está encendida todo el día.
+    /// </remarks>
+    private void ApplyFollowPreference(bool follow)
+    {
+        if (_followTimer is null)
+        {
+            return;
+        }
+
+        _stableTicks = 0;
+        if (follow)
+        {
+            _followTimer.Start();
+        }
+        else
+        {
+            _followTimer.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Lleva el orbe al monitor donde está el cursor. Es la mudanza que <b>sí</b> pidió el usuario.
+    /// </summary>
+    /// <param name="teleport">
+    /// Con <c>true</c> aparece del otro lado sin viajar. Es lo que corresponde cuando venía guardado
+    /// en la bandeja: ahí lo que se ve después es la llegada, y un viaje entre pantallas seguido de
+    /// una llegada desde la bandeja son dos animaciones peleándose por la misma posición.
+    /// </param>
+    /// <remarks>
+    /// Vivía en <c>App</c>, que movía <c>Left</c> y <c>Top</c> de la ventana a mano con una posición
+    /// sacada de su propia copia de <c>MonitorSlots</c>. Eran dos copias del mismo archivo con dos
+    /// significados distintos —allá la esquina de la ventana, acá la del orbe— sobre las mismas
+    /// claves: la ventana mide 528 de ancho y el orbe 108, así que restaurar una con la otra dejaba
+    /// el orbe corrido cientos de píxeles y el recorte por cuadro lo acomodaba después. Ahora hay
+    /// una sola memoria y la mueve la única clase que sabe dónde está el orbe.
+    /// </remarks>
+    internal void MoveToCursorMonitor(bool teleport)
+    {
+        try
+        {
+            var screen = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position);
+            var key = Services.MonitorSlots.KeyFor(screen);
+            if (string.Equals(key, _currentMonitor, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // Dónde estaba, antes de perderlo: si no se anota acá, volver a esta pantalla la
+            // encuentra sin historial y el orbe aparece en el rincón de abajo a la derecha.
+            _monitors.Remember(_currentMonitor, _motion.Position);
+
+            if (!teleport)
+            {
+                MoveToMonitor(key, screen);
+                return;
+            }
+
+            var work = ToLogical(screen.WorkingArea);
+            var cell = ShellLayout.OrbBounds(work);
+            var slot = _monitors.SlotFor(key, work, new Size(ShellLayout.OrbSize, ShellLayout.OrbSize));
+            var destination = new Point(
+                Math.Clamp(slot.X, cell.Left, cell.Right),
+                Math.Clamp(slot.Y, cell.Top, cell.Bottom));
+
+            _currentMonitor = key;
+            _motion.Teleport(destination);
+            ApplySide(ShellLayout.ShouldOpenRight(destination, work), force: false);
+            WriteWindowPosition();
+            SaveOrbPlacement();
+            Diagnostics.RuntimeTrace.Write(
+                "monitor.mudanza",
+                $"lo llamaste desde la otra pantalla · aparece en ({destination.X:0};{destination.Y:0})");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Si la topología de pantallas cambió justo ahora, quedarse donde está es aceptable.
+        }
     }
 
     /// <summary>
@@ -922,9 +1217,7 @@ public partial class MainWindow : Window
     /// </remarks>
     private void LeaveByTheEdge(Point destination, Rect targetWorkArea)
     {
-        var centre = new Point(
-            _motion.Position.X + ShellLayout.OrbSize / 2,
-            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        var centre = OrbCentre();
         _presence.Esconder(centre, CurrentWorkArea);
 
         _crossTimer?.Stop();
@@ -981,7 +1274,7 @@ public partial class MainWindow : Window
         // pantalla donde no hay nada y no vuelve a intentar la mudanza que quedó a medias.
         if (!arrived)
         {
-            _currentMonitor = Services.MonitorSlots.MonitorAt(_motion.Position).Key;
+            _currentMonitor = Field().KeyAt(_motion.Position);
         }
 
         SaveOrbPlacement();
@@ -1109,9 +1402,7 @@ public partial class MainWindow : Window
     {
         _viewModel.ClosePanel();
 
-        var centre = new Point(
-            _motion.Position.X + ShellLayout.OrbSize / 2,
-            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        var centre = OrbCentre();
         _presence.Esconder(centre, CurrentWorkArea);
         _hiddenByFullScreen = true;
 
@@ -1179,9 +1470,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var centre = new Point(
-            _motion.Position.X + ShellLayout.OrbSize / 2,
-            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        var centre = OrbCentre();
         _presence.Esconder(centre, CurrentWorkArea);
         _hiddenByFullScreen = true;
         Diagnostics.RuntimeTrace.Write(
@@ -1319,9 +1608,7 @@ public partial class MainWindow : Window
 
         if (_fullScreen)
         {
-            var centre = new Point(
-                _motion.Position.X + ShellLayout.OrbSize / 2,
-                _motion.Position.Y + ShellLayout.OrbSize / 2);
+            var centre = OrbCentre();
             _presence.Esconder(centre, CurrentWorkArea);
             _hiddenByFullScreen = true;
 
@@ -1420,6 +1707,13 @@ public partial class MainWindow : Window
         else if (e.PropertyName == nameof(MainViewModel.OrbShape))
         {
             ApplyOrbShape(_viewModel.OrbShape);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.FollowsActiveMonitor))
+        {
+            // Por acá entra la preferencia leída del archivo, que llega bastante después de que la
+            // ventana se dibujó: InitializeAsync corre en Window_Loaded y el reloj ya está armado.
+            ApplyFollowPreference(_viewModel.FollowsActiveMonitor);
+            RefreshFollowItems();
         }
         else if (e.PropertyName == nameof(MainViewModel.IsConfirmationVisible) &&
             _viewModel.IsConfirmationVisible)
@@ -1667,9 +1961,7 @@ public partial class MainWindow : Window
         _viewModel.ClosePanel();
         SaveOrbPlacement();
 
-        var centre = new Point(
-            _motion.Position.X + ShellLayout.OrbSize / 2,
-            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        var centre = OrbCentre();
         _presence.Esconder(centre, CurrentWorkArea);
         _hidingToTray = true;
     }
@@ -1731,9 +2023,7 @@ public partial class MainWindow : Window
                 : System.Windows.Forms.Screen.FromHandle(handle);
         }
 
-        return ScreenAt(new Point(
-            _motion.Position.X + (ShellLayout.OrbSize / 2),
-            _motion.Position.Y + (ShellLayout.OrbSize / 2)));
+        return ScreenAt(OrbCentre());
     }
 
     /// <summary>En qué monitor cae un punto. <c>Screen</c> habla en píxeles físicos; el orbe, no.</summary>

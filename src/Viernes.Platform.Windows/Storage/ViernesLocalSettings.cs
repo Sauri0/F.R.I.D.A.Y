@@ -60,6 +60,22 @@ public sealed record ViernesLocalSettings
     /// </summary>
     public string OrbShape { get; init; } = "Gota";
 
+    /// <summary>
+    /// Si el orbe se muda solo al monitor donde estás trabajando, mirando dónde está el cursor.
+    /// </summary>
+    /// <remarks>
+    /// <b>Arranca apagada</b>, y eso es la decisión, no el valor por descuido. Encendida, el orbe
+    /// mira cada 700 ms en qué pantalla está el mouse y a los tres tics seguidos en otra se muda,
+    /// sin que el usuario haya pedido nada: «si se va de la pantalla ella también, incluso si no se
+    /// presiona». Un objeto que se muda solo mientras mirás otra cosa es exactamente la queja que
+    /// originó esta preferencia, así que lo que no sorprende es el valor de fábrica.
+    /// <para>
+    /// Apagada, el orbe igual se muda cuando el usuario <em>actúa</em>: cuando lo llama —ahí el
+    /// cursor sí dice dónde está, porque acaba de hablarle— y cuando lo arrastra con la mano.
+    /// </para>
+    /// </remarks>
+    public bool FollowActiveMonitor { get; init; }
+
     public string RecognitionCulture { get; init; } = "es-AR";
 
     public string? PreferredVoiceName { get; init; }
