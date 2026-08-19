@@ -65,59 +65,82 @@ Se ejecutó un smoke local sin OpenRouter ni STT externo:
 
 Esto prueba captura/decodificación/transcripción local de extremo a extremo, pero **no prueba precisión suficiente**. Los errores son evidencia para evaluar el modelo `small`, parámetros, micrófonos y voces reales en español rioplatense. La latencia tampoco es un benchmark transferible a otro hardware.
 
-## Wake word
+## El oído continuo
 
-Defaults:
+**El nombre alcanza y va donde caiga en la frase.** No hay que saludar ni esperar.
 
-```text
-Viernes
-Hola Viernes
-```
+Antes el micrófono se lo pasaban de mano en mano: SAPI oía el nombre, soltaba el dispositivo, se
+esperaban 220 ms a que el driver lo liberara, y recién ahí Whisper empezaba a grabar. Todo lo dicho
+**antes** del nombre no lo tenía nadie, y por eso había que decir «Hola Viernes», esperar, y recién
+después hablar.
 
-`WakeWordServiceOptions` acepta de una a ocho frases normalizadas, de 2 a 40 caracteres, cultura `es-AR` y confianza mínima `0.78`. `ViernesLocalSettings` puede persistir esas frases sin secretos.
+Ahora el micrófono lo abre una sola cosa y el audio se reparte a la vez a tres lugares:
 
-Opciones de entorno para pruebas:
+1. una **ventana rodante de 10 s**;
+2. el reconocedor del nombre;
+3. el detector de voz.
+
+Cuando el nombre aparece en cualquier posición, se pega lo anterior adelante y se manda la frase
+entera. El recorte **no** son siempre los diez segundos: llega hasta donde arrancó esa tanda de habla,
+así que con la tele puesta no le mete diez segundos de tele adelante del pedido.
+
+### El falso positivo dejó de importar
+
+Se exigían dos palabras porque «el viernes tengo turno» disparaba con confianza 0,69 —más alta que
+casi todas las detecciones reales, así que ningún umbral los separaba—.
+
+Al dispararse ya no contesta «¿sí?»: manda la frase al modelo, que lee «el viernes tengo turno», ve
+que no es un pedido y no hace nada. El falso positivo sigue existiendo y dejó de molestar. **El
+problema nunca fue la detección: era el saludo.**
+
+### El detector de voz
+
+Silero por ONNX Runtime, cargado por reflexión para no meter 120 MB de nativos en el instalador, con
+la heurística de siempre como respaldo si falta el modelo. El instalador lo baja; en el arranque la
+traza dice `vad.cargado` con cuál quedó y cuánto tardó.
+
+Medido con voz sintetizada:
+
+| Señal | Ventanas sobre umbral | Pico |
+|---|---|---|
+| voz | 73 % | 1,000 |
+| golpe grave | 0 % | 0,012 |
+| aplauso | 0 % | 0,028 |
+
+La heurística de respaldo también mejoró, y por una razón medida: un golpe que resuena en 60 Hz cruza
+el cero con tasa 0,0075, o sea **adentro** de la banda de voz. La tasa de cruces no puede
+distinguirlo; la inclinación espectral sí.
+
+### El umbral sale del micrófono real, no de una constante
+
+`NoiseFloorTracker` guarda el perfil medido en el equipo del autor y **su multiplicador es 4, no 8**.
+Con 8 el umbral daba 0,90 —por encima del nivel *medio* de su voz— y cruzaban 20 de 267 buffers:
+Whisper recibía casi puro silencio y devolvía vacío. Ese fue el bug de «no me escucha», y estuvo todo
+el tiempo del lado del código.
+
+Antes de mover cualquiera de esas constantes hay que correr el banco (`Viernes.exe --medir`) y
+comparar contra el perfil que está escrito ahí. **Un solo número medido una sola vez no alcanza para
+mover una constante**: dos vueltas enteras se perdieron por eso.
+
+### Configuración
 
 ```text
 VIERNES_WAKE_ENABLED=true|false
 VIERNES_WAKE_PHRASES=Viernes;Hola Viernes
 VIERNES_STT_PROVIDER=sapi
-VIERNES_WHISPER_MODEL_PATH=%LOCALAPPDATA%\Viernes\Models\Whisper\ggml-base.bin
+VIERNES_WHISPER_MODEL_PATH=%LOCALAPPDATA%\Viernes\Models\Whisper\ggml-small.bin
 ```
 
-Omitir `VIERNES_STT_PROVIDER` conserva Whisper-first. La ruta Whisper se restringe por defecto al directorio local de Viernes.
+Las frases siguen siendo de una a ocho, normalizadas, de 2 a 40 caracteres, cultura `es-AR`. Omitir
+`VIERNES_STT_PROVIDER` conserva Whisper-first, y la ruta se restringe por defecto al directorio local.
 
-El detector incluido usa SAPI con una gramática exacta y expone `IsDemoOnly = true` junto con un aviso de fiabilidad. Es una **demostración**, no un wake engine robusto. Puede fallar por ruido, distancia, acento, paquete de voz o micrófono, y también producir activaciones falsas.
+Push-to-talk sigue existiendo como alternativa.
 
-Un reemplazo de producción debe medirse con:
+### Lo que todavía no está medido
 
-- falsos positivos por hora;
-- falsos negativos por hablante/frase;
-- español rioplatense y distintas voces;
-- ruido doméstico, TV, música y conversaciones;
-- distancia, tipo de micrófono y CPU;
-- tiempo de activación y consumo sostenido.
-
-PTT siempre permanece como alternativa.
-
-## Handoff wake → frase
-
-`WakeWordRecognitionCoordinator` sigue una regla estricta:
-
-1. comprueba que wake estaba escuchando;
-2. lo detiene y verifica que el micrófono se liberó;
-3. pide al proveedor STT una sola frase;
-4. cancela cualquier captura residual;
-5. reanuda wake sólo si antes correspondía y no está muted.
-
-Defaults de captura hands-free:
-
-- silencio inicial: `8 s`;
-- silencio final: `850 ms`;
-- duración máxima: `15 s`;
-- umbral energético Whisper: `0.018`.
-
-Ese umbral es un VAD simple de demostración y puede necesitar calibración; nunca se presenta como prueba de voz robusta.
+Nada de esto se probó contra una voz humana en el equipo del autor: los números de arriba salen de
+voz sintetizada y de bancos. Falta medir falsos positivos por hora en uso real, distintas voces y
+acentos, distancia y tipo de micrófono, y consumo sostenido.
 
 ## Indicadores y mute
 

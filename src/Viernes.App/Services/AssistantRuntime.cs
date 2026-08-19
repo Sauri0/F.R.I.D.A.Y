@@ -3574,7 +3574,12 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         AssistantVisualState.ProjectWaiting => "Un proyecto te está esperando",
         AssistantVisualState.Interrupted => "Me callo",
         AssistantVisualState.Deaf => "No te oigo",
-        AssistantVisualState.Unconfigured => "Falta la clave",
+        // Decía «Falta la clave», que es un diagnóstico y no una instrucción. Es el primer estado que
+        // ve alguien que recién instaló, y quedarse en el diagnóstico lo deja adivinando dónde va esa
+        // clave —no está en ningún archivo de la aplicación, vive en las variables de entorno de su
+        // cuenta de Windows, que es justamente el lugar donde nadie mira—. El instalador ya sabe
+        // ponerla, así que lo único que hace falta es nombrarlo.
+        AssistantVisualState.Unconfigured => "Falta la clave de OpenRouter · corré el instalador de nuevo para ponerla",
         AssistantVisualState.Offline => "Sin red",
         _ => "Disponible"
     };
