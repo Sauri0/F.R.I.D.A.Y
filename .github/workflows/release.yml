@@ -55,6 +55,26 @@ jobs:
           -p:DebugType=none
           --output publicado
 
+      # El conector va en la MISMA carpeta que la aplicación, no en una propia.
+      #
+      # Los dos comparten Core, Memory y Platform, y sobre todo comparten el runtime de .NET, que es
+      # lo que pesa. Publicados juntos, el conector agrega 5 MB sobre los 200 de la aplicación; en
+      # carpetas separadas agregaría 70. Cada ejecutable trae su propio .deps.json y su propio
+      # .runtimeconfig.json, así que conviven sin pisarse.
+      #
+      # Y va en el paquete porque si no, no existe: la documentación decía «dotnet run --project
+      # src/Viernes.Mcp», que sólo sirve si tenés el código. Quien instala desde una release no lo
+      # tiene, así que el conector era una función que sólo funcionaba para quien lo escribió.
+      - name: Publicar el conector, junto a la aplicación
+        run: >
+          dotnet publish src/Viernes.Mcp/Viernes.Mcp.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=false
+          -p:DebugType=none
+          --output publicado
+
       - name: Empaquetar
         shell: pwsh
         run: |

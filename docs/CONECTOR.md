@@ -9,35 +9,40 @@ Vive en `src/Viernes.Mcp`. El ejecutable se llama `viernes-mcp`.
 
 ## Cómo se agrega
 
+El conector viene **adentro de la instalación**, al lado de la aplicación. No hay que compilar nada.
+
 **Claude Code**, disponible en todos tus proyectos:
 
 ```
-claude mcp add -s user viernes -- dotnet run --project N:\Viernes\src\Viernes.Mcp
+claude mcp add -s user viernes -- %LOCALAPPDATA%\Viernes\app\viernes-mcp.exe
 ```
 
-`dotnet run` compila si hace falta y **no ensucia la salida estándar** —comprobado con una
-recompilación forzada en el medio de un saludo MCP—, así que sirve tal cual. Si preferís que arranque
-sin compilar nada, publicalo una vez:
-
-```
-dotnet publish N:\Viernes\src\Viernes.Mcp -c Release -o N:\Viernes\publicado\conector
-claude mcp add -s user viernes -- N:\Viernes\publicado\conector\viernes-mcp.exe
-```
-
-**Aplicación de Claude**, en `%APPDATA%\Claude\claude_desktop_config.json`:
+**Aplicación de Claude**, en `%APPDATA%\Claude\claude_desktop_config.json` —acá la ruta va entera,
+porque ese archivo no expande variables:
 
 ```json
 {
   "mcpServers": {
     "viernes": {
-      "command": "dotnet",
-      "args": ["run", "--project", "N:\\Viernes\\src\\Viernes.Mcp"]
+      "command": "C:\\Users\\TU-USUARIO\\AppData\\Local\\Viernes\\app\\viernes-mcp.exe"
     }
   }
 }
 ```
 
 Para comprobar que quedó: `claude mcp list`.
+
+<details>
+<summary>Desde el código, si estás trabajando en el repositorio</summary>
+
+```
+claude mcp add -s user viernes -- dotnet run --project N:\Viernes\src\Viernes.Mcp
+```
+
+`dotnet run` compila si hace falta y **no ensucia la salida estándar** —comprobado con una
+recompilación forzada en el medio de un saludo MCP—, así que sirve tal cual.
+
+</details>
 
 ## Qué trae
 

@@ -566,10 +566,17 @@ try {
     # Darlo de alta escribe en la configuración de Claude del usuario, que es de otra aplicación y no
     # de ésta. Un instalador que toca la configuración de un programa que no instaló es exactamente
     # lo que uno no espera que haga un instalador, por más que el comando sea de una línea.
-    Write-Host "   Y si usás Claude, $elegido se le puede enchufar: ver misiones, dejarle una" -ForegroundColor DarkGray
-    Write-Host '   pregunta, mirar tus proyectos. El comando está en docs/CONECTOR.md del' -ForegroundColor DarkGray
-    Write-Host '   repositorio. No lo damos de alta solo porque toca tu configuración de Claude.' -ForegroundColor DarkGray
-    Write-Host ''
+    $conector = Join-Path $Aplicacion 'viernes-mcp.exe'
+    if (Test-Path -LiteralPath $conector) {
+        Write-Host "   Y si usás Claude, $elegido se le puede enchufar —ver misiones, dejarle una" -ForegroundColor DarkGray
+        Write-Host '   pregunta, mirar tus proyectos— con este comando:' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host "     claude mcp add -s user viernes -- $conector" -ForegroundColor Gray
+        Write-Host ''
+        Write-Host '   Corrélo vos: da de alta el conector en tu configuración de Claude, que es de' -ForegroundColor DarkGray
+        Write-Host '   otra aplicación y no de ésta.' -ForegroundColor DarkGray
+        Write-Host ''
+    }
 
     if (-not $Nombre) {
         $abrir = Read-Host '  ¿Lo abro ahora? (S/n)'
