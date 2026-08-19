@@ -41,6 +41,28 @@ public sealed class UtteranceTranscriptTests
         Assert.Equal(
             "Estaba pensando en el asado. Che Viernes, anotá que falta carbón.",
             partes.Full);
+
+        // Y al modelo va marcado. La pantalla dibujaba el tramo rescatado al 40 % —porque no se lo
+        // dijeron a ella— pero al modelo le llegaba pegado al pedido, indistinguible. La ventana
+        // rodante levanta lo que haya sonado en el cuarto: una llamada, alguien más hablando, la
+        // tele. Entregar eso como si fuera un pedido es pedirle que obedezca algo que nadie le dijo.
+        Assert.Equal(
+            "(venías diciendo, sin hablarle a ella: «Estaba pensando en el asado.») " +
+            "Che Viernes, anotá que falta carbón.",
+            partes.ForModel);
+    }
+
+    [Fact]
+    public void SinNadaRescatado_LoQueVaAlModeloEsElPedidoYNadaMas()
+    {
+        // El caso normal —la nombran primero— no lleva ninguna marca. Envolver siempre agregaría
+        // ruido en todos los turnos para cubrir el que casi nunca pasa.
+        var partes = UtteranceTranscript.Split(
+            [Tramo("Viernes, poné música.", 0, 2.0)],
+            preRoll: TimeSpan.Zero);
+
+        Assert.Equal(string.Empty, partes.Recovered);
+        Assert.Equal("Viernes, poné música.", partes.ForModel);
     }
 
     [Fact]

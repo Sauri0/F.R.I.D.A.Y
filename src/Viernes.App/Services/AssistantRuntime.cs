@@ -3252,8 +3252,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             // conversación— y dándola por abierta de antemano el finally no entraba en la rama que
             // reabre el oído: el micrófono del wake quedaba cerrado por un PauseWakeWordAsync que
             // nadie deshacía, y el orquestador creyendo que seguía escuchando.
+            // Al modelo va la versión marcada y no la plana: lo que se rescató de la ventana rodante
+            // se le entrega como contexto, no como pedido. Ver SplitUtterance.ForModel.
             abrio = await StartConversationAsync(
-                soloLlamado ? null : partes.Full,
+                soloLlamado ? null : partes.ForModel,
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

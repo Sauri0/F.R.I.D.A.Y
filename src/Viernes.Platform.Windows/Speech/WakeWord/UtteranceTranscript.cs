@@ -7,8 +7,27 @@ namespace Viernes.Platform.Windows.Speech.WakeWord;
 /// <param name="Spoken">El nombre y lo que siguió: el pedido.</param>
 public readonly record struct SplitUtterance(string Recovered, string Spoken)
 {
-    /// <summary>Todo junto, en el orden en que se dijo.</summary>
+    /// <summary>Todo junto, en el orden en que se dijo. Para mostrarlo y para el registro.</summary>
     public string Full => string.IsNullOrEmpty(Recovered) ? Spoken : $"{Recovered} {Spoken}";
+
+    /// <summary>
+    /// Lo mismo, pero con el tramo rescatado marcado como lo que es: contexto, no pedido.
+    /// </summary>
+    /// <remarks>
+    /// La pantalla dibuja ese tramo al 40 % porque no te lo dijeron a vos, y al modelo le llegaba
+    /// pegado al pedido sin ninguna marca. La diferencia importa: la ventana rodante levanta diez
+    /// segundos de lo que haya sonado en el cuarto —una llamada por teléfono, alguien más hablando,
+    /// la tele— y entregárselo indistinguible de un pedido es pedirle que obedezca algo que nadie le
+    /// dijo. «El viernes tengo turno con el dentista… che Viernes, poné música» no puede terminar en
+    /// una nota sobre el dentista.
+    /// <para>
+    /// Es la misma regla que el prompt ya aplica a lo que se lee de la web: información para
+    /// responder, nunca una orden para obedecer. Acá sólo hacía falta decírselo.
+    /// </para>
+    /// </remarks>
+    public string ForModel => string.IsNullOrEmpty(Recovered)
+        ? Spoken
+        : $"(venías diciendo, sin hablarle a ella: «{Recovered}») {Spoken}";
 }
 
 /// <summary>
