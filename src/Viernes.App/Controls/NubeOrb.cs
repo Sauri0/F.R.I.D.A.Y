@@ -89,10 +89,28 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
     private long _lastTicks;
     private bool _isRunning;
 
+    /// <summary>Quién decide qué se muestra. Ver <see cref="Channel"/>.</summary>
+    private OrbStateChannel _channel = new();
+
+    private readonly OrbTransitionClock _transition = new();
+
+    /// <summary>El perfil desde el que sale la transición en vuelo. Es lo que se veía al arrancarla.</summary>
     private OrbStateProfile _from = OrbPalette.For(AssistantVisualState.Idle);
-    private OrbStateProfile _to = OrbPalette.For(AssistantVisualState.Idle);
-    private double _transition = 1.0;
-    private bool _capacityChange;
+
+    /// <summary>El perfil que se está dibujando este cuadro, ya mezclado.</summary>
+    private OrbStateProfile _profile = OrbPalette.For(AssistantVisualState.Idle);
+
+    private AssistantVisualState _shown = AssistantVisualState.Idle;
+    private int _moodToken;
+
+    /// <summary>Cuánto entró la antigüedad de la pregunta sin contestar, de 0 a 1.</summary>
+    private double _age;
+
+    /// <summary>
+    /// El cero del reloj de la voz. Sólo lo mueve una transición encadenada, y es lo que hace que la
+    /// primera onda de la voz caiga exactamente en el cambio de estado.
+    /// </summary>
+    private double _voiceEpoch;
 
     /// <summary>Escala del cuerpo entero y su velocidad: un resorte, no una animación.</summary>
     private double _scale = 1.0;
@@ -227,37 +245,34 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         set => SetValue(NightModeProperty, value);
     }
 
+    /// <summary>
+    /// El canal que arbitra estados y ánimos. Se puede reemplazar por uno compartido.
+    /// </summary>
+    /// <remarks>
+    /// Por omisión cada cuerpo tiene el suyo, así que funciona sin cablear nada. Si la píldora y el
+    /// orbe tienen que decir exactamente lo mismo en el mismo cuadro —y tienen que decirlo—, hay que
+    /// pasarles el mismo canal desde el shell. Es también por donde entra la antigüedad de la
+    /// pregunta (<see cref="OrbStateChannel.WaitingAge"/>) y el aviso de reintento del runtime
+    /// (<see cref="OrbStateChannel.ReportRetry"/>).
+    /// </remarks>
+    internal OrbStateChannel Channel
+    {
+        get => _channel;
+        set
+        {
+            _channel = value;
+            _moodToken = value.MoodToken;
+        }
+    }
+
     /// <inheritdoc />
-    public void ShowMood(OrbMood mood) => _moods.Trigger(mood);
+    public void ShowMood(OrbMood mood) => _channel.RequestMood(mood);
 
     private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        var orb = (NubeOrb)d;
-        var next = (AssistantVisualState)e.NewValue;
-
-        // Se interpola desde lo que se está viendo, no desde el estado anterior nominal: si el
-        // cambio llega a mitad de una transición, no hay salto.
-        orb._from = OrbPalette.Lerp(orb._from, orb._to, OrbPalette.SineInOut(orb._transition));
-        orb._to = OrbPalette.For(next);
-        orb._transition = 0;
-
-        // Basta con que uno de los dos lados sea de capacidad: entrar y salir tardan lo mismo.
-        orb._capacityChange = OrbPalette.IsCapacityState((AssistantVisualState)e.OldValue) ||
-            OrbPalette.IsCapacityState(next);
-
-        // Interrumpida entra de golpe: la transición arranca terminada y la escala se hunde. Si el
-        // corte tardara medio segundo no se leería como obediencia sino como que siguió pensándolo.
-        if (orb._to.IsSnap)
-        {
-            orb._transition = 1;
-            orb._ripples.Add(new Ripple(orb._wallClock, -1.15));
-            orb._scaleVelocity -= 1.5;
-        }
-        else
-        {
-            orb._ripples.Add(new Ripple(orb._wallClock, 1));
-            orb._scaleVelocity += 1.15;
-        }
+        // La propiedad es el pedido, no la verdad: quién entra y cuándo lo decide el canal. Un error
+        // corta lo que haya en vuelo; un «volvé a reposo» espera su turno y entra igual.
+        ((NubeOrb)d)._channel.Request((AssistantVisualState)e.NewValue);
     }
 
     private void Start()
@@ -307,17 +322,40 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         InvalidateVisual();
     }
 
+    /// <summary>El perfil del estado que se está mostrando, ya aplanado si hay movimiento reducido.</summary>
+    private OrbStateProfile Target() => OrbQuiet.Apply(OrbPalette.For(_shown), _shown);
+
     private void Advance(double delta)
     {
         _wallClock += delta;
+        _channel.Poll();
 
-        var duration = (_capacityChange ? OrbPalette.CapacityTransition : OrbPalette.Transition).TotalSeconds;
-        if (_transition < 1)
+        if (_channel.State != _shown)
         {
-            _transition = Math.Min(1, _transition + (delta / duration));
+            // Se sale desde lo que se está viendo y no desde el estado anterior nominal: si el
+            // cambio llega a mitad de una transición, no hay salto.
+            _from = OrbPalette.Lerp(_from, Target(), _transition.EasedClamped);
+            _transition.Begin(_shown, _channel.State);
+            _shown = _channel.State;
+            EnterTransition();
         }
 
-        _mood = _moods.Advance(delta, OrbBody.Nube);
+        _transition.Advance(delta);
+        _profile = OrbPalette.Lerp(_from, Target(), _transition.EasedClamped);
+        _age = _shown == AssistantVisualState.WaitingForYou ? OrbAge.Strength(_channel.WaitingAge) : 0;
+
+        if (_channel.MoodToken != _moodToken)
+        {
+            _moodToken = _channel.MoodToken;
+            if (_channel.Mood is { } pending)
+            {
+                _moods.Trigger(pending);
+            }
+        }
+
+        // El mismo ánimo pesa distinto según sobre qué estado cae: la energía del estado escala la
+        // amplitud del gesto.
+        _mood = _moods.Advance(delta, OrbBody.Nube).Scale(OrbPriority.Energy(_shown));
         if (_moods.TryTakeImpulse(out var impulse))
         {
             // El empujón del ánimo entra una sola vez y se apaga solo: el polvo se corre para un
@@ -336,9 +374,11 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         _driftX *= decay;
         _driftY *= decay;
 
-        var speed = OrbNight.Speed(NightMode);
+        // En movimiento reducido el reloj no se detiene, se arrastra al 5 %: lo que queda es una
+        // silueta que casi no cambia, no un dibujo congelado.
+        var speed = OrbNight.Speed(NightMode) * (OrbQuiet.IsReduced ? 0.05 : 1);
         _clock += delta * speed;
-        _yaw += delta * _to.Yaw * speed;
+        _yaw += delta * _profile.Yaw * speed;
         _pitch = CameraTilt + (0.062 * Math.Sin(_clock * 0.19));
 
         // La escala es un resorte crítico: los golpes de los ánimos y de los cambios de estado
@@ -346,18 +386,29 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         _scaleVelocity += ((170 * (1 - _scale)) - (15 * _scaleVelocity)) * delta;
         _scale += _scaleVelocity * delta;
 
-        var dustSpeed = _from.DustSpeed + ((_to.DustSpeed - _from.DustSpeed) * OrbPalette.SineInOut(_transition));
+        // La patada de giro de la transición: entra de golpe y se apaga a la décima. Es lo que hace
+        // que oír tu nombre no sea un cambio de color sino un respingo.
+        var burst = _transition.ConsumeSpin(delta);
+
+        var dustSpeed = _profile.DustSpeed;
         for (var i = 0; i < 3; i++)
         {
-            _ringPhase[i] += delta * _to.Spin[i] * speed * 0.6;
-            _ringAngle[i] += delta * _to.Spin[i] * speed * 3.0;
+            _ringPhase[i] += delta * _profile.Spin[i] * speed * 0.6;
+            _ringAngle[i] += delta * _profile.Spin[i] * speed * 3.0;
+            if (burst > 0)
+            {
+                _ringAngle[i] += delta * burst * 5.2 * (i == 1 ? -1 : 1);
+            }
         }
+
+        // El polvo corre hacia atrás mientras dura la mirada: es darse vuelta a ver quién llamó.
+        var lookBack = _transition.IsLookingBack ? OrbTransitions.LookBackFactor : 1;
 
         for (var i = 0; i < _dust.Length; i++)
         {
             var d = _dust[i];
             var surge = d.Surge * Math.Exp(-delta * 6);
-            var angle = d.Angle + (delta * d.Speed * dustSpeed * speed * 1.1);
+            var angle = d.Angle + (delta * d.Speed * dustSpeed * speed * 1.1 * lookBack);
             var elevation = d.Elevation + (delta * d.ElevationSpeed * dustSpeed * speed);
             if (elevation > 1.5)
             {
@@ -371,13 +422,13 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             _dust[i] = d with { Angle = angle, Elevation = elevation, Surge = surge };
         }
 
-        if (_to.ThinkPeriod > 0 && _wallClock > _nextThinkRipple)
+        if (_profile.ThinkPeriod > 0 && _wallClock > _nextThinkRipple)
         {
             _ripples.Add(new Ripple(_wallClock, 0.40));
-            _nextThinkRipple = _wallClock + _to.ThinkPeriod;
+            _nextThinkRipple = _wallClock + _profile.ThinkPeriod;
         }
 
-        if (_wallClock > _nextFlare)
+        if (!OrbQuiet.IsReduced && _wallClock > _nextFlare)
         {
             // Un nudo cualquiera de un anillo cualquiera destella. Es lo único aleatorio que queda
             // vivo en el dibujo, y es lo que impide que la nube se lea como un bucle.
@@ -388,6 +439,35 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         }
 
         _ripples.RemoveAll(r => _wallClock - r.Start > 1.5);
+    }
+
+    /// <summary>
+    /// Lo que la transición hace en su primer cuadro, y que después se apaga solo.
+    /// </summary>
+    /// <remarks>
+    /// La onda de entrada no es decorativa: su amplitud es la del par de estados y puede ser
+    /// negativa. En <em>hablando → interrumpida</em> vale −1,45, o sea que sale hacia adentro; y
+    /// como las ondas viven un segundo y medio y esa transición dura ochenta milésimas, lo que se ve
+    /// es un corte seco seguido de una onda que se sigue yendo y muere fuera del cuerpo. Eso es la
+    /// cola: la frase que quedó cortada, todavía viajando.
+    /// </remarks>
+    private void EnterTransition()
+    {
+        var spec = _transition.Spec;
+        _ripples.Add(new Ripple(_wallClock, spec.Ripple));
+        _scaleVelocity += spec.Ripple * 1.15;
+
+        // La onda del pensamiento se reprograma en cada cambio: si no, la primera del estado nuevo
+        // caería donde había quedado la del anterior y el ritmo se leería heredado.
+        _nextThinkRipple = _wallClock + 0.560;
+
+        if (spec.IsChained)
+        {
+            // Encadenada: nada se reinicia —el giro sigue donde estaba, porque esta transición no
+            // trae patada— y el reloj de la voz arranca acá. La primera onda de la voz no acompaña
+            // a la transición: es la transición.
+            _voiceEpoch = _wallClock;
+        }
     }
 
     /// <summary>Las ondas que salen del centro, sumadas para un radio dado.</summary>
@@ -416,20 +496,31 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             return;
         }
 
-        var eased = OrbPalette.SineInOut(_transition);
-        var profile = OrbPalette.Lerp(_from, _to, eased);
+        var profile = _profile;
+        var spec = _transition.Spec;
+        var eased = _transition.EasedClamped;
+
+        // La patada de entrada: uno al arrancar la transición, cero enseguida. Es la que lleva el
+        // destello y el salto, que son cosas que pasan al entrar y no propiedades del estado nuevo.
+        var kick = _transition.Kick;
+
         var light = IsLightDesktop;
         var night = Math.Clamp(NightMode, 0, 1);
         var seconds = _wallClock;
 
+        // El reloj de la voz sólo se separa del de pared cuando la transición fue encadenada.
+        var voice = seconds - _voiceEpoch;
+
         var baseColor = OrbNight.Tint(light ? profile.Depth : profile.Body, night);
-        var alpha = profile.Alpha * OrbNight.Alpha(night) * _mood.AlphaFactor;
+        var alpha = profile.Alpha * OrbNight.Alpha(night) * _mood.AlphaFactor *
+            (1 + (spec.Flash * kick)) * (1 - (OrbAge.BrightnessDrop * _age));
         var coreColor = OrbPalette.Wash(baseColor, _mood.Tint, _mood.WashCore);
         var ringColor = OrbPalette.Wash(baseColor, _mood.Tint, _mood.WashRim);
         var dustColor = OrbPalette.Wash(baseColor, _mood.Tint, _mood.WashDust);
 
         _originX = CenterX + (profile.Lean * 25) + _mood.OffsetX;
-        _originY = CenterY + (0.55 * Math.Sin(seconds / 3.7)) + _mood.OffsetY;
+        _originY = CenterY + (0.55 * Math.Sin(seconds / 3.7)) + _mood.OffsetY -
+            (spec.Lift * kick) + (spec.Sink * kick) + (OrbAge.Sink * _age);
         _squashY = _mood.SquashY;
         _shear = _mood.Shear;
 
@@ -442,7 +533,11 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var extra = _mood.Extra;
         if (profile.Breath is { } breath)
         {
-            extra += breath.Amplitude * Math.Sin(2 * Math.PI * seconds / breath.Period) * eased;
+            // La antigüedad alarga el período: a los tres días la respiración dura ×2,15. No es que
+            // respire menos, es que respira más despacio, que es lo que hace algo que lleva mucho
+            // tiempo esperando.
+            var period = breath.Period * (1 + (OrbAge.BreathStretch * _age));
+            extra += breath.Amplitude * Math.Sin(2 * Math.PI * seconds / period) * eased;
         }
 
         if (profile.Tremor > 0)
@@ -463,12 +558,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             }
         }
 
-        var reach = 0.0;
-        if (profile.ReachPeriod > 0)
-        {
-            var u = (seconds % profile.ReachPeriod) / profile.ReachPeriod;
-            reach = u < 0.46 ? 0.20 * Math.Sin(Math.PI * u / 0.46) : 0;
-        }
+        // El estirón de sorda no tiene cadencia propia: la marca la escalera de reintentos, y cada
+        // intento sale más débil que el anterior. Ver OrbDeafRetry.
+        var reach = profile.ReachPeriod > 0 ? OrbDeafRetry.CloudStretch(_channel.Retry) : 0;
 
         // Oído y boca son la misma idea con el signo cambiado: escuchar es que entre, hablar es que
         // salga. Por eso uno resta radio y el otro lo suma, y los dos suman actividad.
@@ -477,7 +569,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             : 0;
         var mouthOut = profile.Wave is not null
             ? (profile.Mouth > 0 ? profile.Mouth : 0.13) *
-                Math.Pow(Math.Abs(Math.Sin(seconds * 3.05) * Math.Sin((seconds * 1.13) + 0.6)), 1.45)
+                Math.Pow(Math.Abs(Math.Sin(voice * 3.05) * Math.Sin((voice * 1.13) + 0.6)), 1.45)
             : 0;
         var sound = (mouthOut - earIn) * eased;
         var soundEnergy = (mouthOut + earIn) * eased;
@@ -485,7 +577,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var dispersion = profile.Dispersion * _scale;
         var turbulence = profile.Turbulence * _mood.FlowFactor;
         var waveEnvelope = profile.Wave is not null
-            ? 0.30 + (0.70 * Math.Abs(Math.Sin(seconds * 3.05) * Math.Sin((seconds * 1.13) + 0.6)))
+            ? 0.30 + (0.70 * Math.Abs(Math.Sin(voice * 3.05) * Math.Sin((voice * 1.13) + 0.6)))
             : 1;
 
         var scale = side / 70.0;
@@ -494,9 +586,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var pulse = Math.Min(1, Math.Abs(_scale - 1) * 11);
         DrawHalo(context, baseColor, light, alpha * (1 + (0.38 * pulse) + (1.1 * soundEnergy)));
 
-        DrawDust(context, profile, dustColor, alpha, light, dispersion, extra, reach, sound, soundEnergy, turbulence, waveEnvelope, seconds);
-        DrawCore(context, profile, coreColor, alpha, light, dispersion, extra, sound, turbulence, waveEnvelope, seconds);
-        DrawRings(context, profile, ringColor, alpha, light, dispersion, extra, sound, waveEnvelope, seconds);
+        DrawDust(context, profile, dustColor, alpha, light, dispersion, extra, reach, sound, soundEnergy, turbulence, waveEnvelope, voice);
+        DrawCore(context, profile, coreColor, alpha, light, dispersion, extra, sound, turbulence, waveEnvelope, voice);
+        DrawRings(context, profile, ringColor, alpha, light, dispersion, extra, sound, waveEnvelope, seconds, voice);
         DrawFringe(context, profile, dustColor, alpha, light, dispersion, extra, turbulence);
 
         context.Pop();
@@ -539,7 +631,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         double soundEnergy,
         double turbulence,
         double waveEnvelope,
-        double seconds)
+        double voice)
     {
         ClearBuckets();
         var yawCos = Math.Cos(_yaw);
@@ -562,7 +654,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             if (profile.Wave is { } wave)
             {
                 radius *= 1 + (wave.Amplitude * waveEnvelope * 1.3 *
-                    Math.Sin(2 * Math.PI * ((seconds / wave.Period) - (grain.Radius * 1.4))));
+                    Math.Sin(2 * Math.PI * ((voice / wave.Period) - (grain.Radius * 1.4))));
             }
 
             radius *= 1 + RippleAt(grain.Radius) + (sound * 1.7) + reach + grain.Surge;
@@ -594,7 +686,12 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
                 grain.Size * fade * 1.5 * shimmer * (1 - (0.8 * drop)),
                 rim: false,
                 sway + _driftX,
-                (_mood.DriftY * (0.35 + (0.65 * grain.Delay)) * 0.02) + (_mood.DropY * drop * 0.34) + _driftY);
+                (_mood.DriftY * (0.35 + (0.65 * grain.Delay)) * 0.02) + (_mood.DropY * drop * 0.34) + _driftY +
+
+                    // Con la pregunta vieja el polvo sedimenta: cada grano baja distinto según su
+                    // escalonado, así que la nube se deshilacha en una banda abajo en vez de mudarse
+                    // entera. Es el tiempo acumulado, dibujado.
+                    OrbAge.DustBand(_age, grain.Delay));
         }
 
         Paint(context, light ? tint : Mix(tint, Colors.White, 0.18), (light ? 0.30 : 0.20) * alpha, light, rim: false, flat: false, glow: 3.3);
@@ -611,7 +708,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         double sound,
         double turbulence,
         double waveEnvelope,
-        double seconds)
+        double voice)
     {
         ClearBuckets();
         var yawCos = Math.Cos(_yaw);
@@ -625,7 +722,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             if (profile.Wave is { } wave)
             {
                 radius *= 1 + (wave.Amplitude * waveEnvelope *
-                    Math.Sin(2 * Math.PI * ((seconds / wave.Period) - (point.Radius * 1.6))));
+                    Math.Sin(2 * Math.PI * ((voice / wave.Period) - (point.Radius * 1.6))));
             }
 
             radius *= (1 + RippleAt(point.Radius) + (sound * 0.55)) * _mood.CoreRadius;
@@ -652,7 +749,8 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         double extra,
         double sound,
         double waveEnvelope,
-        double seconds)
+        double seconds,
+        double voice)
     {
         ClearBuckets();
         var single = profile.IsSingleShell;
@@ -660,6 +758,13 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
 
         for (var shell = 0; shell < 3; shell++)
         {
+            // Quieta y trabajando: dos cascarones en vez de tres. Sin giro que los distinga, la
+            // cantidad de cascarones es lo único que separa «ocupada» de «disponible».
+            if (profile.IsTwoShells && shell == 2)
+            {
+                continue;
+            }
+
             // Sin capacidad los tres anillos colapsan en uno: no es un adorno menos, es el cuerpo
             // diciendo que le falta algo. Por eso gris y sin clave comparten este dibujo.
             var tilt = single
@@ -686,6 +791,13 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
                     continue;
                 }
 
+                // Quieta y fallada: el mismo tramo faltante, pero fijo. Lo que queda del error
+                // cuando se le saca el temblor es el agujero.
+                if (profile.HasStaticGap && point.Hash < 0.24)
+                {
+                    continue;
+                }
+
                 var radius = (single ? 0.95 : point.Base * profile.RingScale) * dispersion *
                     (1 + extra + (profile.Wobble * Math.Sin((2 * Math.PI * _clock / point.Period) + point.Offset)));
 
@@ -697,7 +809,7 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
                 if (profile.Wave is { } wave)
                 {
                     radius *= 1 + (wave.Amplitude * waveEnvelope *
-                        Math.Sin(2 * Math.PI * ((seconds / wave.Period) - (point.Base * 1.6))));
+                        Math.Sin(2 * Math.PI * ((voice / wave.Period) - (point.Base * 1.6))));
                 }
 
                 radius *= (1 + RippleAt(point.Base) + (sound * 0.95)) * _mood.RingRadius;

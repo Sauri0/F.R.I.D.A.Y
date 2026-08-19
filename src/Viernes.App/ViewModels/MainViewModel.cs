@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
+using Viernes.App.Controls;
 using Viernes.App.Infrastructure;
 using Viernes.App.Services;
 using Viernes.App.Shell;
@@ -94,6 +95,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(IsStateLabelVisible));
             OnPropertyChanged(nameof(StateShortLabel));
             OnPropertyChanged(nameof(IsDictationVisible));
+            OnPropertyChanged(nameof(IsStatePillSuppressed));
             NotifyContentProperties();
         }
     }
@@ -250,6 +252,16 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// <summary>Se dispara cuando cierra un paso real. El orbe lo convierte en un latido.</summary>
     public event EventHandler? StepAdvanced;
 
+    /// <summary>
+    /// El registro con el que Viernes está diciendo lo que dice. El orbe lo convierte en un gesto.
+    /// </summary>
+    /// <remarks>
+    /// Va como evento y no como propiedad porque un ánimo no es una condición que dure: se dispara,
+    /// dura lo que dice su tabla y se apaga solo. Una propiedad obligaría a alguien a acordarse de
+    /// volver a ponerla en nulo, y ese alguien tarde o temprano se olvida.
+    /// </remarks>
+    public event EventHandler<OrbMood>? MoodShown;
+
     /// <summary>Filas de agenda, recordatorios o memoria. Vacío en cualquier otro caso.</summary>
     public ObservableCollection<BubbleListItem> ListItems { get; } = [];
 
@@ -312,6 +324,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             {
                 OnPropertyChanged(nameof(IsAssistantShellVisible));
                 OnPropertyChanged(nameof(IsMinimalShellVisible));
+                OnPropertyChanged(nameof(IsStatePillSuppressed));
             }
         }
     }
@@ -353,6 +366,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             if (SetProperty(ref _dictationText, value))
             {
                 OnPropertyChanged(nameof(IsDictationVisible));
+                OnPropertyChanged(nameof(IsStatePillSuppressed));
             }
         }
     }
@@ -361,6 +375,15 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsDictationVisible =>
         State == AssistantVisualState.Listening ||
         (DictationText.Length > 0 && State == AssistantVisualState.Thinking && !IsPanelOpen);
+
+    /// <summary>
+    /// La píldora se calla: con el desplegable abierto o dictando, sobra.
+    /// </summary>
+    /// <remarks>
+    /// El nombre del estado ya está adentro del panel, y en la burbuja de dictado ya está la frase.
+    /// Dos veces lo mismo a diez píxeles de distancia se lee como un error de la interfaz.
+    /// </remarks>
+    public bool IsStatePillSuppressed => IsPanelOpen || IsDictationVisible;
 
     /// <summary>Qué recordatorio llegó a su hora. Lo llena el pedido de presencia del runtime.</summary>
     public string ReminderTitle
@@ -585,23 +608,21 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public bool IsAttention => State == AssistantVisualState.Attention;
     public bool IsError => State == AssistantVisualState.Error;
     /// <summary>
-    /// La cápsula se muestra sólo si tiene texto. Antes bastaba con no estar en reposo, y los
-    /// estados sin caso en <see cref="StateShortLabel"/> dejaban una cápsula vacía sobre el orbe.
+    /// La cápsula se muestra sólo si hay algo que nombrar. En reposo no dice nada: un cartel que
+    /// dice «acá estoy» todo el día deja de decir algo a los diez minutos y tapa el escritorio.
     /// </summary>
-    public bool IsStateLabelVisible => StateShortLabel.Length > 0;
-    public string StateShortLabel => State switch
-    {
-        AssistantVisualState.Listening => "Escuchando",
-        AssistantVisualState.Thinking => "Pensando",
-        AssistantVisualState.Speaking => "Hablando",
-        AssistantVisualState.Attention => "Revisar",
-        AssistantVisualState.Error => "Atención",
+    public bool IsStateLabelVisible => State != AssistantVisualState.Idle && StateShortLabel.Length > 0;
 
-        // Capacidad reducida no es falla: dicen qué falta, no que algo se rompió.
-        AssistantVisualState.Unconfigured => "Sin clave",
-        AssistantVisualState.Offline => "Sin red",
-        _ => string.Empty
-    };
+    /// <summary>
+    /// Cómo se llama el estado en dos palabras.
+    /// </summary>
+    /// <remarks>
+    /// Sale de la misma tabla que dibuja el orbe. Acá había una segunda lista escrita a mano que
+    /// cubría siete de los quince estados y devolvía cadena vacía para el resto, así que el orbe
+    /// dibujaba «un proyecto te espera» y al lado no había nombre. Dos listas de lo mismo se
+    /// desincronizan; una sola, no puede.
+    /// </remarks>
+    public string StateShortLabel => OrbPalette.For(State).PillLabel;
 
     public ICommand SendCommand => _sendCommand;
     public ICommand ToggleMuteCommand { get; }
@@ -900,7 +921,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 ListItems.Clear();
                 NotifyContentProperties();
             }
-            else if (update.State == AssistantVisualState.Idle &&
+            else if (IsResting(update.State) &&
                 previousState == AssistantVisualState.Thinking &&
                 !string.IsNullOrWhiteSpace(update.Message))
             {
@@ -908,8 +929,31 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             }
 
             _sendCommand.RaiseCanExecuteChanged();
+
+            // El ánimo se avisa al final, cuando el estado de fondo al que se monta ya está puesto.
+            if (update.Mood is { } mood)
+            {
+                MoodShown?.Invoke(this, mood);
+            }
         });
     }
+
+    /// <summary>
+    /// Si el turno terminó, mire lo que mire el orbe.
+    /// </summary>
+    /// <remarks>
+    /// Antes acá decía <c>== Idle</c>, y alcanzaba porque volver al reposo era el único final
+    /// posible. Ahora terminar un turno puede dejar el orbe en guardia, esperándote o trabajando de
+    /// fondo, y comparar contra reposo se leía como que el turno nunca cerraba: la respuesta no
+    /// llegaba a mostrarse.
+    /// </remarks>
+    private static bool IsResting(AssistantVisualState state) => state is
+        AssistantVisualState.Idle or
+        AssistantVisualState.Watching or
+        AssistantVisualState.Background or
+        AssistantVisualState.WaitingForYou or
+        AssistantVisualState.ProjectWaiting or
+        AssistantVisualState.Deaf;
 
     private void ShowError(Exception exception)
     {

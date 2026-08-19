@@ -27,7 +27,19 @@ internal sealed record AssistantRuntimeUpdate(
     /// abierta contando lo que hizo es lo contrario de lo que pidió: se ve como si siguiera
     /// trabajando. Esta bandera dice «esto no es una respuesta que mostrar, es un apagarse».
     /// </remarks>
-    bool Quiet = false);
+    bool Quiet = false,
+
+    /// <summary>
+    /// El registro con el que está diciendo esto, si tiene uno.
+    /// </summary>
+    /// <remarks>
+    /// Viaja por el mismo canal que el estado y no por uno propio porque no es una condición
+    /// aparte: es la cara con la que se dice <em>este</em> cambio. Sale del mismo
+    /// <see cref="Viernes.Core.Voice.VoiceMoment"/> con el que se sintetiza la voz, y si se
+    /// calculara dos veces, la cara y el tono se separarían apenas alguien tocara uno de los dos.
+    /// <para>Es un gesto: se dispara, dura lo que dice la tabla y se apaga solo. Nadie lo apaga.</para>
+    /// </remarks>
+    Controls.OrbMood? Mood = null);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,

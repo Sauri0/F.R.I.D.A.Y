@@ -94,7 +94,12 @@ internal sealed record OrbStateProfile
     /// <summary>Golpeteo: dos toques seguidos y silencio. Es «tengo algo para vos» sin palabras.</summary>
     internal OrbPulse? Knock { get; init; }
 
-    /// <summary>Estirón: se alarga buscando algo y vuelve. Período en segundos, cero si no hay.</summary>
+    /// <summary>Estirón: se alarga buscando algo y vuelve. Cero si el estado no se estira.</summary>
+    /// <remarks>
+    /// El número es el período que trae la tabla del boceto, pero <b>no manda la cadencia</b>: la
+    /// cadencia del estirón es la escalera de reintentos de <see cref="OrbDeafRetry"/>, que no es
+    /// periódica —3, 8, 20 y 45 segundos— y va perdiendo fuerza. Acá sólo hace de bandera.
+    /// </remarks>
     internal double ReachPeriod { get; init; }
 
     /// <summary>Temblor rápido, a 11,8 Hz. Es nervio, no respiración.</summary>
@@ -115,11 +120,17 @@ internal sealed record OrbStateProfile
     /// <summary>Inclinación hacia el usuario, en unidades de las 70 del lienzo.</summary>
     internal double Lean { get; init; }
 
-    /// <summary>Los anillos se rompen: un tramo de cada vuelta no se dibuja.</summary>
+    /// <summary>Los anillos se rompen: un tramo de cada vuelta no se dibuja, y se mueve.</summary>
     internal bool IsBroken { get; init; }
 
-    /// <summary>Entra de golpe: la transición arranca ya terminada y con la escala hundida.</summary>
-    internal bool IsSnap { get; init; }
+    /// <summary>
+    /// Un tramo fijo del anillo que no se dibuja. Es el anillo roto sin el temblor: lo que queda del
+    /// error cuando se le saca el movimiento.
+    /// </summary>
+    internal bool HasStaticGap { get; init; }
+
+    /// <summary>Dos cascarones en vez de tres.</summary>
+    internal bool IsTwoShells { get; init; }
 
     /// <summary>Un solo cascarón, sin apertura ni giro propio. Es el cuerpo de la capacidad reducida.</summary>
     internal bool IsSingleShell { get; init; }
@@ -134,22 +145,9 @@ internal sealed record OrbStateProfile
 /// </remarks>
 internal static class OrbPalette
 {
-    /// <summary>Cuánto tarda un cambio de estado normal.</summary>
-    internal static readonly TimeSpan Transition = TimeSpan.FromMilliseconds(520);
-
-    /// <summary>
-    /// Entrar o salir de capacidad reducida tarda casi el doble que un cambio de estado normal.
-    /// </summary>
-    /// <remarks>
-    /// Perder la clave o la red no es un evento: es una condición. A 520 ms se leería como que algo
-    /// acaba de pasar, y lo que hay que comunicar es que algo <em>está</em> distinto. La misma
-    /// lentitud al volver es, por sí sola, el aviso de que la capacidad se recuperó.
-    /// </remarks>
-    internal static readonly TimeSpan CapacityTransition = TimeSpan.FromMilliseconds(900);
-
-    /// <summary>Estos dos no son estados de actividad sino condiciones, y cambian más lento.</summary>
-    internal static bool IsCapacityState(AssistantVisualState state) =>
-        state is AssistantVisualState.Unconfigured or AssistantVisualState.Offline;
+    // Las duraciones de los cambios de estado ya no viven acá: están en OrbTransitions, que las
+    // tiene par por par. Un solo número para los quince estados era lo que había hasta que se portó
+    // la tabla, y era justamente lo que el boceto pedía no hacer.
 
     private static readonly OrbStateProfile IdleProfile = new()
     {
@@ -234,6 +232,37 @@ internal static class OrbPalette
         DropSpeed = 2.10
     };
 
+    // ---------------------------------------------------------------------------------------------
+    // Los tres que se parecían: trabajando sin vos, un proyecto te espera y esperándote.
+    //
+    // El boceto los dejó explícitamente sin resolver —de reojo se confunden— y ofrecía separarlos
+    // por color o por cadencia. Van separados por CADENCIA Y BRILLO, no por color: cada uno se queda
+    // con el color que tiene en PAL. Cambiar el color sería inventar un cuarto significado; lo que
+    // hay que decir ya está dicho y es otra cosa.
+    //
+    // Se separan por PRESENCIA, o sea por qué espera cada uno del usuario:
+    //
+    //   trabajando sin vos      no espera nada de nadie. Es el más apagado (0,70) y es el único de
+    //                           los tres que no respira: su pulso —una onda cada 1,7 s— viene del
+    //                           trabajo, no de la espera. No te está mirando.
+    //
+    //   un proyecto te espera   espera a OTRO, no a vos. Brillo intermedio (0,82) y el golpeteo cada
+    //                           2,6 s, más suave que antes (0,044): son dos golpes en la puerta de
+    //                           al lado. Se oyen, pero no son para vos.
+    //
+    //   esperándote             es el único que te debe algo. El más presente de los tres (0,94) y
+    //                           el único con una respiración profunda (0,048 cada 4,6 s). Está vivo
+    //                           y está esperando, y eso tiene que verse antes que los otros dos.
+    //
+    // Los tres números de brillo ya estaban en la tabla: 0,70 es el de trabajando sin vos, 0,82 el
+    // de sorda y sin clave, 0,94 el que tenía un proyecto te espera. Están repartidos de nuevo, no
+    // inventados. Lo mismo con las amplitudes: 0,044 es la de pidiendo permiso y 0,048 la de revisar.
+    //
+    // El próximo que mire estos tres va a querer "arreglarlos" para que se parezcan, porque los tres
+    // son formas de esperar. No: los tres son formas de esperar COSAS DISTINTAS, y el usuario tiene
+    // que poder saber cuál de las tres es sin acercarse a leer la píldora.
+    // ---------------------------------------------------------------------------------------------
+
     private static readonly OrbStateProfile BackgroundProfile = new()
     {
         Body = Rgb(0x7E, 0x90, 0xC4),
@@ -291,7 +320,6 @@ internal static class OrbPalette
         DustRadius = 0.86,
         DustSpeed = 0.03,
         Turbulence = 0.20,
-        IsSnap = true,
         Alpha = 0.86,
         DropAmplitude = 0.040,
         DropSpeed = 0.60
@@ -312,8 +340,11 @@ internal static class OrbPalette
         DustRadius = 0.95,
         DustSpeed = 0.04,
         Turbulence = 0.30,
-        Breath = new OrbPulse(0.032, 4.6),
-        Alpha = 0.92,
+
+        // Respiración profunda y lenta: el único de los tres que espera algo de vos. Ver el bloque
+        // de arriba de «trabajando sin vos».
+        Breath = new OrbPulse(0.048, 4.6),
+        Alpha = 0.94,
         DropAmplitude = 0.022,
         DropSpeed = 0.30
     };
@@ -333,8 +364,11 @@ internal static class OrbPalette
         DustRadius = 1.10,
         DustSpeed = 0.10,
         Turbulence = 0.50,
-        Knock = new OrbPulse(0.055, 2.6),
-        Alpha = 0.94,
+
+        // Golpea más suave que antes: los dos golpes son en la puerta de al lado. Ver el bloque de
+        // arriba de «trabajando sin vos».
+        Knock = new OrbPulse(0.044, 2.6),
+        Alpha = 0.82,
         DropAmplitude = 0.052,
         DropSpeed = 0.70
     };

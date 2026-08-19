@@ -73,7 +73,7 @@ internal readonly record struct OrbMoodImpulse(
 /// tener veintitantos campos se paga una vez acá y no en cada cuerpo.
 /// <para>Los valores neutros son los de «no está pasando nada»: uno donde multiplica, cero donde suma.</para>
 /// </remarks>
-internal sealed class OrbMoodShape
+internal sealed record OrbMoodShape
 {
     /// <summary>Ánimo apagado. Es el que se usa cuando no hay ninguno vivo.</summary>
     internal static readonly OrbMoodShape Neutral = new();
@@ -164,6 +164,40 @@ internal sealed class OrbMoodShape
 
     /// <summary>Escala del signo.</summary>
     internal double GlyphScale { get; init; } = 1.0;
+
+    /// <summary>
+    /// El mismo ánimo con la amplitud escalada por la energía que le presta el estado de fondo.
+    /// </summary>
+    /// <remarks>
+    /// Es lo que hace que «no salió» sea un golpe sobre <em>pensando</em> —energía 1,0— y un suspiro
+    /// sobre <em>esperándote</em> —energía 0,45—. Es el mismo ánimo con dos intensidades, no dos
+    /// ánimos: la coreografía es una sola y lo único que cambia es cuánto se mueve.
+    /// <para>
+    /// Se escala <b>sólo lo que es movimiento</b>. El color del ánimo, el signo y la opacidad quedan
+    /// enteros a propósito: un interrogante al 45 % sigue teniendo que ser un interrogante, y si el
+    /// tinte se diluyera con la energía, sobre los estados apagados —que son justo donde más falta
+    /// hace saber qué pasó— el ánimo se volvería invisible.
+    /// </para>
+    /// </remarks>
+    internal OrbMoodShape Scale(double energy)
+    {
+        if (Math.Abs(energy - 1) < 0.001)
+        {
+            return this;
+        }
+
+        return this with
+        {
+            OffsetX = OffsetX * energy,
+            OffsetY = OffsetY * energy,
+            Extra = Extra * energy,
+            Shear = Shear * energy,
+            Roll = Roll * energy,
+            TiltBias = TiltBias * energy,
+            AmplitudeFactor = 1 + ((AmplitudeFactor - 1) * energy),
+            SquashY = 1 + ((SquashY - 1) * energy)
+        };
+    }
 }
 
 /// <summary>

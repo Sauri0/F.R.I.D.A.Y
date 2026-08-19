@@ -45,6 +45,18 @@ public partial class MainWindow : Window
     /// <summary>Curva de las transiciones del vidrio. Sale medida de la referencia.</summary>
     private static readonly KeySpline GlassEase = new(0.22, 0.68, 0.32, 1);
 
+    /// <summary>
+    /// Cada cuánto se vuelve a mirar la hora y el tema del escritorio.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="OrbNight.For"/> sube y baja con una rampa de una hora en los bordes, así que dos
+    /// minutos de resolución sobran: el paso más grande que puede dar el modo madrugada entre una
+    /// lectura y la siguiente es un 3 %, que a ojo no existe. Preguntarlo por cuadro sería leer el
+    /// registro de Windows sesenta veces por segundo para enterarse de algo que cambia dos veces
+    /// al día.
+    /// </remarks>
+    private static readonly TimeSpan AmbienceInterval = TimeSpan.FromMinutes(2);
+
     private readonly MainViewModel _viewModel;
     private readonly WindowPlacementStore _placementStore;
     private readonly OrbMotion _motion = new();
@@ -77,6 +89,7 @@ public partial class MainWindow : Window
     private readonly Services.MonitorSlots _monitors = new();
 
     private System.Windows.Threading.DispatcherTimer? _followTimer;
+    private System.Windows.Threading.DispatcherTimer? _ambienceTimer;
     private string _currentMonitor = string.Empty;
     private int _stableTicks;
 
@@ -95,6 +108,11 @@ public partial class MainWindow : Window
         SpendHoldHost.Content = _spendHold;
         _spendHold.Authorized += (_, _) => _viewModel.ClosePanel();
 
+        Pill.SetBinding(StatePill.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
+        Pill.SetBinding(
+            StatePill.IsSuppressedProperty,
+            new Binding(nameof(MainViewModel.IsStatePillSuppressed)) { Source = _viewModel });
+
         ApplyOrbShape(viewModel.OrbShape);
         ApplySide(opensRight: true, force: true);
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
@@ -104,6 +122,54 @@ public partial class MainWindow : Window
             .OfType<LiquidOrb>()
             .FirstOrDefault()
             ?.Beat();
+
+        // El ánimo va a los dos cuerpos y a la píldora por la misma puerta: quien lo dispara no
+        // tiene que saber cuál de los dos cuerpos está puesto ni acordarse de que además hay
+        // píldora. Nadie lo apaga —dura lo que dice su tabla y se va solo—.
+        _viewModel.MoodShown += (_, mood) =>
+        {
+            foreach (var body in Bodies())
+            {
+                body.ShowMood(mood);
+            }
+        };
+    }
+
+    /// <summary>
+    /// Todo lo que habla el idioma del orbe: el cuerpo que esté puesto y la píldora.
+    /// </summary>
+    /// <remarks>
+    /// La píldora no es un cuerpo, pero implementa lo mismo justamente para poder estar en esta
+    /// lista: el estado, la madrugada, el escritorio claro y el ánimo se reparten una sola vez y no
+    /// hay forma de acordarse de tres y olvidarse del cuarto.
+    /// </remarks>
+    private IEnumerable<IOrbBody> Bodies()
+    {
+        foreach (var body in OrbHost.Children.OfType<IOrbBody>())
+        {
+            yield return body;
+        }
+
+        yield return Pill;
+    }
+
+    /// <summary>
+    /// Reparte la hora y el tema del escritorio a todo lo que dibuja.
+    /// </summary>
+    /// <remarks>
+    /// Las dos valen para los dos cuerpos y para la píldora, y por eso se ponen desde un solo lado:
+    /// que el orbe esté de madrugada y la píldora de mediodía sería peor que no tener modo noche.
+    /// </remarks>
+    private void ApplyAmbience()
+    {
+        var night = OrbNight.For(TimeOnly.FromDateTime(DateTime.Now));
+        var light = DesktopGlass.IsLightDesktop;
+
+        foreach (var body in Bodies())
+        {
+            body.NightMode = night;
+            body.IsLightDesktop = light;
+        }
     }
 
     /// <summary>
@@ -119,6 +185,9 @@ public partial class MainWindow : Window
             var nube = new NubeOrb { Width = ShellLayout.OrbSize, Height = ShellLayout.OrbSize };
             nube.SetBinding(NubeOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
             OrbHost.Children.Add(nube);
+
+            // El cuerpo nuevo nace sin hora y sin escritorio: se los pasa el mismo reparto de siempre.
+            ApplyAmbience();
             return;
         }
 
@@ -134,6 +203,7 @@ public partial class MainWindow : Window
             LiquidOrb.HasSpendAuthorizationProperty,
             new Binding(nameof(MainViewModel.HasSpendAuthorization)) { Source = _viewModel });
         OrbHost.Children.Add(gota);
+        ApplyAmbience();
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -143,6 +213,7 @@ public partial class MainWindow : Window
         DesktopGlass.TryApplySystemBackdrop(this);
         StartSweep();
         StartFollowingActiveMonitor();
+        StartWatchingAmbience();
         CompositionTarget.Rendering += OnRendering;
 
         try
@@ -488,6 +559,16 @@ public partial class MainWindow : Window
 
     private void Panel_MouseLeave(object sender, MouseEventArgs e) => _viewModel.IsPanelHovered = false;
 
+    private void StartWatchingAmbience()
+    {
+        _ambienceTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = AmbienceInterval
+        };
+        _ambienceTimer.Tick += (_, _) => ApplyAmbience();
+        _ambienceTimer.Start();
+    }
+
     /// <summary>
     /// Lleva el orbe al monitor donde estás trabajando, sin perseguir el mouse.
     /// </summary>
@@ -568,6 +649,7 @@ public partial class MainWindow : Window
     {
         CompositionTarget.Rendering -= OnRendering;
         _followTimer?.Stop();
+        _ambienceTimer?.Stop();
         _viewModel.PropertyChanged -= ViewModelOnPropertyChanged;
     }
 

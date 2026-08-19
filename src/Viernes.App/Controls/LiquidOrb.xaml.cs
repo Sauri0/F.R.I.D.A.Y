@@ -62,10 +62,31 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     private readonly List<Ripple> _ripples = [];
     private readonly OrbMoodClock _moods = new();
 
+    /// <summary>Quién decide qué se muestra. Ver <see cref="Channel"/>.</summary>
+    private OrbStateChannel _channel = new();
+
+    private readonly OrbTransitionClock _transition = new();
+
+    /// <summary>Sólo para dispersar la cola del corte. No toca la silueta.</summary>
+    private readonly Random _spray = new(20260818);
+
+    /// <summary>El perfil desde el que sale la transición en vuelo. Es lo que se veía al arrancarla.</summary>
     private OrbStateProfile _from = OrbPalette.For(AssistantVisualState.Idle);
-    private OrbStateProfile _to = OrbPalette.For(AssistantVisualState.Idle);
-    private double _transition = 1.0;
-    private bool _capacityChange;
+
+    private AssistantVisualState _shown = AssistantVisualState.Idle;
+    private int _moodToken;
+
+    /// <summary>Cuánto entró la antigüedad de la pregunta sin contestar, de 0 a 1.</summary>
+    private double _age;
+
+    /// <summary>
+    /// El cero del reloj de la voz. Sólo lo mueve una transición encadenada, y es lo que hace que la
+    /// primera onda de la voz caiga exactamente en el cambio de estado.
+    /// </summary>
+    private double _voiceEpoch;
+
+    /// <summary>La gota que se desprendió en el corte, si hay una viva.</summary>
+    private Satellite? _tail;
 
     private double _phase;
     private double _clock;
@@ -136,8 +157,28 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         set => SetValue(NightModeProperty, value);
     }
 
+    /// <summary>
+    /// El canal que arbitra estados y ánimos. Se puede reemplazar por uno compartido.
+    /// </summary>
+    /// <remarks>
+    /// Por omisión cada cuerpo tiene el suyo, así que funciona sin cablear nada. Si la píldora y el
+    /// orbe tienen que decir exactamente lo mismo en el mismo cuadro —y tienen que decirlo—, hay que
+    /// pasarles el mismo canal desde el shell. Es también por donde entra la antigüedad de la
+    /// pregunta (<see cref="OrbStateChannel.WaitingAge"/>) y el aviso de reintento del runtime
+    /// (<see cref="OrbStateChannel.ReportRetry"/>).
+    /// </remarks>
+    internal OrbStateChannel Channel
+    {
+        get => _channel;
+        set
+        {
+            _channel = value;
+            _moodToken = value.MoodToken;
+        }
+    }
+
     /// <inheritdoc />
-    public void ShowMood(OrbMood mood) => _moods.Trigger(mood);
+    public void ShowMood(OrbMood mood) => _channel.RequestMood(mood);
 
     /// <summary>
     /// Micrófono armado pero sin capturar. No dibuja geometría nueva: tiñe de verde el rebote que
@@ -212,30 +253,47 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
     private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        var orb = (LiquidOrb)d;
-        var next = (AssistantVisualState)e.NewValue;
+        // La propiedad es el pedido, no la verdad: quién entra y cuándo lo decide el canal. Un error
+        // corta lo que haya en vuelo; un «volvé a reposo» espera su turno y entra igual.
+        ((LiquidOrb)d)._channel.Request((AssistantVisualState)e.NewValue);
+    }
 
-        // Se interpola desde lo que se está viendo, no desde el estado anterior nominal: si el
-        // cambio llega a mitad de una transición, no hay salto.
-        orb._from = OrbPalette.Lerp(orb._from, orb._to, OrbPalette.SineInOut(orb._transition));
-        orb._to = OrbPalette.For(next);
-        orb._transition = 0;
+    /// <summary>El perfil del estado que se está mostrando, ya aplanado si hay movimiento reducido.</summary>
+    private OrbStateProfile Target() => OrbQuiet.Apply(OrbPalette.For(_shown), _shown);
 
-        // Basta con que uno de los dos lados sea de capacidad: entrar y salir tardan lo mismo.
-        orb._capacityChange = OrbPalette.IsCapacityState((AssistantVisualState)e.OldValue) ||
-            OrbPalette.IsCapacityState(next);
+    /// <summary>
+    /// Lo que la transición hace en su primer cuadro, y que después se apaga solo.
+    /// </summary>
+    /// <remarks>
+    /// La onda de entrada puede ser negativa: en <em>hablando → interrumpida</em> vale −1,45 y sale
+    /// hacia adentro. Y esa transición además desprende una gota, que es la parte de la frase que ya
+    /// había salido del cuerpo cuando le pediste que pare: sigue viajando, cae, y muere afuera. La
+    /// transición dura ochenta milésimas; la cola, casi un segundo.
+    /// </remarks>
+    private void EnterTransition()
+    {
+        var spec = _transition.Spec;
+        _ripples.Add(new Ripple(_clock, spec.Ripple));
+        _scaleVelocity += spec.Ripple * 1.15;
 
-        // Interrumpida entra de golpe: la transición arranca terminada y la masa se hunde.
-        if (orb._to.IsSnap)
+        if (spec.IsCut)
         {
-            orb._transition = 1;
-            orb._ripples.Add(new Ripple(orb._clock, -1.15));
-            orb._scaleVelocity -= 1.5;
+            var angle = _spray.NextDouble() * 2 * Math.PI;
+            _tail = new Satellite(
+                Math.Cos(angle) * 6,
+                Math.Sin(angle) * 6,
+                (26 * (0.5 + _spray.NextDouble())) + ((_spray.NextDouble() - 0.5) * 14),
+                (-6 * (0.5 + _spray.NextDouble())) + ((_spray.NextDouble() - 0.5) * 14),
+                2.2 * (0.6 + (_spray.NextDouble() * 0.7)),
+                1.0,
+                0.9);
         }
-        else
+
+        if (spec.IsChained)
         {
-            orb._ripples.Add(new Ripple(orb._clock, 1));
-            orb._scaleVelocity += 1.15;
+            // Encadenada: nada se reinicia y el reloj de la voz arranca acá. La primera onda de la
+            // voz no acompaña a la transición: es la transición.
+            _voiceEpoch = _clock;
         }
     }
 
@@ -276,17 +334,36 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         // Un cuadro perdido no puede empujar la fase varios segundos de golpe.
         delta = Math.Clamp(delta, 0, 0.1);
         _clock += delta;
+        _channel.Poll();
 
-        var duration = (_capacityChange ? OrbPalette.CapacityTransition : OrbPalette.Transition).TotalSeconds;
-        if (_transition < 1)
+        if (_channel.State != _shown)
         {
-            _transition = Math.Min(1, _transition + (delta / duration));
+            // Se sale desde lo que se está viendo y no desde el estado anterior nominal: si el
+            // cambio llega a mitad de una transición, no hay salto.
+            _from = OrbPalette.Lerp(_from, Target(), _transition.EasedClamped);
+            _transition.Begin(_shown, _channel.State);
+            _shown = _channel.State;
+            EnterTransition();
         }
 
-        var eased = OrbPalette.SineInOut(_transition);
-        var profile = OrbPalette.Lerp(_from, _to, eased);
+        _transition.Advance(delta);
 
-        _mood = _moods.Advance(delta, OrbBody.Gota);
+        var eased = _transition.EasedClamped;
+        var profile = OrbPalette.Lerp(_from, Target(), eased);
+        _age = _shown == AssistantVisualState.WaitingForYou ? OrbAge.Strength(_channel.WaitingAge) : 0;
+
+        if (_channel.MoodToken != _moodToken)
+        {
+            _moodToken = _channel.MoodToken;
+            if (_channel.Mood is { } pending)
+            {
+                _moods.Trigger(pending);
+            }
+        }
+
+        // El mismo ánimo pesa distinto según sobre qué estado cae: la energía del estado escala la
+        // amplitud del gesto.
+        _mood = _moods.Advance(delta, OrbBody.Gota).Scale(OrbPriority.Energy(_shown));
         if (_moods.TryTakeImpulse(out var impulse))
         {
             _ripples.Add(new Ripple(_clock, impulse.Ripple));
@@ -295,6 +372,7 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
         profile = ApplyTaskPacing(profile, delta);
         AdvanceBeat(delta);
+        AdvanceTail(delta);
 
         // La velocidad del estado acelera el reloj de la ondulación, no su amplitud.
         var speed = OrbNight.Speed(NightMode) * profile.DropSpeed;
@@ -343,7 +421,7 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     /// </summary>
     private OrbStateProfile ApplyTaskPacing(OrbStateProfile profile, double delta)
     {
-        if (State != AssistantVisualState.Thinking && State != AssistantVisualState.Background)
+        if (_shown != AssistantVisualState.Thinking && _shown != AssistantVisualState.Background)
         {
             _taskElapsed = 0;
             Sediment.Height = 0;
@@ -383,6 +461,39 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         _beatRising = true;
     }
 
+    /// <summary>
+    /// La gota que se desprendió en el corte: se va, frena, cae y se apaga.
+    /// </summary>
+    /// <remarks>
+    /// El roce y la gravedad son por cuadro en el boceto, que corre a 60; acá se elevan al tiempo
+    /// real para que la cola se vea igual en una máquina que baja a 30. Es el único lugar donde un
+    /// número del fuente se reinterpreta, y es porque el fuente ahí depende de su propio fps.
+    /// </remarks>
+    private void AdvanceTail(double delta)
+    {
+        if (_tail is not { } tail)
+        {
+            return;
+        }
+
+        var life = tail.Life - (delta / tail.Span);
+        if (life <= 0)
+        {
+            _tail = null;
+            return;
+        }
+
+        var drag = Math.Pow(0.94, delta * 60);
+        _tail = tail with
+        {
+            Life = life,
+            X = tail.X + (tail.VelocityX * delta),
+            Y = tail.Y + (tail.VelocityY * delta),
+            VelocityX = tail.VelocityX * drag,
+            VelocityY = (tail.VelocityY * drag) + (34 * delta * 0.6)
+        };
+    }
+
     private void AdvanceBeat(double delta)
     {
         if (_beatRising)
@@ -410,7 +521,11 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         var extra = _mood.Extra;
         if (profile.Breath is { } breath)
         {
-            extra += breath.Amplitude * Math.Sin(2 * Math.PI * _clock / breath.Period) * eased;
+            // La antigüedad alarga el período: a los tres días la respiración dura ×2,15. No es que
+            // respire menos, es que respira más despacio, que es lo que hace algo que lleva mucho
+            // tiempo esperando.
+            var period = breath.Period * (1 + (OrbAge.BreathStretch * _age));
+            extra += breath.Amplitude * Math.Sin(2 * Math.PI * _clock / period) * eased;
         }
 
         if (profile.Tremor > 0)
@@ -431,11 +546,15 @@ internal partial class LiquidOrb : UserControl, IOrbBody
             }
         }
 
+        // El estirón de sorda no tiene cadencia propia: la marca la escalera de reintentos, y cada
+        // intento sale más débil que el anterior. Ver OrbDeafRetry.
         if (profile.ReachPeriod > 0)
         {
-            var u = (_clock % profile.ReachPeriod) / profile.ReachPeriod;
-            extra += u < 0.46 ? 0.16 * Math.Sin(Math.PI * u / 0.46) : 0;
+            extra += OrbDeafRetry.DropStretch(_channel.Retry);
         }
+
+        // El reloj de la voz sólo se separa del de pared cuando la transición fue encadenada.
+        var voice = _clock - _voiceEpoch;
 
         // Oído y boca: escuchar hunde, hablar saca. Los dos suman actividad.
         var earIn = profile.Ear > 0
@@ -443,7 +562,7 @@ internal partial class LiquidOrb : UserControl, IOrbBody
             : 0;
         var mouthOut = profile.Wave is not null
             ? (profile.Mouth > 0 ? profile.Mouth : 0.13) *
-                Math.Pow(Math.Abs(Math.Sin(_clock * 3.05) * Math.Sin((_clock * 1.13) + 0.6)), 1.45)
+                Math.Pow(Math.Abs(Math.Sin(voice * 3.05) * Math.Sin((voice * 1.13) + 0.6)), 1.45)
             : 0;
         var sound = (mouthOut - earIn) * eased;
         var soundEnergy = (mouthOut + earIn) * eased;
@@ -452,7 +571,7 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         // hablarle más fuerte la hincha, y eso se lee de inmediato como «me está oyendo».
         // El seguimiento es asimétrico —sube rápido, baja lento— porque una caída instantánea
         // parpadea con cada sílaba en vez de acompañar la frase.
-        var target = State == AssistantVisualState.Listening ? Math.Clamp(AudioLevel, 0, 1) : 0;
+        var target = _shown == AssistantVisualState.Listening ? Math.Clamp(AudioLevel, 0, 1) : 0;
         _levelSmoothed += (target - _levelSmoothed) * (target > _levelSmoothed ? 0.45 : 0.08);
         extra += _levelSmoothed * 0.128;
 
@@ -471,8 +590,15 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         var amplitude = profile.DropAmplitude * _mood.AmplitudeFactor *
             (1 + (0.7 * soundEnergy)) * (1 - (0.88 * drain));
 
+        var spec = _transition.Spec;
+        var kick = _transition.Kick;
+
         var centerX = CenterX + (profile.Lean * 22) + _mood.OffsetX;
-        var centerY = CenterY + (0.5 * Math.Sin(_clock / 3.7)) + _mood.OffsetY;
+
+        // El salto y el hundimiento de la transición, y el hundimiento de la pregunta vieja: los dos
+        // son lo mismo con dos escalas de tiempo. Uno dura lo que dura la transición; el otro, días.
+        var centerY = CenterY + (0.5 * Math.Sin(_clock / 3.7)) + _mood.OffsetY -
+            (spec.Lift * kick) + (spec.Sink * kick) + (OrbAge.Sink * _age);
         var rollCos = Math.Cos(_mood.Roll);
         var rollSin = Math.Sin(_mood.Roll);
 
@@ -560,6 +686,20 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
             group.Freeze();
             Mass.Data = group;
+        }
+
+        if (_tail is { } tail)
+        {
+            var size = tail.Radius * (0.45 + (0.55 * tail.Life));
+            var shape = new EllipseGeometry(new Point(centerX + tail.X, centerY + tail.Y), size, size * 1.08);
+            shape.Freeze();
+            Tail.Data = shape;
+            Tail.Opacity = Math.Min(1, tail.Life * 1.4);
+            Tail.Visibility = Visibility.Visible;
+        }
+        else if (Tail.Visibility != Visibility.Collapsed)
+        {
+            Tail.Visibility = Visibility.Collapsed;
         }
 
         // Recortar los reflejos contra la silueta es lo que hace que la luz resbale por el borde.
@@ -679,15 +819,27 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         }
 
         // Armado: verde sobre la luz que ya existe, en vez de geometría nueva.
-        var armed = IsMicrophoneArmed && State == AssistantVisualState.Idle;
+        var armed = IsMicrophoneArmed && _shown == AssistantVisualState.Idle;
         var bounce = armed ? Color.FromRgb(0x72, 0xF0, 0xC0) : body;
         var strength = armed ? 0x4D : 0x57;
         BounceCore.Color = Color.FromArgb((byte)strength, bounce.R, bounce.G, bounce.B);
         BounceEdge.Color = Color.FromArgb(0x00, bounce.R, bounce.G, bounce.B);
 
+        // La gota desprendida es del mismo líquido: mismo color, con el borde un poco más hundido
+        // porque ya no le llega la luz del cuerpo.
+        TailCore.Color = OrbPalette.Lighten(body, 0.42);
+        TailEdge.Color = deep;
+
         // La opacidad general es la que separa «trabajando sin vos» de «pensando» sin cambiar el
-        // color, y la que hace que la madrugada baje el volumen de todo de una sola vez.
-        Stage.Opacity = Math.Clamp(profile.Alpha * OrbNight.Alpha(night) * _mood.AlphaFactor, 0, 1);
+        // color, y la que hace que la madrugada baje el volumen de todo de una sola vez. El destello
+        // de la transición y la pérdida de brillo de la pregunta vieja entran acá por la misma razón:
+        // no son colores nuevos, son el mismo color con otro volumen.
+        Stage.Opacity = Math.Clamp(
+            profile.Alpha * OrbNight.Alpha(night) * _mood.AlphaFactor *
+                (1 + (_transition.Spec.Flash * _transition.Kick)) *
+                (1 - (OrbAge.BrightnessDrop * _age)),
+            0,
+            1);
     }
 
     private static Point Midpoint(Point a, Point b) => new((a.X + b.X) / 2, (a.Y + b.Y) / 2);
@@ -696,4 +848,23 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
     /// <summary>Una gota del signo: dónde quedó y de qué tamaño.</summary>
     private readonly record struct Bead(double X, double Y, double Radius);
+
+    /// <summary>
+    /// Una gota que se soltó del cuerpo y se va sola.
+    /// </summary>
+    /// <param name="X">Posición respecto del centro del cuerpo.</param>
+    /// <param name="Y">Ídem, positivo hacia abajo.</param>
+    /// <param name="VelocityX">Velocidad horizontal, en unidades del lienzo por segundo.</param>
+    /// <param name="VelocityY">Velocidad vertical. La gravedad la va empujando hacia abajo.</param>
+    /// <param name="Radius">Radio con la que salió. Se achica al apagarse.</param>
+    /// <param name="Life">Lo que le queda, de 1 a 0.</param>
+    /// <param name="Span">Cuántos segundos vive en total.</param>
+    private readonly record struct Satellite(
+        double X,
+        double Y,
+        double VelocityX,
+        double VelocityY,
+        double Radius,
+        double Life,
+        double Span);
 }

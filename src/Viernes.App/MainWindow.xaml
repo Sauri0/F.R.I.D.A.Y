@@ -4,6 +4,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:shell="clr-namespace:Viernes.App.Shell"
+        xmlns:controls="clr-namespace:Viernes.App.Controls"
         mc:Ignorable="d"
         Title="Viernes"
         d:Width="528"
@@ -891,30 +892,23 @@
         <!-- ================= PÍLDORA DE ESTADO Y BURBUJA DE DICTADO ================= -->
         <Grid x:Name="OrbOverlay" Width="108" Height="108" IsHitTestVisible="False">
 
-            <Border x:Name="StatePill"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Top"
-                    Margin="0,-34,0,0"
-                    Height="27"
-                    Padding="10,0,12,0"
-                    CornerRadius="14"
-                    Background="#8C18181C"
-                    BorderBrush="#30FFFFFF"
-                    BorderThickness="1"
-                    Visibility="{Binding IsStateLabelVisible, Converter={StaticResource BoolVisibility}}">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Ellipse Width="6"
-                             Height="6"
-                             Margin="0,0,8,0"
-                             VerticalAlignment="Center"
-                             Fill="{Binding State, Converter={StaticResource StateBrush}}" />
-                    <TextBlock VerticalAlignment="Center"
-                               FontFamily="Consolas"
-                               FontSize="9.5"
-                               Foreground="#FFEFEFF3"
-                               Text="{Binding StateShortLabel}" />
-                </StackPanel>
-            </Border>
+            <!--
+                La píldora. Centrada sobre el orbe y 36 px por encima de su borde superior, que es
+                donde la pone el boceto (left:54px, top:-36px sobre un orbe de 108). Morfea de ancho
+                en vez de aparecer y desaparecer, y por eso es un control y no un Border con un
+                binding: el ancho se dibuja adentro para no pedir layout sesenta veces por segundo
+                encima de un orbe que ya está dibujando. Sus cuatro propiedades se enganchan en el
+                código de la ventana, junto con las de los dos cuerpos.
+
+                Los márgenes laterales negativos ensanchan la celda: este contenedor mide lo que mide
+                el orbe —108— y «un proyecto te espera» mide más que eso. Sin ellos WPF recorta la
+                píldora al ancho del orbe y la etiqueta más larga, que es justo la que más importa,
+                sale cortada a la mitad.
+            -->
+            <controls:StatePill x:Name="Pill"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Top"
+                                Margin="-110,-36,-110,0" />
 
             <!--
                 La burbuja de dictado. Nace pegada al orbe —la esquina chica apunta a él— y crece hacia

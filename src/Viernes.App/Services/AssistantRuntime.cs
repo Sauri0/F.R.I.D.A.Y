@@ -8,8 +8,10 @@ using Viernes.Core.Configuration;
 using Viernes.Core.Conversation;
 using Viernes.Core.Mcp;
 using Viernes.Platform.Windows.Awareness;
+using Viernes.Core.Missions;
 using Viernes.Core.Models;
 using Viernes.Core.Persistence;
+using Viernes.Core.Projects;
 using Viernes.Core.Scheduling;
 using Viernes.Core.Tools;
 using Viernes.Core.Tools.BuiltIn;
@@ -70,7 +72,18 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private ConversationOrchestrator _orchestrator;
     private readonly UsageLedger _usageLedger;
     private LocalCommandRouter _localCommands;
-    private readonly ISpeechService _speechSynthesizer;
+
+    /// <summary>
+    /// La voz del sistema. Nula hasta que se leyeron las preferencias.
+    /// </summary>
+    /// <remarks>
+    /// Se construye en <see cref="InitializeAsync"/> y no en el constructor porque la voz elegida
+    /// vive en <c>settings.json</c> y ahí todavía no está leído. Construirla antes es lo que hacía
+    /// que <c>PreferredVoiceName</c> no llegara nunca al sintetizador: quedaba escrita en el archivo
+    /// y no cambiaba absolutamente nada. Hay una sola forma de fijar la voz —las opciones con las
+    /// que se construye— y ahora esas opciones se arman cuando ya se sabe cuál es.
+    /// </remarks>
+    private ISpeechService? _speechSynthesizer;
     private readonly OpenRouterSpeechClient _neuralVoice;
 
     /// <summary>
@@ -143,6 +156,20 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private readonly JsonUserDataStore _dataStore = new();
     private readonly JsonPersonalMemoryStore _memory = new();
+
+    /// <summary>
+    /// Las misiones. Es la misma instancia que ve la herramienta <c>mision</c>.
+    /// </summary>
+    /// <remarks>
+    /// Compartirla no es una optimización: el libro cachea en memoria lo que leyó del disco, así que
+    /// dos instancias serían dos verdades. El orbe diría «te espero» sobre una pregunta que la
+    /// herramienta ya dio por contestada.
+    /// </remarks>
+    private readonly MissionBook _missionBook = new();
+
+    /// <summary>Lo que está haciendo Claude Code. Sólo lee archivos; nunca escribe en la sesión.</summary>
+    private readonly ClaudeSessionWatcher _projectWatcher = new();
+
     private readonly ReminderScheduler _reminderScheduler;
     private readonly LocalSettingsStore _settingsStore = new();
     private readonly WakeWordRecognitionCoordinator _wakeCoordinator = new();
@@ -183,6 +210,50 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     private int _wakeHandoffActive;
     private int _requestActive;
 
+    /// <summary>Cada cuánto se vuelven a mirar las condiciones que encienden los estados de fondo.</summary>
+    /// <remarks>
+    /// Los estados de fondo no los publica nadie: no hay un evento cuando una misión queda esperando
+    /// respuesta ni cuando Claude Code termina su turno. Se miran, y cinco segundos es el tramo en el
+    /// que enterarse sigue siendo enterarse a tiempo sin que el proceso se haga notar.
+    /// </remarks>
+    private static readonly TimeSpan AmbientPeriod = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Cada cuánto se releen las sesiones de Claude Code.
+    /// </summary>
+    /// <remarks>
+    /// Mucho más espaciado que el resto porque cuesta lo que cuesta: recorre el árbol de sesiones y
+    /// lee la cola de cada archivo. Un proyecto que quedó esperando va a seguir esperando dentro de
+    /// tres cuartos de minuto; leerlo cada cinco segundos sería pagar disco todo el día por eso.
+    /// </remarks>
+    private static readonly TimeSpan ProjectPeriod = TimeSpan.FromSeconds(45);
+
+    private System.Threading.Timer? _ambientTimer;
+
+    /// <summary>
+    /// Distinto de cero mientras el vigía está mirando.
+    /// </summary>
+    /// <remarks>
+    /// El barrido de sesiones lee archivos y puede tardar más que el intervalo. Sin esto, un disco
+    /// lento apila barridos hasta que hay diez leyendo el mismo árbol a la vez.
+    /// </remarks>
+    private int _ambientRunning;
+
+    private DateTimeOffset _projectsReadAt;
+    private volatile bool _missionWaiting;
+    private volatile bool _missionRunning;
+    private volatile bool _projectWaiting;
+
+    /// <summary>
+    /// Distinto de cero mientras el micrófono no entrega señal.
+    /// </summary>
+    /// <remarks>
+    /// Sorda no es error y no es mute: el dispositivo está —o debería estar— tomando y no entra
+    /// nada. Se enciende cuando Windows niega el micrófono o cuando una captura falla por el
+    /// dispositivo, y se apaga en cuanto el detector de voz vuelve a ver señal o el oído arranca.
+    /// </remarks>
+    private int _deaf;
+
     public AssistantRuntime()
     {
         _options = ViernesOptions.FromEnvironment();
@@ -201,15 +272,6 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _googleVoice = new GeminiSpeechClient(
             _httpClient,
             () => LocalCredentials.Get("GOOGLE_API_KEY"));
-        // La voz elegida se lee de las preferencias más adelante, cuando ya se cargó el archivo:
-        // acá todavía no se sabe. SpeechService la leía de sus opciones y nadie se la pasaba nunca,
-        // así que ponerla en settings.json no hacía absolutamente nada.
-        _speechSynthesizer = new SpeechService(new SpeechServiceOptions
-        {
-            RecognitionCulture = "es-AR",
-            SynthesisCulture = "es-AR",
-            EmitPartialTranscriptions = false
-        });
 
         _orchestrator.StateChanged += OrchestratorOnStateChanged;
         _orchestrator.ProgressChanged += OrchestratorOnProgressChanged;
@@ -226,6 +288,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             extraTools,
             _environment,
             personalContext: DescribePersonalMemoryAsync,
+            // El libro va explícito para que la herramienta y el orbe lean el mismo: la fábrica
+            // creaba uno propio, y con dos instancias cacheando aparte «te espero» podía quedar
+            // encendido sobre una pregunta que la herramienta ya había contestado.
+            missions: _missionBook,
             rest: RestAsync);
 
     /// <summary>
@@ -241,7 +307,18 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     {
         CancelSpeechSafely();
         _neuralPlayer.Stop();
-        await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+        await SilenceVoiceAsync(CancellationToken.None).ConfigureAwait(false);
+
+        // El corte tiene que verse en el mismo cuadro en que se pide, o no se lee como obediencia.
+        // Sólo cuando estaba hablando o pensando: si estaba quieta no interrumpió nada, y encender
+        // «me callo» sobre el reposo sería inventar un gesto. Se apaga sola cuando el turno cierra.
+        if (_lastVisualState is AssistantVisualState.Speaking or AssistantVisualState.Thinking)
+        {
+            Publish(new AssistantRuntimeUpdate(
+                AssistantVisualState.Interrupted,
+                "Me callo",
+                MicrophoneActive: IsAnyMicrophoneActive()));
+        }
 
         if (depth == RestDepth.Callar)
         {
@@ -296,10 +373,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         CancelSpeechSafely();
         _neuralPlayer.Stop();
-        await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+        await SilenceVoiceAsync(CancellationToken.None).ConfigureAwait(false);
 
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             IsMuted
                 ? "Micrófono apagado"
                 : $"Atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”",
@@ -480,6 +557,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             ? OrbShape.Nube
             : OrbShape.Gota;
 
+        // Recién acá, con el archivo leído, se sabe qué voz eligió el usuario. Es el único lugar
+        // donde se fija: las opciones con las que se construye el sintetizador.
+        _speechSynthesizer = new SpeechService(new SpeechServiceOptions
+        {
+            RecognitionCulture = "es-AR",
+            SynthesisCulture = "es-AR",
+            PreferredVoiceName = _settings.PreferredVoiceName,
+            EmitPartialTranscriptions = false
+        });
+
         var selection = CreateRecognitionSelection(_settings);
         _recognition = selection.Provider;
         _recognitionProviderName = selection.Provider.Info.DisplayName;
@@ -531,13 +618,21 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             providerStatus += " · respaldo SAPI";
         }
 
+        // El vigía de fondo. Arranca enseguida porque una pregunta sin contestar de anteayer tiene
+        // que verse desde el primer cuadro, no dentro de cinco segundos.
+        _ambientTimer = new System.Threading.Timer(
+            _ => _ = RefreshAmbientAsync(),
+            null,
+            TimeSpan.Zero,
+            AmbientPeriod);
+
         var wakeStatus = _isMuted
             ? "voz silenciada"
             : wakeStarted
                 ? $"wake demo activo · decí “{_wakeWord.Phrases[0]}”"
                 : "PTT disponible";
         Publish(new AssistantRuntimeUpdate(
-            IsCloudConfigured ? AssistantVisualState.Idle : AssistantVisualState.Unconfigured,
+            Resting(),
             $"{providerStatus} · {wakeStatus}",
             // Primero el hecho, después lo que igual funciona. Sin mayúsculas y sin sonar a falla:
             // que falte la clave no es un error, es una instalación sin terminar.
@@ -579,7 +674,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             await PauseWakeWordAsync(turn.Token).ConfigureAwait(false);
             CancelSpeechSafely();
             _neuralPlayer.Stop();
-            await _speechSynthesizer.StopSpeakingAsync(turn.Token).ConfigureAwait(false);
+            await SilenceVoiceAsync(turn.Token).ConfigureAwait(false);
             return await ProcessRequestAsync(text, spoken, turn.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (turn.IsCancellationRequested)
@@ -617,6 +712,12 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             // Ya estaba cancelado y desechado: no hay nada que cortar.
         }
     }
+
+    /// <summary>
+    /// Calla la voz del sistema. Antes de que existan las preferencias no hay ninguna que callar.
+    /// </summary>
+    private Task SilenceVoiceAsync(CancellationToken cancellationToken) =>
+        _speechSynthesizer?.StopSpeakingAsync(cancellationToken) ?? Task.CompletedTask;
 
     private async Task<string> ProcessRequestAsync(string text, bool spoken, CancellationToken cancellationToken)
     {
@@ -661,8 +762,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 _pendingConfirmation = confirmation;
             }
 
+            // Pedir permiso no es «revisá esto»: se inclina hacia el usuario porque quiere hacer
+            // algo y no puede sin que le digan que sí. «Revisar» queda para lo que ya pasó.
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Attention,
+                AssistantVisualState.AskingPermission,
                 "Esperando tu decisión · no se realizó la acción",
                 result.Text,
                 Confirmation: confirmation));
@@ -675,7 +778,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             ? AssistantVisualState.Error
             : result.IsLocalMode
                 ? AssistantVisualState.Unconfigured
-                : AssistantVisualState.Idle;
+                : Resting();
         Publish(new AssistantRuntimeUpdate(
             state,
             result.IsLocalMode ? "Sigo con lo de acá · no salió nada del equipo" : "Listo",
@@ -706,7 +809,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             }
 
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Attention,
+                AssistantVisualState.AskingPermission,
                 "Esperando tu decisión · no se realizó la acción",
                 outcome.Text,
                 Confirmation: confirmation));
@@ -715,7 +818,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             var failed = outcome.ToolResult?.Status is ToolExecutionStatus.Failed or ToolExecutionStatus.Denied;
             Publish(new AssistantRuntimeUpdate(
-                failed ? AssistantVisualState.Error : AssistantVisualState.Idle,
+                failed ? AssistantVisualState.Error : Resting(),
                 failed ? "La política local no permitió la acción" : "Completado localmente",
                 outcome.Text,
                 ClearConfirmation: true,
@@ -740,7 +843,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         if (IsMuted)
         {
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Idle,
+                Resting(),
                 "La voz está silenciada",
                 MicrophoneActive: false));
             return;
@@ -758,7 +861,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
             _speechCancellation?.Cancel();
         _neuralPlayer.Stop();
-        await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
+        await SilenceVoiceAsync(cancellationToken).ConfigureAwait(false);
             _orchestrator.SetListening(true);
             var result = await _recognition.StartPushToTalkAsync(cancellationToken).ConfigureAwait(false);
             if (!result.Succeeded)
@@ -766,7 +869,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 _orchestrator.SetListening(false);
                 Publish(new AssistantRuntimeUpdate(
                     result.ErrorCode == SpeechErrorCode.Cancelled
-                        ? AssistantVisualState.Idle
+                        ? Resting()
                         : AssistantVisualState.Error,
                     "No pude abrir el micrófono",
                     SafeSpeechMessage(result.ErrorCode),
@@ -815,7 +918,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         if (!recognition.Succeeded)
         {
             var state = recognition.ErrorCode is SpeechErrorCode.Cancelled or SpeechErrorCode.MicrophoneMuted
-                ? AssistantVisualState.Idle
+                ? Resting()
                 : AssistantVisualState.Error;
             Publish(new AssistantRuntimeUpdate(
                 state,
@@ -829,7 +932,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         if (string.IsNullOrWhiteSpace(recognition.Text))
         {
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Idle,
+                Resting(),
                 "No detecté una frase · podés intentar otra vez",
                 MicrophoneActive: false));
             await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
@@ -863,10 +966,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         // corrían: apretabas silenciar y la voz seguía hablando.
         CancelSpeechSafely();
         _neuralPlayer.Stop();
-        await _speechSynthesizer.StopSpeakingAsync(cancellationToken).ConfigureAwait(false);
+        await SilenceVoiceAsync(cancellationToken).ConfigureAwait(false);
         _orchestrator.SetListening(false);
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             IsMuted ? "Voz silenciada · micrófono apagado" : "Disponible",
             MicrophoneActive: false));
         await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
@@ -901,7 +1004,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         await PersistVoiceSettingsAsync(cancellationToken).ConfigureAwait(false);
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             _isWakeWordEnabled
                 ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                 : "Wake desactivado · PTT disponible",
@@ -931,7 +1034,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             }
 
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Idle,
+                Resting(),
                 _listenWhileHidden && _isWakeWordEnabled && !IsMuted
                     ? $"Oculto y atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                     : "Widget oculto · escucha detenida",
@@ -942,7 +1045,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         await ResumeWakeWordAsync(cancellationToken).ConfigureAwait(false);
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             _isWakeWordEnabled && !IsMuted
                 ? $"Atento · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
                 : "Disponible · PTT activo",
@@ -1012,7 +1115,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             DismissPending(publish: false);
             var succeeded = result.Status == ToolExecutionStatus.Succeeded;
             Publish(new AssistantRuntimeUpdate(
-                succeeded ? AssistantVisualState.Idle : AssistantVisualState.Attention,
+                succeeded ? Resting() : AssistantVisualState.Attention,
                 succeeded ? "Acción completada" : "Acción bloqueada por la política segura",
                 result.Message,
                 ClearConfirmation: true));
@@ -1039,7 +1142,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         if (publish)
         {
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Idle,
+                Resting(),
                 "Acción cancelada · no se realizó ningún cambio",
                 ClearConfirmation: true));
         }
@@ -1097,23 +1200,30 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         var spokenText = text.Length <= MaximumSpokenCharacters
             ? text
             : text[..MaximumSpokenCharacters] + "…";
+
+        // El registro se decide una sola vez y con el texto entero, y de acá salen las dos cosas: el
+        // timbre con el que se sintetiza y la cara con la que el orbe lo acompaña. Calcularlo dos
+        // veces sería garantizar que se separen la primera vez que alguien toque uno de los dos.
+        var moment = VoiceRegister.Guess(spokenText);
+
         Publish(new AssistantRuntimeUpdate(
             AssistantVisualState.Speaking,
-            "Hablando · podés silenciarme cuando quieras"));
+            "Hablando · podés silenciarme cuando quieras",
+            Mood: OrbMoods.FromVoice(moment)));
 
         _speechCancellation?.Dispose();
         _speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var token = _speechCancellation.Token;
 
         RuntimeTrace.Write("voz.inicio", $"{spokenText.Length} caracteres · neural={_neuralVoice.IsAvailable}");
-        var spoke = await TrySpeakNeuralAsync(spokenText, token).ConfigureAwait(false);
+        var spoke = await TrySpeakNeuralAsync(spokenText, moment, token).ConfigureAwait(false);
         var neuralFailure = spoke ? null : _neuralVoice.LastFailure;
         RuntimeTrace.Write("voz.neural", spoke ? "sonó" : $"falló · {neuralFailure ?? "sin motivo"}");
 
-        if (!spoke && !token.IsCancellationRequested)
+        if (!spoke && !token.IsCancellationRequested && _speechSynthesizer is { } synthesizer)
         {
             // La voz de Windows queda como red: peor timbre, pero siempre disponible y sin red.
-            var result = await _speechSynthesizer.SpeakAsync(spokenText, token).ConfigureAwait(false);
+            var result = await synthesizer.SpeakAsync(spokenText, token).ConfigureAwait(false);
             spoke = result.Succeeded;
             RuntimeTrace.Write("voz.sapi", spoke ? "sonó" : $"falló · {result.ErrorCode} · {result.ErrorMessage}");
             if (!spoke)
@@ -1125,7 +1235,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         // Una voz que falla en silencio es indistinguible de una que decidió no hablar. Si algo se
         // rompió, tiene que decirlo: sin eso, diagnosticar es adivinar.
         Publish(new AssistantRuntimeUpdate(
-            spoke || token.IsCancellationRequested ? AssistantVisualState.Idle : AssistantVisualState.Error,
+            spoke || token.IsCancellationRequested ? Resting() : AssistantVisualState.Error,
             spoke || token.IsCancellationRequested
                 ? _conversationActive ? "En conversación · decime «listo» para cortar" : "Disponible"
                 : $"Sin voz: {neuralFailure ?? "no se pudo reproducir el audio"}"));
@@ -1209,7 +1319,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             try
             {
-                await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+                await SilenceVoiceAsync(CancellationToken.None).ConfigureAwait(false);
                 if (_recognition?.IsMicrophoneActive == true)
                 {
                     await _recognition.CancelPushToTalkAsync(CancellationToken.None).ConfigureAwait(false);
@@ -1223,7 +1333,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         IsMuted = true;
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             "Frenado en seco · micrófono silenciado",
             $"Corté todo con {PanicSwitch.Shortcut}. Reactivame desde la bandeja.",
             MicrophoneActive: false,
@@ -1244,14 +1354,17 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         RuntimeTrace.Write("voz.interrumpida");
         _speechCancellation?.Cancel();
         _neuralPlayer.Stop();
-        _ = _speechSynthesizer.StopSpeakingAsync(CancellationToken.None);
+        _ = SilenceVoiceAsync(CancellationToken.None);
     }
 
     /// <summary>
     /// Habla por oraciones: sintetiza la siguiente mientras suena la actual, así el primer sonido
     /// llega en cuanto está lista la primera frase en vez de esperar la respuesta entera.
     /// </summary>
-    private async Task<bool> TrySpeakNeuralAsync(string text, CancellationToken cancellationToken)
+    private async Task<bool> TrySpeakNeuralAsync(
+        string text,
+        VoiceMoment moment,
+        CancellationToken cancellationToken)
     {
         if (!_neuralVoice.IsAvailable)
         {
@@ -1264,11 +1377,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return false;
         }
 
-        // El registro se decide una vez para toda la frase, con el texto entero: partirlo por
+        // El registro llega decidido de afuera, con el texto entero y una sola vez: partirlo por
         // oraciones y juzgar cada tramo por separado haría que una misma respuesta cambiara de humor
-        // en el medio, que es peor que no variar nunca.
-        var moment = VoiceRegister.Guess(text);
-
+        // en el medio, que es peor que no variar nunca. Y viene de afuera para que sea el mismo con
+        // el que el orbe pone la cara.
         try
         {
             var pending = SpeakChunkAsync(chunks[0], moment, cancellationToken);
@@ -1423,7 +1535,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 await _recognition.SetMicrophoneMutedAsync(isMuted).ConfigureAwait(false);
             }
 
-            await _speechSynthesizer.SetMicrophoneMutedAsync(isMuted).ConfigureAwait(false);
+            if (_speechSynthesizer is not null)
+            {
+                await _speechSynthesizer.SetMicrophoneMutedAsync(isMuted).ConfigureAwait(false);
+            }
+
             if (_wakeWord is not null)
             {
                 await _wakeWord.SetMutedAsync(isMuted).ConfigureAwait(false);
@@ -1431,11 +1547,15 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
             if (isMuted)
             {
+                // Silenciarse a propósito no es sordera: el micrófono está apagado porque se lo
+                // pidieron, no porque no entregue audio.
+                Volatile.Write(ref _deaf, 0);
+
                 // Mute sigue siendo el corte duro: también cierra la conversación abierta.
                 await EndConversationAsync("Voz silenciada · conversación cerrada", CancellationToken.None)
                     .ConfigureAwait(false);
                 _wakeHandoffCancellation?.Cancel();
-                await _speechSynthesizer.StopSpeakingAsync(CancellationToken.None).ConfigureAwait(false);
+                await SilenceVoiceAsync(CancellationToken.None).ConfigureAwait(false);
                 _orchestrator.SetListening(false);
             }
             else
@@ -1449,7 +1569,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             }
 
             Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Idle,
+                Resting(),
                 isMuted
                     ? "Voz silenciada · micrófono apagado"
                     : _isWakeWordEnabled
@@ -1485,8 +1605,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             _budgetOverridePendingInput = input;
         }
 
+        // Autorizar gasto es autorización, no revisión: la única forma de seguir es que digas que sí.
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Attention,
+            AssistantVisualState.AskingPermission,
             "Límite local alcanzado · no se llamó al modelo",
             $"{detail} Los comandos locales siguen funcionando.",
             Confirmation: confirmation,
@@ -1610,7 +1731,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
 
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             reason,
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: _isWakeWordEnabled,
@@ -1722,6 +1843,14 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                     // y sólo se corta si falla dos veces seguidas. Seguir sería fingir que escucha.
                     if (capture.ErrorCode is SpeechErrorCode.DeviceError or SpeechErrorCode.Unavailable)
                     {
+                        // El dispositivo no entrega: eso es sorda, y hay que decirlo mientras se
+                        // reintenta. Seguir dibujando «te escucho» es prometer una escucha que no hay.
+                        Volatile.Write(ref _deaf, 1);
+                        Publish(new AssistantRuntimeUpdate(
+                            AssistantVisualState.Deaf,
+                            "No te oigo · reintentando",
+                            MicrophoneActive: false));
+
                         if (++consecutiveDeviceFailures >= 3)
                         {
                             await EndConversationAsync(
@@ -1738,6 +1867,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
                 }
 
                 consecutiveDeviceFailures = 0;
+
+                // La captura salió: el dispositivo entrega. Aunque no haya venido texto, oye.
+                Volatile.Write(ref _deaf, 0);
+
                 var transcript = capture.Text?.Trim();
                 if (string.IsNullOrWhiteSpace(transcript))
                 {
@@ -2213,7 +2346,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             if (!result.Succeeded)
             {
                 StartListeningWatchdog();
+                return;
             }
+
+            // El oído volvió: se apaga la sordera y el fondo pasa a guardia solo.
+            Volatile.Write(ref _deaf, 0);
         }
     }
 
@@ -2239,8 +2376,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             return;
         }
 
+        // Sorda, no error: el equipo anda y el asistente también, lo que no llega es el audio.
+        // Pintarlo de rojo manda a buscar una falla donde lo que hay es una capacidad caída.
+        Volatile.Write(ref _deaf, 1);
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Error,
+            AssistantVisualState.Deaf,
             "Sin micrófono · reintentando",
             "Windows no me deja acceder al micrófono. Sigo intentando.",
             MicrophoneActive: false,
@@ -2264,11 +2404,15 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                     if (_isDisposed || IsMuted || !_isWakeWordEnabled || _wakeWord is null)
                     {
+                        // Se dejó de intentar por decisión de alguien, no por falta de audio: la
+                        // sordera se apaga o queda encendida para siempre sobre un oído apagado.
+                        Volatile.Write(ref _deaf, 0);
                         return;
                     }
 
                     if (_wakeWord.State == WakeWordServiceState.Listening)
                     {
+                        Volatile.Write(ref _deaf, 0);
                         return;
                     }
 
@@ -2277,8 +2421,9 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
                     if (result.Succeeded)
                     {
+                        Volatile.Write(ref _deaf, 0);
                         Publish(new AssistantRuntimeUpdate(
-                            AssistantVisualState.Idle,
+                            Resting(),
                             $"Atento · decí \u201C{_wakeWord.Phrases[0]}\u201D",
                             "Ya te escucho de nuevo.",
                             MicrophoneActive: IsAnyMicrophoneActive(),
@@ -2340,6 +2485,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             {
                 RecognitionCulture = settings.RecognitionCulture,
                 SynthesisCulture = settings.RecognitionCulture,
+                PreferredVoiceName = settings.PreferredVoiceName,
                 EmitPartialTranscriptions = true
             }
         });
@@ -2434,6 +2580,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
     /// </summary>
     private void RecognitionOnAudioLevel(object? sender, AudioLevelEventArgs e)
     {
+        if (e.IsVoice)
+        {
+            // El detector vio voz: entra audio, y sorda deja de valer en este mismo cuadro. Es la
+            // contracara exacta de cómo se enciende, y por eso no puede quedarse pegada.
+            Volatile.Write(ref _deaf, 0);
+        }
+
         // Una sola línea por captura: esto corre decenas de veces por segundo y trazar cada llamada
         // convertiría el registro en ruido y el diagnóstico en imposible.
         if (e.IsVoice && Interlocked.Exchange(ref _voiceTraced, 1) == 0)
@@ -2465,6 +2618,13 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private void RecognitionOnMicrophoneActivityChanged(object? sender, MicrophoneActivityChangedEventArgs e)
     {
+        if (e.IsActive)
+        {
+            // Windows entregó el dispositivo: lo que enciende la sordera es justamente que no lo
+            // entregue, así que acá deja de valer sin esperar a que alguien hable.
+            Volatile.Write(ref _deaf, 0);
+        }
+
         if (e.IsActive && Interlocked.Exchange(ref _microphoneTraced, 1) == 0)
         {
             RuntimeTrace.Write("mic.abierto", $"a los {_captureClock?.ElapsedMilliseconds ?? -1} ms");
@@ -2486,7 +2646,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         var state = e.IsActive
             ? AssistantVisualState.Listening
             : _lastVisualState == AssistantVisualState.Listening
-                ? AssistantVisualState.Idle
+                ? Resting()
                 : _lastVisualState;
         Publish(new AssistantRuntimeUpdate(
             state,
@@ -2507,22 +2667,41 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         }
     }
 
-    private void RecognitionOnError(object? sender, SpeechServiceErrorEventArgs e) =>
+    /// <summary>
+    /// Un problema del oído. Que el dispositivo no esté no es lo mismo que que algo haya fallado.
+    /// </summary>
+    /// <remarks>
+    /// Sorda dice «no te oigo» y error dice «algo se rompió». Un micrófono que Windows no entrega
+    /// —lo tomó otra aplicación, cambió el predeterminado, se desenchufó— es lo primero, y pintarlo
+    /// de rojo manda al usuario a buscar una falla que no existe.
+    /// </remarks>
+    private void RecognitionOnError(object? sender, SpeechServiceErrorEventArgs e)
+    {
+        var deaf = e.ErrorCode is SpeechErrorCode.DeviceError or SpeechErrorCode.Unavailable;
+        if (deaf)
+        {
+            Volatile.Write(ref _deaf, 1);
+        }
+
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Error,
-            "La voz local informó un problema",
+            deaf ? AssistantVisualState.Deaf : AssistantVisualState.Error,
+            deaf ? "No te oigo · el micrófono no entrega audio" : "La voz local informó un problema",
             SafeSpeechMessage(e.ErrorCode),
             MicrophoneActive: IsAnyMicrophoneActive()));
+    }
 
     private void WakeOnMicrophoneActivityChanged(object? sender, MicrophoneActivityChangedEventArgs e)
     {
+        // Armar o soltar el oído es exactamente lo que separa guardia de reposo, así que si el orbe
+        // está quieto se recalcula el fondo acá mismo en vez de esperar al vigía.
+        var state = IsRestingState(_lastVisualState) ? Resting() : _lastVisualState;
         Publish(new AssistantRuntimeUpdate(
-            _lastVisualState,
+            state,
             e.IsActive && _isWakeWordEnabled
                 ? $"Wake demo activo · decí “{_wakeWord?.Phrases[0] ?? _identity.WakePhrases[0]}”"
-                : _lastVisualState == AssistantVisualState.Idle
+                : state == AssistantVisualState.Idle
                     ? "Micrófono de activación apagado"
-                    : CurrentStateLabel(_lastVisualState),
+                    : CurrentStateLabel(state),
             MicrophoneActive: IsAnyMicrophoneActive(),
             WakeWordEnabled: _isWakeWordEnabled));
     }
@@ -2532,7 +2711,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
     private void WakeOnError(object? sender, SpeechServiceErrorEventArgs e) =>
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Idle,
+            Resting(),
             "Wake demo no disponible · PTT sigue activo",
             SafeSpeechMessage(e.ErrorCode),
             MicrophoneActive: IsAnyMicrophoneActive(),
@@ -2576,6 +2755,154 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         Updated?.Invoke(this, update);
     }
 
+    /// <summary>
+    /// Qué muestra el orbe cuando no está haciendo nada.
+    /// </summary>
+    /// <remarks>
+    /// «Nada» no es un solo estado: puede haber una pregunta sin contestar, un proyecto frenado, una
+    /// misión avanzando de fondo o un micrófono que no oye. Ninguna de esas cosas es una actividad
+    /// —no hay turno en curso— y todas tienen que verse, así que reposo es el último de la lista y no
+    /// el único. Como se recalcula entero en cada publicación, un estado de fondo se apaga solo en
+    /// cuanto su condición deja de valer: no hay nada que acordarse de bajar.
+    /// <para>
+    /// El orden es el de <c>PRI</c> del boceto: sorda 5, esperándote y proyecto y sin clave 3,
+    /// trabajando sin vos y guardia 1, reposo 0.
+    /// </para>
+    /// </remarks>
+    private AssistantVisualState Resting()
+    {
+        // Sorda gana: dibujar cualquier otra cosa mientras no entra audio es prometer que escucha.
+        if (Volatile.Read(ref _deaf) != 0)
+        {
+            return AssistantVisualState.Deaf;
+        }
+
+        // Una pregunta sin contestar es lo único de acá que se destraba ahora mismo.
+        if (_missionWaiting)
+        {
+            return AssistantVisualState.WaitingForYou;
+        }
+
+        if (_projectWaiting)
+        {
+            return AssistantVisualState.ProjectWaiting;
+        }
+
+        if (!IsCloudConfigured)
+        {
+            return AssistantVisualState.Unconfigured;
+        }
+
+        if (_missionRunning)
+        {
+            return AssistantVisualState.Background;
+        }
+
+        // Guardia y «te escucho» son dos cosas distintas y confundirlas es un problema de privacidad:
+        // una dice «puedo oírte si me llamás» y la otra «te estoy grabando ahora».
+        if (!IsMuted && _isWakeWordEnabled && _wakeWord?.State == WakeWordServiceState.Listening)
+        {
+            return AssistantVisualState.Watching;
+        }
+
+        return AssistantVisualState.Idle;
+    }
+
+    /// <summary>
+    /// Si este estado es de los que se pueden pisar sin tapar nada que esté pasando.
+    /// </summary>
+    /// <remarks>
+    /// «Interrumpida» entra en la lista aunque no sea reposo: es un corte, entra de golpe y se apaga
+    /// sola. El vigía no la toca mientras el turno sigue vivo —se sale antes por
+    /// <c>_requestActive</c>—, así que lo único que hace acá es garantizar que no quede pegada si el
+    /// turno termina por un camino que no publica nada.
+    /// </remarks>
+    private static bool IsRestingState(AssistantVisualState state) => state is
+        AssistantVisualState.Idle or
+        AssistantVisualState.Interrupted or
+        AssistantVisualState.Watching or
+        AssistantVisualState.Background or
+        AssistantVisualState.WaitingForYou or
+        AssistantVisualState.ProjectWaiting or
+        AssistantVisualState.Deaf or
+        AssistantVisualState.Unconfigured or
+        AssistantVisualState.Offline;
+
+    /// <summary>
+    /// Mira lo que enciende los estados de fondo y, si el orbe está quieto, lo pone al día.
+    /// </summary>
+    /// <remarks>
+    /// Sólo pisa estados de reposo. Si hay un turno pensando, una respuesta sonando o una
+    /// confirmación esperando, eso es lo que está pasando y el fondo puede esperar a que termine.
+    /// </remarks>
+    private async Task RefreshAmbientAsync()
+    {
+        if (_isDisposed || !_isInitialized ||
+            Interlocked.CompareExchange(ref _ambientRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var missions = await _missionBook
+                .ListAsync(onlyOpen: true, CancellationToken.None)
+                .ConfigureAwait(false);
+            _missionWaiting = missions.Any(mission =>
+                mission.State == MissionState.Esperando && mission.Question is not null);
+            _missionRunning = missions.Any(mission => mission.State == MissionState.EnCurso);
+
+            var now = DateTimeOffset.Now;
+            if (now - _projectsReadAt >= ProjectPeriod)
+            {
+                _projectsReadAt = now;
+
+                // El propio Viernes queda afuera por la misma razón que en la herramienta: mirarse
+                // trabajando produce un lazo y no es lo que el usuario quiere seguir.
+                _projectWaiting = _projectWatcher
+                    .Recent(now, maximum: 8, excludeProjectContaining: "Viernes")
+                    .Any(session => session.Activity == SessionActivity.Esperando);
+            }
+
+            PublishResting();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Mirar de fondo no puede tumbar el asistente ni hacerse notar por fallar.
+            RuntimeTrace.Write("fondo.excepcion", exception.GetType().Name);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _ambientRunning, 0);
+        }
+    }
+
+    /// <summary>Publica el estado de fondo que corresponde ahora, si hay lugar para publicarlo.</summary>
+    private void PublishResting()
+    {
+        if (Volatile.Read(ref _requestActive) != 0 ||
+            Volatile.Read(ref _confirmActive) != 0 ||
+            Volatile.Read(ref _distilling) != 0 ||
+            _conversationActive ||
+            HasPendingConfirmation ||
+            !IsRestingState(_lastVisualState))
+        {
+            return;
+        }
+
+        var resting = Resting();
+        if (resting == _lastVisualState)
+        {
+            return;
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            resting,
+            CurrentStateLabel(resting),
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+    }
+
     private bool IsAnyMicrophoneActive() =>
         (_recognition?.IsMicrophoneActive ?? false) || (_wakeWord?.IsMicrophoneActive ?? false);
 
@@ -2585,7 +2912,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         AssistantVisualState.Thinking => "Pensando…",
         AssistantVisualState.Speaking => "Hablando…",
         AssistantVisualState.Attention => "Esperando confirmación",
+        AssistantVisualState.AskingPermission => "Pidiendo permiso",
         AssistantVisualState.Error => "Atención necesaria",
+        AssistantVisualState.Watching => "Atento",
+        AssistantVisualState.Background => "Trabajando sin vos",
+        AssistantVisualState.WaitingForYou => "Te pregunté algo y quedó sin contestar",
+        AssistantVisualState.ProjectWaiting => "Un proyecto te está esperando",
+        AssistantVisualState.Interrupted => "Me callo",
+        AssistantVisualState.Deaf => "No te oigo",
+        AssistantVisualState.Unconfigured => "Falta la clave",
+        AssistantVisualState.Offline => "Sin red",
         _ => "Disponible"
     };
 
@@ -2616,6 +2952,8 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         _isDisposed = true;
         _conversationActive = false;
+        _ambientTimer?.Dispose();
+        _ambientTimer = null;
         _conversationCancellation?.Cancel();
         _conversationCancellation?.Dispose();
         _wakeHandoffCancellation?.Cancel();
@@ -2657,7 +2995,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         _speechCancellation?.Cancel();
         _speechCancellation?.Dispose();
         await _neuralPlayer.DisposeAsync().ConfigureAwait(false);
-        await _speechSynthesizer.DisposeAsync().ConfigureAwait(false);
+        if (_speechSynthesizer is not null)
+        {
+            await _speechSynthesizer.DisposeAsync().ConfigureAwait(false);
+        }
+
         _voiceTransitionGate.Dispose();
         _httpClient.Dispose();
     }

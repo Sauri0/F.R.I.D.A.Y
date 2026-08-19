@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows.Data;
 using System.Windows.Media;
+using Viernes.App.Controls;
 using Viernes.App.ViewModels;
 using Brush = System.Windows.Media.Brush;
 using Color = System.Windows.Media.Color;
@@ -11,20 +12,17 @@ namespace Viernes.App.Shell;
 /// El color de cada estado, uno solo y compartido: el orbe, la píldora y el tinte del vidrio tienen
 /// que decir lo mismo al mismo tiempo.
 /// </summary>
+/// <remarks>
+/// Acá había una segunda tabla de colores escrita a mano que sólo cubría ocho de los quince estados:
+/// los otros siete caían al celeste de reposo, así que el vidrio se teñía de reposo mientras el orbe
+/// dibujaba «pido permiso». Dos tablas para lo mismo se desincronizan la primera vez que alguien
+/// toca una sola; ahora esta delega en <see cref="OrbPalette"/>, que es donde viven los números
+/// medidos del boceto.
+/// </remarks>
 internal static class StatePalette
 {
     /// <summary>Color base del estado.</summary>
-    public static Color For(AssistantVisualState state) => state switch
-    {
-        AssistantVisualState.Listening => Color.FromRgb(0x72, 0xF0, 0xC0),
-        AssistantVisualState.Thinking => Color.FromRgb(0x9B, 0xB7, 0xFF),
-        AssistantVisualState.Speaking => Color.FromRgb(0xFF, 0xCE, 0x82),
-        AssistantVisualState.Attention => Color.FromRgb(0xFF, 0xB3, 0x47),
-        AssistantVisualState.Error => Color.FromRgb(0xFF, 0x73, 0x85),
-        AssistantVisualState.Unconfigured => Color.FromRgb(0xD8, 0xD2, 0xC6),
-        AssistantVisualState.Offline => Color.FromRgb(0xE9, 0xEF, 0xF2),
-        _ => Color.FromRgb(0x72, 0xD9, 0xFF)
-    };
+    public static Color For(AssistantVisualState state) => OrbPalette.For(state).Body;
 
     /// <summary>Pincel congelado del estado, para no crear uno por cuadro.</summary>
     public static Brush BrushFor(AssistantVisualState state)
