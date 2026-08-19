@@ -94,7 +94,9 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// que se construye— y ahora esas opciones se arman cuando ya se sabe cuál es.
     /// </remarks>
     private ISpeechService? _speechSynthesizer;
-    private readonly OpenRouterSpeechClient _neuralVoice;
+    // No es readonly porque cambiar la clave de OpenRouter obliga a rehacerlo: el cliente toma las
+    // opciones al construirse y ViernesOptions es inmutable, así que reemplazar _options no le llega.
+    private OpenRouterSpeechClient _neuralVoice;
 
     /// <summary>
     /// La voz de Google. Es la principal desde que el usuario eligió Aoede escuchando las catorce.
@@ -656,6 +658,162 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// detector de voz —lo caro— se conserva.
     /// </para>
     /// </remarks>
+    /// <summary>Saca una credencial del entorno del usuario y de este proceso.</summary>
+    /// <remarks>No lanza: no poder tocar el entorno no puede tumbar un borrado del archivo.</remarks>
+    private static void OlvidarDelEntorno(string nombre)
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable(nombre, null, EnvironmentVariableTarget.User);
+            Environment.SetEnvironmentVariable(nombre, null);
+        }
+        catch (Exception excepcion) when (excepcion is System.Security.SecurityException
+            or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>Qué claves hay puestas. <b>Nunca devuelve los valores.</b></summary>
+    public CredentialsState DescribeCredentials() => new(
+        HasOpenRouter: LocalCredentials.Has(ViernesOptions.ApiKeyEnvironmentVariable),
+        HasGoogle: LocalCredentials.Has("GOOGLE_API_KEY"),
+        OpenRouterShadowed: LocalCredentials.IsShadowed(ViernesOptions.ApiKeyEnvironmentVariable));
+
+    /// <summary>
+    /// Guarda las claves y hace que surtan efecto sin reiniciar, cuando se puede.
+    /// </summary>
+    /// <remarks>
+    /// <b>Cada clave va a un lugar distinto y no es un descuido.</b> La de OpenRouter va a las
+    /// variables de entorno de la cuenta de Windows y no a ningún archivo, que es como estuvo
+    /// siempre; la de Google va al archivo de claves, que es donde el usuario pidió que estuviera.
+    /// Lo único que cambió con esta ventana es por dónde entran.
+    /// <para>
+    /// La de Google surte efecto <b>siempre</b>, en el acto: el cliente de voz la pide con una
+    /// función en cada uso en vez de haberla guardado al arrancar, así que alcanza con releer el
+    /// archivo.
+    /// </para>
+    /// <para>
+    /// La de OpenRouter pide rehacer el orquestador, porque los clientes toman las opciones al
+    /// construirse. Y rehacer el orquestador <b>sólo es seguro si no hay una conversación abierta</b>
+    /// —está dicho en <c>InitializeAsync</c>, donde se hace por única vez «antes de que exista una
+    /// conversación»—. Con una charla en curso, la clave queda guardada y se avisa que corre desde
+    /// la próxima, en vez de rehacer el orquestador abajo de un turno o mentir que ya está.
+    /// </para>
+    /// <para>
+    /// Ningún valor de clave entra acá en la bitácora, ni en un mensaje, ni en una excepción. Lo que
+    /// se anota es cuál cambió.
+    /// </para>
+    /// </remarks>
+    public async Task<CredentialsResult> SetCredentialsAsync(
+        string? openRouterKey,
+        string? googleKey,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        var pendientes = new List<string>(2);
+        var cambiadas = new List<string>(2);
+
+        if (googleKey is not null)
+        {
+            var problema = LocalCredentials.Set("GOOGLE_API_KEY", googleKey);
+            if (problema is not null)
+            {
+                return new CredentialsResult(Problem: problema);
+            }
+
+            // Borrar tiene que borrar, y la clave puede estar en DOS lugares: el archivo y el
+            // entorno. Sacándola sólo del archivo, el respaldo del entorno la resucita y el botón
+            // «Borrar» no borra nada —comprobado en esta máquina, que tiene GOOGLE_API_KEY en el
+            // entorno—. Guardar una nueva no toca el entorno: para eso está el aviso de sombra.
+            if (googleKey.Length == 0)
+            {
+                OlvidarDelEntorno("GOOGLE_API_KEY");
+            }
+
+            cambiadas.Add("google");
+        }
+
+        if (openRouterKey is not null)
+        {
+            try
+            {
+                var limpio = openRouterKey.Trim();
+                var valor = limpio.Length == 0 ? null : limpio;
+
+                // A la cuenta de Windows, para que sobreviva al reinicio; y al proceso, para que
+                // ViernesOptions.FromEnvironment la vea sin cerrar sesión.
+                Environment.SetEnvironmentVariable(
+                    ViernesOptions.ApiKeyEnvironmentVariable, valor, EnvironmentVariableTarget.User);
+                Environment.SetEnvironmentVariable(ViernesOptions.ApiKeyEnvironmentVariable, valor);
+
+                // Y si es un borrado, también del archivo: el archivo le gana al entorno, así que
+                // dejarla ahí sería borrar la que no se usa y conservar la que sí.
+                if (valor is null)
+                {
+                    LocalCredentials.Set(ViernesOptions.ApiKeyEnvironmentVariable, null);
+                }
+
+                cambiadas.Add("openrouter");
+            }
+            catch (Exception excepcion) when (excepcion is System.Security.SecurityException
+                or UnauthorizedAccessException)
+            {
+                // El tipo de la excepción, no su mensaje: un mensaje puede arrastrar el valor.
+                return new CredentialsResult(
+                    Problem: $"No se pudo guardar la clave de OpenRouter ({excepcion.GetType().Name}).");
+            }
+        }
+
+        if (cambiadas.Count == 0)
+        {
+            return new CredentialsResult();
+        }
+
+        RuntimeTrace.Write("claves.cambiadas", string.Join(" · ", cambiadas));
+
+        if (openRouterKey is not null)
+        {
+            if (_conversationActive || _liveSession is not null)
+            {
+                pendientes.Add(
+                    "la clave de OpenRouter quedó guardada, pero la charla que está abierta sigue " +
+                    "con la anterior: la nueva entra en la próxima");
+            }
+            else
+            {
+                // Sin candado, y hay que decir por qué: acá no existe un candado de turno —el
+                // orquestador se rehace una sola vez al arrancar, antes de que haya conversación—.
+                // Lo que protege esto es la guarda de arriba: no hay charla abierta ni sesión en
+                // vivo. Queda una ventana chica: que la palabra de despertar dispare justo entre la
+                // comprobación y el reemplazo. Si pasa, ese turno usa el cliente anterior y el
+                // siguiente ya usa el nuevo. Es el peor caso y es aceptable; inventar un candado
+                // para esto sería agregar un punto de bloqueo nuevo en el camino de la voz.
+                _options = ViernesOptions.FromEnvironment(assistantName: _identity.Name);
+                _neuralVoice = new OpenRouterSpeechClient(
+                    _httpClient,
+                    _options,
+                    SpeechSynthesisOptions.FromEnvironment());
+                RebuildOrchestrator(_mcpTools);
+            }
+        }
+
+        if (LocalCredentials.IsShadowed(ViernesOptions.ApiKeyEnvironmentVariable))
+        {
+            pendientes.Add(
+                "el archivo de claves tiene otra clave de OpenRouter y ésa es la que se usa");
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            IsCloudConfigured ? "Claves guardadas." : "Claves guardadas · todavía no puedo pensar sin la de OpenRouter",
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+
+        return new CredentialsResult(
+            Warning: pendientes.Count == 0 ? null : string.Join("; ", pendientes) + ".");
+    }
+
     public async Task<AssistantRenameResult> SetAssistantNameAsync(
         string? name,
         CancellationToken cancellationToken)

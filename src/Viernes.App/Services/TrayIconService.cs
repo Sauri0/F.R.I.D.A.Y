@@ -35,6 +35,7 @@ internal sealed class TrayIconService : IDisposable
         Action toggleAutoStart,
         Action<string> chooseShape,
         Action changeName,
+        Action changeKeys,
         Action exit)
     {
         // Elegir el cuerpo es preferencia, no configuración: no cambia ninguna capacidad.
@@ -56,6 +57,7 @@ internal sealed class TrayIconService : IDisposable
         // También acá y no sólo en el menú del orbe: con el widget guardado en la bandeja, ésta es la
         // única puerta que queda abierta.
         _nameItem = new Forms.ToolStripMenuItem($"Cómo me llamo: {_assistantName}…", null, (_, _) => changeName());
+        var keysItem = new Forms.ToolStripMenuItem("Mis claves…", null, (_, _) => changeKeys());
 
         var menu = new Forms.ContextMenuStrip();
         menu.Items.AddRange([
@@ -63,6 +65,7 @@ internal sealed class TrayIconService : IDisposable
             new Forms.ToolStripSeparator(),
             shapeMenu,
             _nameItem,
+            keysItem,
             new Forms.ToolStripSeparator(),
             _muteItem,
             _wakeWordItem,

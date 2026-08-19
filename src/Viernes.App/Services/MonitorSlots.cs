@@ -31,9 +31,6 @@ namespace Viernes.App.Services;
 /// </remarks>
 internal sealed class MonitorSlots
 {
-    /// <summary>Margen contra el borde. Va sobre el área de trabajo, no sobre los límites físicos.</summary>
-    private const double Margin = 24;
-
     private readonly string _path = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Viernes",
@@ -73,9 +70,14 @@ internal sealed class MonitorSlots
             return stored;
         }
 
+        // El margen sale de OrbMotion y no de una constante propia. Acá había un 24 contra los 20
+        // de la física, así que el orbe estrenaba un monitor cuatro píxeles adentro de donde
+        // termina en todos los demás casos, y en cuanto la física corría el imán lo acomodaba: un
+        // acomodo chico pero visible, y sin motivo. Un margen escrito dos veces es un margen que
+        // alguien va a cambiar en uno solo.
         return new Point(
-            workArea.Right - orbSize.Width - Margin,
-            workArea.Bottom - orbSize.Height - Margin);
+            workArea.Right - orbSize.Width - Shell.OrbMotion.Margin,
+            workArea.Bottom - orbSize.Height - Shell.OrbMotion.Margin);
     }
 
     /// <summary>Guarda dónde lo dejaste, para ese monitor y esa resolución.</summary>

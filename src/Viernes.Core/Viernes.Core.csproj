@@ -31,4 +31,14 @@
     <ProjectReference Include="..\Viernes.Memory\Viernes.Memory.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      La carpeta donde vive el archivo de claves se resuelve con GetFolderPath, que consulta a
+      Windows y NO mira la variable LOCALAPPDATA: no hay forma de redirigirla desde afuera. Sin esta
+      costura, una prueba de escritura de claves o escribe en el archivo real de quien compila, o
+      se saltea sola. Se saltearon ocho, en verde, sin que nadie se enterara.
+    -->
+    <InternalsVisibleTo Include="Viernes.Core.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -118,6 +118,23 @@ internal sealed record ShellActivationRequest(
 /// <param name="Name">El nombre que rige ahora, ya normalizado.</param>
 /// <param name="Problem">Por qué no se aplicó, en palabras que se le puedan mostrar.</param>
 /// <param name="Warning">Qué quedó sin surtir efecto hasta reiniciar, si algo quedó.</param>
+/// <summary>Qué claves hay puestas. <b>Nunca los valores.</b></summary>
+/// <param name="HasOpenRouter">Si hay una clave de OpenRouter que el asistente pueda usar.</param>
+/// <param name="HasGoogle">Si hay una de Google.</param>
+/// <param name="OpenRouterShadowed">
+/// Si el archivo de claves tiene una de OpenRouter distinta de la del entorno. Importa porque el
+/// archivo le gana al entorno: guardar una clave nueva por la interfaz no tendría efecto.
+/// </param>
+internal sealed record CredentialsState(
+    bool HasOpenRouter,
+    bool HasGoogle,
+    bool OpenRouterShadowed);
+
+/// <summary>Cómo salió el cambio de claves. Sin ningún valor adentro.</summary>
+internal sealed record CredentialsResult(
+    string? Problem = null,
+    string? Warning = null);
+
 internal sealed record AssistantRenameResult(
     bool Applied,
     string Name,
@@ -165,6 +182,21 @@ internal interface IAssistantRuntime : IAsyncDisposable
     /// <summary>
     /// Le cambia el nombre, y con él la palabra que lo despierta, sin reiniciar.
     /// </summary>
+    /// <summary>Qué claves hay puestas, sin decir cuáles.</summary>
+    CredentialsState DescribeCredentials();
+
+    /// <summary>
+    /// Guarda las claves que vengan y hace que surtan efecto sin reiniciar, si se puede.
+    /// </summary>
+    /// <remarks>
+    /// <c>null</c> significa «no toques ésta»; cadena vacía significa «borrala». Son dos cosas
+    /// distintas y confundirlas borraría una clave por dejar un campo en blanco.
+    /// </remarks>
+    Task<CredentialsResult> SetCredentialsAsync(
+        string? openRouterKey,
+        string? googleKey,
+        CancellationToken cancellationToken);
+
     Task<AssistantRenameResult> SetAssistantNameAsync(string? name, CancellationToken cancellationToken);
 
     Task InitializeAsync(CancellationToken cancellationToken);

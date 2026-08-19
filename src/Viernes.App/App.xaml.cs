@@ -44,6 +44,20 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        // El ícono de la aplicación, dibujado con el orbe de verdad. Se corre a mano cuando cambia
+        // el cuerpo o la paleta; el .ico va versionado porque el compilador lo necesita antes de que
+        // exista un ejecutable capaz de dibujarlo.
+        var logoIndex = Array.IndexOf(e.Args, "--render-logo");
+        if (logoIndex >= 0)
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var carpeta = logoIndex + 1 < e.Args.Length
+                ? e.Args[logoIndex + 1]
+                : Path.Combine(Path.GetTempPath(), "viernes-logo");
+            _ = RenderLogoAndExitAsync(carpeta);
+            return;
+        }
+
         // Banco de micrófono: una ventana con tres mediciones y un botón cada una. Existe porque
         // cada arreglo de voz de este proyecto salió de medir, y hasta ahora la medición había que
         // armarla a mano y se tiraba después.
@@ -103,6 +117,7 @@ public partial class App : System.Windows.Application
             ToggleAutoStart,
             ChooseOrbShape,
             ChangeAssistantName,
+            ChangeKeys,
             RequestExit);
 
         // El freno se engancha antes de nada más: si algo falla después, el corte ya existe.
@@ -153,6 +168,22 @@ public partial class App : System.Windows.Application
         catch (Exception exception)
         {
             Console.Error.WriteLine($"El diagnóstico de voz falló: {exception}");
+        }
+        finally
+        {
+            Shutdown();
+        }
+    }
+
+    private async Task RenderLogoAndExitAsync(string outputDirectory)
+    {
+        try
+        {
+            Console.WriteLine(await Diagnostics.OrbIcon.RunAsync(outputDirectory));
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"No se pudo dibujar el ícono: {exception}");
         }
         finally
         {
@@ -315,6 +346,27 @@ public partial class App : System.Windows.Application
         }
 
         var dialog = new Shell.AssistantNameDialog(_viewModel);
+        if (_window is { IsVisible: true })
+        {
+            dialog.Owner = _window;
+        }
+        else
+        {
+            dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        }
+
+        dialog.ShowDialog();
+    }
+
+    /// <summary>Las dos claves, por la misma puerta que el nombre y con el mismo dueño.</summary>
+    private void ChangeKeys()
+    {
+        if (_viewModel is null)
+        {
+            return;
+        }
+
+        var dialog = new Shell.ClavesDialog(_viewModel);
         if (_window is { IsVisible: true })
         {
             dialog.Owner = _window;

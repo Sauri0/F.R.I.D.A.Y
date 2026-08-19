@@ -130,6 +130,27 @@ public class AssistantNameDialogTests
 
         public bool HasSpendAuthorization => false;
 
+        // Las claves las anota y nada más: esta clase existe para probar el renombrado, y guardar
+        // credenciales de verdad desde una prueba tocaría el entorno de quien la corre.
+        public string? UltimaClaveRouter { get; private set; }
+
+        public string? UltimaClaveGoogle { get; private set; }
+
+        public CredentialsState DescribeCredentials() => new(
+            HasOpenRouter: !string.IsNullOrEmpty(this.UltimaClaveRouter),
+            HasGoogle: !string.IsNullOrEmpty(this.UltimaClaveGoogle),
+            OpenRouterShadowed: false);
+
+        public Task<CredentialsResult> SetCredentialsAsync(
+            string? openRouterKey,
+            string? googleKey,
+            CancellationToken cancellationToken)
+        {
+            if (openRouterKey is not null) { this.UltimaClaveRouter = openRouterKey; }
+            if (googleKey is not null) { this.UltimaClaveGoogle = googleKey; }
+            return Task.FromResult(new CredentialsResult());
+        }
+
         public Task<AssistantRenameResult> SetAssistantNameAsync(
             string? nombre,
             CancellationToken cancellationToken)

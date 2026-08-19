@@ -292,6 +292,7 @@ public partial class MainWindow : Window
         // El nombre no es decoración: es la palabra con la que se lo despierta. Se pidió que se
         // pueda cambiar «tanto ahí como en las opciones del agente».
         AddSimpleItem(menu, "Cómo me llamo…", ShowAssistantNameDialog);
+        AddSimpleItem(menu, "Mis claves…", ShowClavesDialog);
         AddSimpleItem(menu, "Guardarse en la bandeja", HideToTray);
 
         OrbDragSurface.ContextMenu = menu;
@@ -304,6 +305,10 @@ public partial class MainWindow : Window
     /// <summary>Abre la ventanita del nombre, con el orbe como dueño para que quede encima.</summary>
     private void ShowAssistantNameDialog() =>
         new Shell.AssistantNameDialog(_viewModel) { Owner = this }.ShowDialog();
+
+    /// <summary>Las dos claves, para ponerlas o cambiarlas sin abrir un archivo.</summary>
+    private void ShowClavesDialog() =>
+        new Shell.ClavesDialog(_viewModel) { Owner = this }.ShowDialog();
 
     private void RefreshFollowItems()
     {

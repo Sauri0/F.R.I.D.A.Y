@@ -129,6 +129,16 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// <summary>
     /// Le pone otro nombre. El aviso de cambio es lo que mueve la bandeja y el título de la ventana.
     /// </summary>
+    /// <summary>Qué claves hay puestas. Nunca los valores.</summary>
+    public CredentialsState DescribeCredentials() => _runtime.DescribeCredentials();
+
+    /// <summary>Guarda las claves. Ver <see cref="IAssistantRuntime.SetCredentialsAsync"/>.</summary>
+    public Task<CredentialsResult> SetCredentialsAsync(
+        string? openRouterKey,
+        string? googleKey,
+        CancellationToken cancellationToken) =>
+        _runtime.SetCredentialsAsync(openRouterKey, googleKey, cancellationToken);
+
     public async Task<AssistantRenameResult> RenameAssistantAsync(
         string? name,
         CancellationToken cancellationToken)
