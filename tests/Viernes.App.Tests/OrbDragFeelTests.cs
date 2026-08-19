@@ -140,8 +140,10 @@ public sealed class OrbDragFeelTests
             motion.Step(paso, Pantalla);
         }
 
-        // Y la pausa antes de soltar: 60 ms con la mano quieta. Nada extraordinario.
-        for (var t = 0.0; t < 0.060; t += paso)
+        // Y la pausa antes de soltar. 150 ms es lo que tarda una mano de verdad en levantar el dedo:
+        // medido con trece tiros del usuario, el tiro salía en CERO seis de trece veces y en todas
+        // ésas el cursor estaba exactamente donde lo había dejado el último cuadro.
+        for (var t = 0.0; t < 0.150; t += paso)
         {
             motion.DragTo(new Point(x, 500));
             motion.Step(paso, Pantalla);
@@ -152,6 +154,47 @@ public sealed class OrbDragFeelTests
         Assert.True(
             motion.Speed > 700,
             $"Se murió en la pausa: salió a {motion.Speed:0} px/s después de un envión de 1400.");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(150)]
+    [InlineData(200)]
+    public void ElTiroSobreviveALaPausaDeLevantarElDedo(int pausaMs)
+    {
+        // Estos cinco casos salen de trece tiros REALES del usuario, leídos de la bitácora. El pico
+        // de la mano daba entre 2469 y 6545 px/s y el tiro salía en CERO seis de trece veces; en
+        // todas ésas el cursor estaba exactamente donde lo había dejado el último cuadro, o sea que
+        // la mano ya estaba quieta al soltar.
+        //
+        // Cuánto dura esa quietud no lo elige nadie: es lo que tarda un dedo en levantarse. Ninguna
+        // de estas cinco puede dar cero.
+        var motion = new OrbMotion();
+        motion.Teleport(new Point(300, 500));
+        motion.BeginDrag();
+
+        var paso = 1.0 / 180;
+        var x = 300.0;
+        for (var t = 0.0; t < 0.25; t += paso)
+        {
+            x += 1400 * paso;
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        for (var t = 0.0; t < pausaMs / 1000.0; t += paso)
+        {
+            motion.DragTo(new Point(x, 500));
+            motion.Step(paso, Pantalla);
+        }
+
+        motion.Drop();
+
+        Assert.True(
+            motion.Speed > 400,
+            $"Con {pausaMs} ms de pausa salió a {motion.Speed:0} px/s de un envión de 1400.");
     }
 
     [Fact]

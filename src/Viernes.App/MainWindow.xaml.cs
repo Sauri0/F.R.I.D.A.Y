@@ -1849,6 +1849,21 @@ public partial class MainWindow : Window
         }
 
         _dragging = false;
+
+        // Se anota TODO lo que decide el tiro, porque este arrastre se arregló tres veces razonando
+        // y las tres el usuario siguió viendo el defecto: las pruebas de OrbMotion pasaban en verde
+        // mientras la ventana hacía otra cosa. Lo que no se mide acá adentro no se puede arreglar.
+        var mano = _motion.HandVelocity;
+        var cursor = PointerPosition();
+        Diagnostics.RuntimeTrace.Write(
+            "orbe.suelto",
+            $"tiro={mano.Length:0} px/s · PICO={_motion.HandPeak:0} px/s · " +
+            $"arrastre={_motion.DragSeconds * 1000:0} ms · muestras={_motion.HandSamples} · " +
+            $"objetivo=({_motion.Target.X:0};{_motion.Target.Y:0}) · " +
+            $"cursor=({cursor.X - _grab.X:0};{cursor.Y - _grab.Y:0}) · " +
+            $"orbe=({_motion.Position.X:0};{_motion.Position.Y:0}) · " +
+            $"ultimoCuadro={_motion.SinceLastSample * 1000:0} ms");
+
         _motion.Drop();
         SaveOrbPlacement();
 
