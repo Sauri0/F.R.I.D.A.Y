@@ -24,15 +24,34 @@ public sealed class MissionBook
         Converters = { new JsonStringEnumConverter() }
     };
 
+    /// <summary>Una compuerta por archivo, compartida por todas las instancias que lo miran.</summary>
+    /// <remarks>
+    /// Era de instancia. El desplegable de misiones arma un libro propio por lectura y por escritura,
+    /// y el runtime tiene el suyo vivo desde que arranca: con una compuerta por instancia, contestar
+    /// la pregunta pendiente desde el panel mientras la herramienta «misión» del modelo está
+    /// escribiendo son dos leer-modificar-escribir que no se ven, y el último que guarda pisa entero
+    /// al otro. El archivo no se corrompe —el reemplazo es atómico— pero el trabajo del otro
+    /// desaparece sin que nada avise.
+    /// </remarks>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> FileGates =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private readonly string _path;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _gate;
     private List<Mission>? _missions;
 
-    public MissionBook(string? path = null) =>
+    /// <summary>Cómo estaba el archivo cuando se cargó lo que hay en <see cref="_missions"/>.</summary>
+    private (DateTime WriteUtc, long Length)? _stamp;
+
+    public MissionBook(string? path = null)
+    {
         _path = path ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Viernes",
             "misiones.json");
+
+        _gate = FileGates.GetOrAdd(_path, static _ => new SemaphoreSlim(1, 1));
+    }
 
     public string FilePath => _path;
 
@@ -320,14 +339,47 @@ public sealed class MissionBook
         return trimmed.Length <= maximum ? trimmed : trimmed[..maximum];
     }
 
+    /// <summary>Cómo está el archivo ahora. Nulo si no existe.</summary>
+    private (DateTime WriteUtc, long Length)? ReadStamp()
+    {
+        try
+        {
+            var info = new FileInfo(_path);
+            return info.Exists ? (info.LastWriteTimeUtc, info.Length) : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Si no se puede mirar, se relee. Cuesta una lectura; lo otro cuesta servir una misión
+            // vieja y pisar la buena al guardar.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Trae las misiones, releyendo el archivo si cambió desde la última vez.
+    /// </summary>
+    /// <remarks>
+    /// Antes esto cacheaba y no invalidaba nunca, con dos consecuencias: el vigía de fondo miraba
+    /// memoria del proceso y no el archivo —así que decía «relee cada cinco segundos» y no releía
+    /// nada—, y lo que se escribía desde el desplegable lo pisaba la instancia del runtime con su
+    /// lista vieja en cuanto el modelo tocaba una misión.
+    /// <para>
+    /// El sello lleva fecha y tamaño: dos escrituras dentro del mismo tic del reloj de archivos
+    /// comparten fecha, y el tamaño las separa salvo que además midan igual.
+    /// </para>
+    /// </remarks>
     private async Task<List<Mission>> LoadUnsafeAsync(CancellationToken cancellationToken)
     {
-        if (_missions is not null)
+        var stamp = ReadStamp();
+
+        if (_missions is not null && _stamp == stamp)
         {
             return _missions;
         }
 
-        if (!File.Exists(_path))
+        _stamp = stamp;
+
+        if (stamp is null)
         {
             return _missions = [];
         }
@@ -376,5 +428,10 @@ public sealed class MissionBook
         }
 
         File.Move(temporary, _path, overwrite: true);
+
+        // El sello se toma DESPUÉS del reemplazo, y la lista en memoria pasa a ser la recién
+        // guardada: tomarlo antes haría releer en la próxima lectura lo que se acaba de escribir.
+        _missions = missions;
+        _stamp = ReadStamp();
     }
 }

@@ -10,7 +10,7 @@ namespace Viernes.App.Shell;
 /// </summary>
 /// <remarks>
 /// Dos viajes distintos, y cuál se usa lo decide la geometría: si los dos monitores se tocan, el
-/// orbe cruza volando y deja estela; si no se tocan, se va por un borde y vuelve por el otro. La
+/// orbe cruza volando; si no se tocan, se va por un borde y vuelve por el otro. La
 /// regla dura es <b>nunca cruza contenido</b>: entre pantallas que no son vecinas hay escritorio,
 /// ventanas y a veces nada —un hueco en el escritorio virtual—, y atravesarlo en línea recta se lee
 /// como un objeto pasando por encima de todo lo que el usuario está mirando.
@@ -19,6 +19,14 @@ namespace Viernes.App.Shell;
 /// <c>M.sx = (tx - M.x) * 3.4</c>, <c>M.sy = -55</c> y el <c>setTimeout</c> de 520 ms entre esconderse
 /// y aparecer del otro lado. El margen contra el borde —20— ya vive en <see cref="OrbMotion.Margin"/>
 /// y sale del mismo lugar.
+/// </para>
+/// <para>
+/// <b>La estela no la hace este archivo.</b> Acá sólo se lanza el orbe con la velocidad del viaje;
+/// que eso se vea como una estela depende de que el cuerpo lea su propia velocidad y se estire hacia
+/// atrás. Se dice porque durante un tiempo el comentario de arriba y la línea de bitácora afirmaban
+/// «viaja con estela» mientras el cuerpo ignoraba por completo que se estaba moviendo, y una línea
+/// de registro que asegura una función inexistente es exactamente lo que la bitácora sirve para
+/// evitar.
 /// </para>
 /// </remarks>
 internal static class MonitorMove
@@ -62,6 +70,18 @@ internal static class MonitorMove
     /// </remarks>
     public static bool AreAdjacent(Rect one, Rect other)
     {
+        // El mismo monitor es vecino de sí mismo. Parece una obviedad que no hace falta escribir y
+        // no lo es: si el viaje se agota por vencimiento sin haber llegado, el monitor actual ya
+        // quedó apuntando al destino mientras el orbe se quedó en el de origen, y el vigía pide
+        // volver. Los dos rectángulos son el mismo, ninguna de las dos comparaciones de abajo se
+        // cumple —piden bordes separados por menos de un píxel, y acá están separados por el ancho
+        // entero del monitor— y el orbe se escondía por un borde y reaparecía en el mismo lugar sin
+        // que nadie hubiera hecho nada.
+        if (one == other)
+        {
+            return true;
+        }
+
         var sideBySide =
             (Math.Abs(one.Right - other.Left) <= Touching || Math.Abs(other.Right - one.Left) <= Touching) &&
             Overlap(one.Top, one.Bottom, other.Top, other.Bottom) > 0;

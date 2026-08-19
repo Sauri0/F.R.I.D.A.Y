@@ -70,15 +70,36 @@ public sealed class AutonomyPolicy
         Converters = { new JsonStringEnumConverter() }
     };
 
+    /// <summary>
+    /// Una compuerta por archivo, compartida por todas las instancias que lo miran.
+    /// </summary>
+    /// <remarks>
+    /// Era de instancia y no alcanzaba. Los desplegables arman una <see cref="AutonomyPolicy"/>
+    /// propia por lectura y por escritura, y el runtime tiene la suya viva desde que arranca: con
+    /// una compuerta por instancia, dos leer-modificar-escribir sobre el mismo archivo no se ven, y
+    /// el último que guarda pisa entero al otro. El archivo no se corrompe —el reemplazo es
+    /// atómico— pero la regla del otro desaparece sin que nada avise. Es el mismo patrón que ya usa
+    /// el store de memoria personal, y por la misma razón.
+    /// </remarks>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> FileGates =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private readonly string _path;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _gate;
     private List<AutonomyRule>? _rules;
 
-    public AutonomyPolicy(string? path = null) =>
+    /// <summary>Cómo estaba el archivo cuando se cargó lo que hay en <see cref="_rules"/>.</summary>
+    private (DateTime WriteUtc, long Length)? _stamp;
+
+    public AutonomyPolicy(string? path = null)
+    {
         _path = path ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Viernes",
             "autonomia.json");
+
+        _gate = FileGates.GetOrAdd(_path, static _ => new SemaphoreSlim(1, 1));
+    }
 
     public string FilePath => _path;
 
@@ -221,14 +242,49 @@ public sealed class AutonomyPolicy
         }
     }
 
+    /// <summary>Cómo está el archivo ahora. Nulo si no existe.</summary>
+    private (DateTime WriteUtc, long Length)? ReadStamp()
+    {
+        try
+        {
+            var info = new FileInfo(_path);
+            return info.Exists ? (info.LastWriteTimeUtc, info.Length) : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Si no se puede mirar, se vuelve a leer. Equivocarse para este lado cuesta una lectura;
+            // para el otro, servir una regla vieja.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Trae las reglas, releyendo el archivo si cambió desde la última vez.
+    /// </summary>
+    /// <remarks>
+    /// La comprobación del sello no es una optimización al revés: es lo único que hace que revocar
+    /// un permiso sirva de algo. Antes esto cacheaba <see cref="_rules"/> y no lo invalidaba nunca,
+    /// así que un «esto nunca» puesto desde el desplegable —que escribe con otra instancia— no
+    /// frenaba nada en el proceso en curso: la compuerta real seguía contestando con la lista
+    /// vieja. Y el próximo aprendizaje del modelo escribía esa lista vieja completa encima del
+    /// archivo y borraba la prohibición en silencio. El panel decía «anotado» y era mentira.
+    /// <para>
+    /// El sello lleva fecha <b>y</b> tamaño: dos escrituras dentro del mismo tic del reloj de
+    /// archivos tienen la misma fecha, y el tamaño las separa salvo que además midan igual.
+    /// </para>
+    /// </remarks>
     private async Task<List<AutonomyRule>> LoadUnsafeAsync(CancellationToken cancellationToken)
     {
-        if (_rules is not null)
+        var stamp = ReadStamp();
+
+        if (_rules is not null && _stamp == stamp)
         {
             return _rules;
         }
 
-        if (!File.Exists(_path))
+        _stamp = stamp;
+
+        if (stamp is null)
         {
             return _rules = [];
         }
@@ -270,5 +326,11 @@ public sealed class AutonomyPolicy
         }
 
         File.Move(temporary, _path, overwrite: true);
+
+        // Lo recién guardado ES lo que hay en memoria, y el sello se toma DESPUÉS del reemplazo: si
+        // se tomara antes, la próxima lectura vería que el archivo cambió y releería lo que acaba de
+        // escribir. Sin actualizar la lista, en cambio, quedaría sirviendo la anterior.
+        _rules = rules;
+        _stamp = ReadStamp();
     }
 }
