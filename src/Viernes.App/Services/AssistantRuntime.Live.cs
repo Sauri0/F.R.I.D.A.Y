@@ -164,16 +164,26 @@ internal sealed partial class AssistantRuntime
         _neuralPlayer.Stop();
         await SilenceVoiceAsync(cancellationToken).ConfigureAwait(false);
 
+        // El micrófono se arma ANTES de abrir el socket, y no es un detalle de orden.
+        //
+        // Acá adentro se carga el detector de voz, y eso tarda. Armándolo después, la sesión quedaba
+        // abierta y aceptada mientras el modelo cargaba: la persona ya estaba hablando y ese tramo no
+        // subía a ningún lado. Se perdían las primeras palabras de la primera frase de cada charla.
+        // Ahora además recibe el detector que ya armó el oído continuo, así que no carga nada: era
+        // una copia nueva por conversación, al lado de la que el oído ya tenía cargada.
+        var microphone = new LiveMicrophonePump(session, _voiceDetector);
+        RuntimeTrace.Write("vivo.microfono.detector", microphone.DetectorInfo.Name);
+
         var opened = await session.StartAsync(cancellationToken).ConfigureAwait(false);
         if (!opened.IsLive)
         {
             RuntimeTrace.Write("vivo.no.abrio", opened.Reason);
+            await microphone.DisposeAsync().ConfigureAwait(false);
             await session.StopAsync().ConfigureAwait(false);
             _liveSink?.Close();
             return false;
         }
 
-        var microphone = new LiveMicrophonePump(session);
         microphone.LevelChanged += LiveOnAudioLevel;
         if (!microphone.Start())
         {
@@ -187,6 +197,7 @@ internal sealed partial class AssistantRuntime
 
         _liveMicrophone = microphone;
         ClearLiveText();
+        ClearDictation();
         Interlocked.Exchange(ref _liveConversation, 1);
         RuntimeTrace.Write("vivo.abierta");
 
@@ -233,6 +244,7 @@ internal sealed partial class AssistantRuntime
         // día, y hay una sola tarjeta de sonido.
         _liveSink?.Close();
         ClearLiveText();
+        ClearDictation();
 
         RuntimeTrace.Write("vivo.cerrada", reason);
     }
@@ -311,11 +323,23 @@ internal sealed partial class AssistantRuntime
             AddConversationTurn(heard);
         }
 
+        if (eventArgs.Current == LiveOrbMoment.Listening)
+        {
+            // Vuelve el turno a la persona: lo que quedaba escrito era el pedido anterior, ya
+            // contestado. Dejarlo puesto hace que la frase nueva se escriba a continuación de la
+            // vieja, y las dos juntas se leen como una sola.
+            ClearDictation();
+        }
+
         Publish(new AssistantRuntimeUpdate(
             ToVisualState(eventArgs.Current),
             LiveStatusLabel(eventArgs.Current),
             heard ?? said,
-            MicrophoneActive: true));
+            MicrophoneActive: true,
+            // La frase quedó cerrada: lo que estaba en itálica pasa a firme y se queda quieto
+            // mientras contesta.
+            Dictation: heard is null ? null : _dictation.Settle(heard),
+            DictationRecovered: _dictation.RecoveredSpan));
     }
 
     /// <summary>
@@ -351,9 +375,15 @@ internal sealed partial class AssistantRuntime
     /// Llegó un pedazo de transcripción.
     /// </summary>
     /// <remarks>
-    /// Llega de a fragmentos y no de a frases, así que acá sólo se acumula. Publicar cada fragmento
-    /// haría parpadear la burbuja varias veces por palabra; quien la arma entera es
-    /// <see cref="LiveOnMomentChanged"/>, en el borde del turno.
+    /// Llega de a fragmentos y no de a frases, y ni siquiera de a palabras: un fragmento puede
+    /// cortar una palabra al medio. Lo que dice la persona sale a la burbuja apenas llega —para eso
+    /// está la palabra provisoria, que es exactamente la que se está formando— y lo que dice ella se
+    /// acumula callado, porque su respuesta no es dictado: la arma entera
+    /// <see cref="LiveOnMomentChanged"/> en el borde del turno.
+    /// <para>
+    /// Publicar cada fragmento no reescribe la burbuja entera: va por el canal del dictado, que no
+    /// toca el estado del orbe ni el mensaje.
+    /// </para>
     /// </remarks>
     private void LiveOnTranscript(object? sender, LiveTranscriptEventArgs eventArgs)
     {
@@ -362,11 +392,21 @@ internal sealed partial class AssistantRuntime
             return;
         }
 
+        string heard;
         lock (_liveTextGate)
         {
             var target = eventArgs.Speaker == LiveSpeaker.User ? _liveHeard : _liveSaid;
             target.Append(eventArgs.Text);
+
+            if (eventArgs.Speaker != LiveSpeaker.User)
+            {
+                return;
+            }
+
+            heard = _liveHeard.ToString();
         }
+
+        PublishDictation(_dictation.Hear(heard));
     }
 
     /// <summary>

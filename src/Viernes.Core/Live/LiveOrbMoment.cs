@@ -38,7 +38,8 @@ public enum LiveOrbMoment
 /// el servidor da por terminado lo que dijiste y el primer bloque de voz de la respuesta. Ese hueco
 /// es justo «pensando», y del lado del servidor no existe ningún mensaje que lo anuncie.
 /// <para>
-/// Por eso <c>Thinking</c> entra por el segundo argumento de <see cref="For"/>, que lo pone el anfitrión
+/// Por eso <c>Thinking</c> entra por el segundo argumento de
+/// <see cref="For(LiveTurnState, bool, bool)"/>, que lo pone el anfitrión
 /// con su propio detector de voz —el mismo que ya está medido contra este micrófono—: cuando la
 /// persona dejó de hablar y el turno sigue en reposo, está pensando. Un anfitrión que no tenga
 /// detector pasa <c>false</c> siempre y se queda en «te escucho» hasta que llega la voz: se pierde
@@ -58,10 +59,35 @@ public static class LiveOrbMoments
     /// en el que el servidor terminó de generar y los parlantes siguen sonando. Dibujar «terminó»
     /// ahí apaga el orbe mientras ella sigue hablando.
     /// </remarks>
-    public static LiveOrbMoment For(LiveTurnState turn, bool waitingForReply) => turn switch
+    public static LiveOrbMoment For(LiveTurnState turn, bool waitingForReply) =>
+        For(turn, waitingForReply, speakerBusy: false);
+
+    /// <summary>Qué momento corresponde a este turno con estos parlantes.</summary>
+    /// <param name="turn">En qué anda el turno.</param>
+    /// <param name="waitingForReply">
+    /// Si la persona terminó de hablar y todavía no volvió nada. Lo sabe el anfitrión, no el
+    /// servidor; ver el comentario de la clase.
+    /// </param>
+    /// <param name="speakerBusy">
+    /// Si todavía queda voz por salir por los parlantes.
+    /// </param>
+    /// <remarks>
+    /// <b>El turno cerrado no significa que se haya callado.</b> El servidor manda el audio más
+    /// rápido que tiempo real: cuando llega el <c>turnComplete</c> puede quedar de este lado varios
+    /// segundos de respuesta sin sonar, y durante todo ese tramo el orbe decía «te escucho» mientras
+    /// en el cuarto se la seguía oyendo. Es la misma clase de mentira que
+    /// <see cref="LiveTurnState.Draining"/> viene a impedir del lado del protocolo, sólo que un paso
+    /// más abajo: ahí el que no terminó es el generador y acá el que no terminó es el parlante.
+    /// <para>
+    /// Un parlante ocupado no pisa la interrupción: cuando la cortan, la cola se vacía en el acto y
+    /// esto vuelve a cero solo.
+    /// </para>
+    /// </remarks>
+    public static LiveOrbMoment For(LiveTurnState turn, bool waitingForReply, bool speakerBusy) => turn switch
     {
         LiveTurnState.Interrupted => LiveOrbMoment.Interrupted,
         LiveTurnState.Responding or LiveTurnState.Draining => LiveOrbMoment.Speaking,
+        _ when speakerBusy => LiveOrbMoment.Speaking,
         _ => waitingForReply ? LiveOrbMoment.Thinking : LiveOrbMoment.Listening
     };
 }

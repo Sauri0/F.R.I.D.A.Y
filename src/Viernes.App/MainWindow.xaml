@@ -26,6 +26,7 @@
         PreviewKeyUp="Window_PreviewKeyUp"
         PreviewMouseMove="Orb_PreviewMouseMove"
         PreviewMouseLeftButtonUp="Orb_PreviewMouseLeftButtonUp"
+        LostMouseCapture="Orb_LostMouseCapture"
         ShowActivated="False">
 
     <!--

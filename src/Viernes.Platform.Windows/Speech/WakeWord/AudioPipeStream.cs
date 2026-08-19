@@ -30,6 +30,7 @@ public sealed class AudioPipeStream : Stream
     private int _length;
     private bool _completed;
     private long _droppedBytes;
+    private long _read;
 
     /// <summary>
     /// Crea el caño con capacidad para <paramref name="capacity"/> de audio del formato dado.
@@ -85,11 +86,36 @@ public sealed class AudioPipeStream : Stream
 
     public override bool CanWrite => true;
 
-    public override long Length => throw new NotSupportedException();
+    /// <summary>
+    /// Cuánto audio va a entregar. Es un caño abierto: no tiene final.
+    /// </summary>
+    /// <remarks>
+    /// <b>Acá vivía el motivo por el que el oído continuo nunca se oyó funcionar.</b> Esto lanzaba
+    /// <c>NotSupportedException</c>, que es lo correcto para un stream sin largo, y SAPI pide
+    /// <c>Length</c> adentro del constructor de su envoltorio —<c>SpStreamWrapper</c>— apenas se le
+    /// pasa el caño por <c>SetInputToAudioStream</c>. Esa excepción no es ninguna de las que el oído
+    /// da por esperadas, así que se iba para arriba desde el arranque del servicio y la
+    /// inicialización del asistente quedaba a medio hacer, sin un solo renglón en la bitácora.
+    /// <para>
+    /// Devolver <see cref="long.MaxValue"/> es lo que corresponde y no un parche: SAPI usa este
+    /// número sólo para saber cuándo dejar de pedir, y de este caño nunca hay que dejar de pedir. El
+    /// fin de audio lo da <see cref="Complete"/>, con un <see cref="Read(System.Span{byte})"/> que
+    /// devuelve cero.
+    /// </para>
+    /// </remarks>
+    public override long Length => long.MaxValue;
 
+    /// <summary>Cuántos bytes se entregaron. No se puede mover: es un caño de un solo sentido.</summary>
     public override long Position
     {
-        get => throw new NotSupportedException();
+        get
+        {
+            lock (_sync)
+            {
+                return _read;
+            }
+        }
+
         set => throw new NotSupportedException();
     }
 
@@ -104,6 +130,20 @@ public sealed class AudioPipeStream : Stream
         return Read(buffer.AsSpan(offset, count));
     }
 
+    /// <summary>
+    /// Entrega exactamente lo que le pidieron, esperando lo que haga falta.
+    /// </summary>
+    /// <remarks>
+    /// <b>Llenar el búfer entero no es cortesía: es la única forma de que SAPI siga leyendo.</b>
+    /// Medido con un espía entre el caño y el reconocedor: devolviendo menos de lo pedido —960 bytes
+    /// donde pidió 3040— SAPI hizo <em>una sola</em> lectura y no volvió a pedir nunca más. Con el
+    /// búfer lleno siguió pidiendo hasta el final del audio. Un byte de menos se lee igual que un
+    /// cero, y un cero es fin de audio.
+    /// <para>
+    /// Se devuelve menos únicamente cuando el caño se cerró con <see cref="Complete"/>, que es el fin
+    /// de audio de verdad y la única forma de que el hilo de SAPI salga de acá.
+    /// </para>
+    /// </remarks>
     public override int Read(Span<byte> buffer)
     {
         if (buffer.Length == 0)
@@ -111,32 +151,38 @@ public sealed class AudioPipeStream : Stream
             return 0;
         }
 
+        var total = 0;
         lock (_sync)
         {
-            while (_length == 0 && !_completed)
+            while (total < buffer.Length)
             {
-                Monitor.Wait(_sync);
-            }
+                while (_length == 0 && !_completed)
+                {
+                    Monitor.Wait(_sync);
+                }
 
-            if (_length == 0)
-            {
-                // Sólo acá se devuelve cero, y sólo cuando el caño se cerró a propósito: es la única
-                // forma de que SAPI termine su bucle en vez de quedarse trabado adentro de Read.
-                return 0;
-            }
+                if (_length == 0)
+                {
+                    // El caño cerró: se entrega lo que se juntó, y si no se juntó nada, cero.
+                    break;
+                }
 
-            var take = Math.Min(buffer.Length, _length);
-            var first = Math.Min(take, _ring.Length - _start);
-            _ring.AsSpan(_start, first).CopyTo(buffer);
-            if (first < take)
-            {
-                _ring.AsSpan(0, take - first).CopyTo(buffer[first..]);
-            }
+                var take = Math.Min(buffer.Length - total, _length);
+                var first = Math.Min(take, _ring.Length - _start);
+                _ring.AsSpan(_start, first).CopyTo(buffer[total..]);
+                if (first < take)
+                {
+                    _ring.AsSpan(0, take - first).CopyTo(buffer[(total + first)..]);
+                }
 
-            _start = (_start + take) % _ring.Length;
-            _length -= take;
-            return take;
+                _start = (_start + take) % _ring.Length;
+                _length -= take;
+                _read += take;
+                total += take;
+            }
         }
+
+        return total;
     }
 
     public override void Write(byte[] buffer, int offset, int count)
@@ -212,7 +258,33 @@ public sealed class AudioPipeStream : Stream
         }
     }
 
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    /// <summary>
+    /// Un caño no se mueve. Lo único que se contesta es «¿dónde estoy?».
+    /// </summary>
+    /// <remarks>
+    /// Lo pregunta SAPI antes de leer un solo byte, con el modismo de siempre —desplazamiento cero
+    /// desde la posición actual—, que no es moverse: es preguntar. Lanzando ahí, la excepción cruza
+    /// el borde COM, se convierte en un HRESULT de error y SAPI abandona la entrada <b>sin decir
+    /// nada</b>: no lee nunca, no reconoce nunca y no falla nunca. Medido: con esto lanzando, el caño
+    /// entregaba cero bytes en cinco segundos de audio empujado y tiraba el resto por atraso.
+    /// <para>
+    /// Cualquier pedido que sí implique moverse sigue lanzando: mentir ahí sería peor, porque el
+    /// audio saldría corrido y sonaría a ruido en vez de fallar.
+    /// </para>
+    /// </remarks>
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        lock (_sync)
+        {
+            if ((origin == SeekOrigin.Current && offset == 0) ||
+                (origin == SeekOrigin.Begin && offset == _read))
+            {
+                return _read;
+            }
+        }
+
+        throw new NotSupportedException();
+    }
 
     public override void SetLength(long value) => throw new NotSupportedException();
 

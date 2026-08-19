@@ -301,7 +301,12 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken,
                 session.ProcessingCancellation.Token);
-            var result = await TranscribeWaveCoreAsync(session.Audio, linkedCancellation.Token).ConfigureAwait(false);
+            var transcription = await TranscribeWaveCoreAsync(session.Audio, linkedCancellation.Token)
+                .ConfigureAwait(false);
+
+            // Al push-to-talk no le sirven los tiempos: no hay nada anterior al nombre que separar,
+            // porque acá lo abrió el usuario apretando.
+            var result = transcription.Result;
             CompleteSession(session, result);
             return result;
         }
@@ -459,6 +464,21 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
     /// </summary>
     public async Task<SpeechRecognitionResult> TranscribeWaveAsync(
         Stream waveStream,
+        CancellationToken cancellationToken = default) =>
+        (await TranscribeWaveWithSegmentsAsync(waveStream, cancellationToken).ConfigureAwait(false))
+            .Result;
+
+    /// <summary>
+    /// Lo mismo, pero además dice dónde cae cada tramo adentro del audio.
+    /// </summary>
+    /// <remarks>
+    /// Lo necesita el oído continuo: entrega un WAV que arranca <em>antes</em> de que sonara el
+    /// nombre, y ese pedazo se dibuja distinto porque no te lo dijeron a vos. Separarlo por los
+    /// tiempos que Whisper ya devuelve es gratis; la alternativa era transcribir dos veces el mismo
+    /// audio, o sea esperar dos veces.
+    /// </remarks>
+    public async Task<WaveTranscription> TranscribeWaveWithSegmentsAsync(
+        Stream waveStream,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(waveStream);
@@ -469,23 +489,21 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
         if (!await TryEnterGateAsync(cancellationToken).ConfigureAwait(false))
         {
-            return SpeechRecognitionResult.Failure(SpeechErrorCode.Cancelled, "La operación fue cancelada.");
+            return Nothing(SpeechErrorCode.Cancelled, "La operación fue cancelada.");
         }
 
         try
         {
             if (IsDisposed())
             {
-                return SpeechRecognitionResult.Failure(
-                    SpeechErrorCode.Disposed,
-                    "El proveedor de voz ya fue cerrado.");
+                return Nothing(SpeechErrorCode.Disposed, "El proveedor de voz ya fue cerrado.");
             }
 
             lock (_sync)
             {
                 if (_session is not null)
                 {
-                    return SpeechRecognitionResult.Failure(
+                    return Nothing(
                         SpeechErrorCode.Failed,
                         "No se puede transcribir un WAV mientras el micrófono está en uso.");
                 }
@@ -494,9 +512,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             var availability = GetAvailability();
             if (!availability.IsAvailable)
             {
-                return SpeechRecognitionResult.Failure(
-                    SpeechErrorCode.Unavailable,
-                    availability.UnavailableReason!);
+                return Nothing(SpeechErrorCode.Unavailable, availability.UnavailableReason!);
             }
 
             if (waveStream.CanSeek)
@@ -511,9 +527,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             }
             catch (OperationCanceledException)
             {
-                return SpeechRecognitionResult.Failure(
-                    SpeechErrorCode.Cancelled,
-                    "La transcripción WAV fue cancelada.");
+                return Nothing(SpeechErrorCode.Cancelled, "La transcripción WAV fue cancelada.");
             }
             catch (Exception exception)
             {
@@ -521,7 +535,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
                     SpeechErrorCode.Failed,
                     $"Whisper local no pudo transcribir el WAV: {exception.Message}");
                 RaiseError(failure.ErrorCode, failure.ErrorMessage!);
-                return failure;
+                return new WaveTranscription(failure, []);
             }
             finally
             {
@@ -700,7 +714,10 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
         "recuperalo. Cerrá esa aplicación, subí el volumen, pausá. Acordate de esto, recordame " +
         "mañana. Mirá la pantalla. Callate, desactivate, dejá de escuchar, descansá. Dale, listo.";
 
-    private async Task<SpeechRecognitionResult> TranscribeWaveCoreAsync(
+    private static WaveTranscription Nothing(SpeechErrorCode code, string message) =>
+        new(SpeechRecognitionResult.Failure(code, message), []);
+
+    private async Task<WaveTranscription> TranscribeWaveCoreAsync(
         Stream waveStream,
         CancellationToken cancellationToken)
     {
@@ -713,9 +730,15 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
             .WithLanguage(_options.Language)
             .WithPrompt(VocabularyPrompt)
             .WithProbabilities()
+
+            // Los horarios por palabra son lo único que permite separar lo que se dijo antes del
+            // nombre de lo que se le dijo a ella. Por tramo no alcanza: medido con una frase que
+            // tiene un punto en el medio, Whisper devolvió UN tramo de punta a punta.
+            .WithTokenTimestamps()
             .Build();
         var text = new StringBuilder();
         var probabilities = new List<float>();
+        var segments = new List<TranscribedSegment>();
 
         await foreach (var segment in processor.ProcessAsync(waveStream, cancellationToken).ConfigureAwait(false))
         {
@@ -735,14 +758,91 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
                 ? Math.Clamp(segment.Probability, 0f, 1f)
                 : 0f;
             probabilities.Add(probability);
+            segments.Add(new TranscribedSegment(
+                segmentText,
+                segment.Start,
+                segment.End,
+                probability,
+                ReadWords(segment)));
             RaiseSafely(
                 TranscriptionUpdated,
                 new SpeechTranscriptionEventArgs(segmentText, probability, isFinal: true));
         }
 
-        return SpeechRecognitionResult.Success(
-            text.ToString(),
-            probabilities.Count == 0 ? null : probabilities.Average());
+        return new WaveTranscription(
+            SpeechRecognitionResult.Success(
+                text.ToString(),
+                probabilities.Count == 0 ? null : probabilities.Average()),
+            segments);
+    }
+
+    /// <summary>
+    /// Junta los tokens del tramo en palabras con su horario.
+    /// </summary>
+    /// <remarks>
+    /// Whisper no entrega palabras: entrega tokens, y una palabra puede ser varios. El corte es el
+    /// espacio de adelante —así los devuelve el tokenizador—, así que se abre palabra nueva cuando
+    /// un token empieza con espacio y si no se pega al anterior.
+    /// <para>
+    /// Los tokens especiales llegan mezclados con los de texto y se ven como <c>[_TT_310]</c> o
+    /// <c>&lt;|es|&gt;</c>. No son nada que se haya dicho; si se colaran, la línea mostraría marcas
+    /// del modelo entre las palabras de la persona.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<TimedWord> ReadWords(SegmentData segment)
+    {
+        if (segment.Tokens is null || segment.Tokens.Length == 0)
+        {
+            return [];
+        }
+
+        var words = new List<TimedWord>();
+        var pending = new StringBuilder();
+        var from = TimeSpan.Zero;
+        var to = TimeSpan.Zero;
+
+        void Close()
+        {
+            var text = pending.ToString().Trim();
+            pending.Clear();
+            if (text.Length > 0)
+            {
+                words.Add(new TimedWord(text, from, to));
+            }
+        }
+
+        foreach (var token in segment.Tokens)
+        {
+            var text = token.Text;
+            if (string.IsNullOrEmpty(text) ||
+                (text.StartsWith('[') && text.EndsWith(']')) ||
+                (text.StartsWith("<|", StringComparison.Ordinal) && text.EndsWith("|>", StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            // El t0/t1 de whisper.cpp viene en centésimas de segundo, no en milisegundos. Tomarlo
+            // por milisegundos da una frase cien veces más corta y el corte cae siempre en el mismo
+            // lado: nunca se rescataría nada.
+            var start = TimeSpan.FromMilliseconds(token.Start * 10);
+            var end = TimeSpan.FromMilliseconds(token.End * 10);
+
+            if (text.StartsWith(' ') && pending.Length > 0)
+            {
+                Close();
+            }
+
+            if (pending.Length == 0)
+            {
+                from = start;
+            }
+
+            pending.Append(text);
+            to = end > to ? end : to;
+        }
+
+        Close();
+        return words;
     }
 
     private void OnDataAvailable(CaptureSession session, WaveInEventArgs eventArgs)

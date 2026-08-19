@@ -43,9 +43,46 @@ public sealed class AudioPipeStreamTests
         var primero = await Task.WhenAny(lectura, Task.Delay(TimeSpan.FromMilliseconds(150)));
         Assert.NotSame(lectura, primero);
 
-        pipe.Write([9, 9]);
+        pipe.Write([9, 9, 9, 9]);
 
-        Assert.Equal(2, await lectura.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(4, await lectura.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task Read_ConMenosDeLoPedido_SigueEsperandoHastaLlenarElBufer()
+    {
+        // Medido con un espía entre el caño y SAPI: devolviendo 960 bytes donde pidió 3040, SAPI hizo
+        // UNA sola lectura y no volvió a pedir nunca más. Un byte de menos se lee igual que un cero, y
+        // un cero es fin de audio. Es la razón por la que el oído continuo no detectaba nada.
+        using var pipe = Pipe();
+        var buffer = new byte[6];
+
+        var lectura = Task.Run(() => pipe.Read(buffer, 0, buffer.Length));
+
+        pipe.Write([1, 2]);
+        var primero = await Task.WhenAny(lectura, Task.Delay(TimeSpan.FromMilliseconds(150)));
+        Assert.NotSame(lectura, primero);
+
+        pipe.Write([3, 4, 5, 6]);
+
+        Assert.Equal(6, await lectura.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal<byte[]>([1, 2, 3, 4, 5, 6], buffer);
+    }
+
+    [Fact]
+    public async Task Read_SiElCanoCierraAMitadDeLlenar_DevuelveLoQueJunto()
+    {
+        // El único corte legítimo. Sin esto, cerrar el caño dejaría al hilo de SAPI esperando para
+        // siempre un búfer que nadie va a terminar de llenar, y Dispose no volvería nunca.
+        using var pipe = Pipe();
+        var buffer = new byte[6];
+
+        var lectura = Task.Run(() => pipe.Read(buffer, 0, buffer.Length));
+        pipe.Write([1, 2, 3]);
+        await Task.Delay(50);
+        pipe.Complete();
+
+        Assert.Equal(3, await lectura.WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
     [Fact]
@@ -103,6 +140,7 @@ public sealed class AudioPipeStreamTests
         pipe.Write([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         var buffer = new byte[12];
         var read = pipe.Read(buffer, 0, buffer.Length);
+
 
         Assert.Equal(12, read);
         Assert.Equal<byte[]>([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], buffer);

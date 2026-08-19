@@ -27,6 +27,26 @@ public interface ILiveAudioSink
     void Flush();
 
     /// <summary>
+    /// Cuánta voz queda por salir. <see cref="TimeSpan.Zero"/> cuando el parlante está callado.
+    /// </summary>
+    /// <remarks>
+    /// Existe porque el servidor manda el audio <b>más rápido que tiempo real</b>: para cuando llega
+    /// el <c>turnComplete</c> puede quedar de este lado varios segundos de respuesta sin sonar. Si
+    /// nadie mira esto, el orbe vuelve a «te escucho» mientras se la sigue oyendo — la pantalla dice
+    /// que escucha y en el cuarto ella sigue hablando.
+    /// <para>
+    /// Es lo mismo que <c>LiveSpeakerSink.QueuedBytes</c> pero dicho en tiempo, que es la unidad en
+    /// la que se decide: los bytes dependen de la frecuencia de salida y quien pregunta no tiene por
+    /// qué saberla.
+    /// </para>
+    /// <para>
+    /// Tiene implementación por defecto —cero— para que una salida que no encola nada, como
+    /// <see cref="NullLiveAudioSink"/> o una de mentira en las pruebas, no tenga que escribirla.
+    /// </para>
+    /// </remarks>
+    TimeSpan Pending => TimeSpan.Zero;
+
+    /// <summary>
     /// Avisa que no viene más audio de este turno.
     /// </summary>
     /// <remarks>

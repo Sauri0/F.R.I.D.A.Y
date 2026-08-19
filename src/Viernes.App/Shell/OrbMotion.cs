@@ -1,4 +1,5 @@
 using System.Windows;
+using Viernes.App.Controls;
 using Point = System.Windows.Point;
 
 namespace Viernes.App.Shell;
@@ -36,6 +37,23 @@ internal sealed class OrbMotion
     private const double SettleSpeed = 44;
     private const double MinBounceSpeed = 18;
 
+    /// <summary>Por debajo de esta rapidez el rebote no le llega al cuerpo.</summary>
+    /// <remarks>
+    /// Del fuente: <c>if (sp > 220) { M.hit = … }</c>. Apoyarse contra un borde no es un choque, y
+    /// un achatamiento cada vez que el imán termina de acomodar el orbe se leería como un tic.
+    /// </remarks>
+    private const double HitSpeed = 220;
+
+    /// <summary>Cuánto pesa la lectura vieja en el promedio corrido de la velocidad.</summary>
+    /// <remarks>
+    /// 0,72 lo viejo y 0,28 lo nuevo, del fuente. Sin suavizar, un solo cuadro largo manda la estela
+    /// a cualquier parte y el cuerpo pega un tirón que no corresponde a ningún movimiento real.
+    /// </remarks>
+    private const double VelocityMemory = 0.72;
+
+    /// <summary>Piso del intervalo al derivar la velocidad. Un dt chico inventa velocidades.</summary>
+    private const double MinVelocitySpan = 0.008;
+
     /// <summary>Dónde está el orbe ahora, esquina superior izquierda de sus 108 px.</summary>
     public Point Position { get; private set; }
 
@@ -51,8 +69,36 @@ internal sealed class OrbMotion
     /// <summary>Si viene de ser soltado y todavía tiene inercia.</summary>
     public bool IsFlying { get; private set; }
 
-    /// <summary>Rapidez instantánea. La usa el panel para esconderse mientras el orbe vuela.</summary>
+    /// <summary>Rapidez instantánea del integrador. Es la que decide si sigue volando y cuánto rebota.</summary>
     public double Speed => Velocity.Length;
+
+    /// <summary>
+    /// Velocidad de la ventana suavizada, en px/s. Es la que ve el cuerpo.
+    /// </summary>
+    /// <remarks>
+    /// No es <see cref="Velocity"/>. Aquélla es el estado interno del integrador —durante el
+    /// arrastre es la velocidad del resorte, no la del orbe en pantalla— y da saltos entre subpasos.
+    /// Ésta se mide sobre el desplazamiento real del cuadro completo, que es lo único que el ojo vio.
+    /// </remarks>
+    public Vector Smoothed { get; private set; }
+
+    /// <summary>Rapidez suavizada. Es la que decide si el vidrio se retrae.</summary>
+    public double SmoothSpeed => Smoothed.Length;
+
+    private int _hitToken;
+    private double _hitNormalX;
+    private double _hitNormalY;
+    private double _hitStrength;
+
+    /// <summary>Lo que hay que contarle al cuerpo en este cuadro.</summary>
+    public OrbMotionSample Sample => new(
+        Smoothed.X,
+        Smoothed.Y,
+        IsDragging,
+        _hitToken,
+        _hitNormalX,
+        _hitNormalY,
+        _hitStrength);
 
     /// <summary>Deja el orbe donde se lo pone, sin inercia ni destino pendiente.</summary>
     public void Teleport(Point position)
@@ -60,6 +106,7 @@ internal sealed class OrbMotion
         Position = position;
         Target = position;
         Velocity = default;
+        Smoothed = default;
         IsFlying = false;
     }
 
@@ -104,6 +151,10 @@ internal sealed class OrbMotion
     }
 
     /// <summary>Empieza el arrastre. Desde acá el destino lo manda el puntero.</summary>
+    /// <remarks>
+    /// El destino arranca donde está el orbe y no donde está el dedo: si arrancara en el dedo, el
+    /// primer cuadro del arrastre sería un salto de todo el radio del orbe.
+    /// </remarks>
     public void BeginDrag()
     {
         IsDragging = true;
@@ -112,21 +163,23 @@ internal sealed class OrbMotion
     }
 
     /// <summary>
-    /// Durante el arrastre la posición la impone la ventana —la mueve Windows—, así que se anota y
-    /// se estima la velocidad para poder soltarla después.
+    /// Mueve el <em>objetivo</em> del arrastre. El orbe llega ahí por el resorte, no de un salto.
     /// </summary>
-    public void ReportDragged(Point position, double dt)
+    /// <remarks>
+    /// Acá estaba <c>ReportDragged</c>, que anotaba la posición que Windows le había impuesto a la
+    /// ventana con <c>DragMove()</c> y estimaba la velocidad para poder soltarla. Mientras existió,
+    /// el resorte de arrastre 146/15,5 nunca corrió: el tick llamaba a <c>ReportDragged</c> y jamás a
+    /// <see cref="Step"/>. Y <c>DragMove()</c> clavaba la ventana al cursor, así que el orbe no podía
+    /// quedarse atrás de la mano —que es exactamente lo que le da peso—.
+    /// </remarks>
+    public void DragTo(Point target)
     {
-        if (dt > 0.0005)
+        if (!IsDragging)
         {
-            var instant = new Vector((position.X - Position.X) / dt, (position.Y - Position.Y) / dt);
-
-            // Promedio corrido: un solo cuadro es ruido, y soltar con ruido dispara el orbe.
-            Velocity = Velocity * 0.72 + instant * 0.28;
+            return;
         }
 
-        Position = position;
-        Target = position;
+        Target = target;
     }
 
     /// <summary>Suelta el orbe con la velocidad que traía.</summary>
@@ -152,10 +205,7 @@ internal sealed class OrbMotion
     /// </summary>
     public void Step(double dt, Rect bounds)
     {
-        if (IsDragging)
-        {
-            return;
-        }
+        var previous = Position;
 
         var remaining = Math.Min(MaxFrame, dt);
         while (remaining > 0.0001)
@@ -163,7 +213,11 @@ internal sealed class OrbMotion
             var h = remaining > SubStep ? SubStep : remaining;
             remaining -= h;
 
-            if (IsFlying)
+            if (IsDragging)
+            {
+                StepDrag(h);
+            }
+            else if (IsFlying)
             {
                 StepFlight(h, bounds);
             }
@@ -172,6 +226,30 @@ internal sealed class OrbMotion
                 StepSettle(h, bounds);
             }
         }
+
+        // La velocidad que ve el cuerpo se mide una vez por cuadro sobre el desplazamiento entero, y
+        // no subpaso a subpaso: el ojo vio el cuadro, no los doce subpasos de adentro.
+        var span = Math.Max(MinVelocitySpan, dt);
+        Smoothed = new Vector(
+            (Smoothed.X * VelocityMemory) + ((Position.X - previous.X) / span * (1 - VelocityMemory)),
+            (Smoothed.Y * VelocityMemory) + ((Position.Y - previous.Y) / span * (1 - VelocityMemory)));
+    }
+
+    /// <summary>
+    /// El resorte del arrastre: duro, para seguir al dedo, pero resorte al fin.
+    /// </summary>
+    /// <remarks>
+    /// Es más duro que el de reposo —146 contra 104— porque tiene que alcanzar la mano; y aun así se
+    /// queda atrás al arrancar y se pasa un poco al frenar. Esa demora <em>es</em> el peso del orbe.
+    /// Con <c>DragMove()</c> no había forma de tenerla: Windows pega la ventana al cursor.
+    /// </remarks>
+    private void StepDrag(double h)
+    {
+        Velocity = new Vector(
+            Velocity.X + ((DragStiffness * (Target.X - Position.X)) - (DragDamping * Velocity.X)) * h,
+            Velocity.Y + ((DragStiffness * (Target.Y - Position.Y)) - (DragDamping * Velocity.Y)) * h);
+
+        Position = new Point(Position.X + (Velocity.X * h), Position.Y + (Velocity.Y * h));
     }
 
     private void StepFlight(double h, Rect bounds)
@@ -241,6 +319,18 @@ internal sealed class OrbMotion
         Velocity = new Vector(
             Math.Abs(Velocity.X) < MinBounceSpeed ? 0 : Velocity.X,
             Math.Abs(Velocity.Y) < MinBounceSpeed ? 0 : Velocity.Y);
+
+        // Recién acá el golpe deja de ser un asunto de la ventana. Antes la ventana rebotaba y nadie
+        // le avisaba a la gota que había chocado: el rebote existía y no se veía.
+        if (speed <= HitSpeed)
+        {
+            return;
+        }
+
+        _hitToken++;
+        _hitNormalX = nx;
+        _hitNormalY = ny;
+        _hitStrength = Math.Min(1, speed / OrbMotionSample.SpeedReference);
     }
 
     /// <summary>

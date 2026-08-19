@@ -39,7 +39,36 @@ internal sealed record AssistantRuntimeUpdate(
     /// calculara dos veces, la cara y el tono se separarían apenas alguien tocara uno de los dos.
     /// <para>Es un gesto: se dispara, dura lo que dice la tabla y se apaga solo. Nadie lo apaga.</para>
     /// </remarks>
-    Controls.OrbMood? Mood = null);
+    Controls.OrbMood? Mood = null,
+
+    /// <summary>
+    /// Lo que se está transcribiendo ahora, palabra por palabra y con qué tan firme es cada una.
+    /// </summary>
+    /// <remarks>
+    /// No es un <c>string</c> y no puede serlo: la burbuja dibuja tres calidades a la vez —lo que se
+    /// rescató del búfer al 40 %, lo firme pleno y la palabra que se está formando en itálica al
+    /// 60 %— y esa distinción se decide <em>por palabra</em>. Un solo texto no puede cargarla, así
+    /// que el reconocedor tendría que mandarla tres veces o la interfaz tendría que adivinarla.
+    /// <para>
+    /// La arma <see cref="Viernes.Core.Voice.DictationBoard"/>, que a su vez usa
+    /// <c>DictationLine.Build</c>. Acá viaja ya resuelta: quien la dibuja no decide nada.
+    /// </para>
+    /// </remarks>
+    IReadOnlyList<Viernes.Core.Voice.DictationWord>? Dictation = null,
+
+    /// <summary>Borrar la línea: arranca otra frase o se cerró la charla.</summary>
+    bool ClearDictation = false,
+
+    /// <summary>
+    /// Cuánto audio anterior al nombre se rescató del búfer rodante, si se rescató alguno.
+    /// </summary>
+    /// <remarks>
+    /// Viaja para poder escribirlo en el encabezado del bloque recuperado. <b>No son los diez
+    /// segundos de la ventana</b>: el recorte llega hasta donde arrancó esa tanda de habla, así que
+    /// el número cambia en cada frase y con la tele puesta no se meten diez segundos de tele
+    /// adelante del pedido.
+    /// </remarks>
+    TimeSpan? DictationRecovered = null);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,

@@ -2,11 +2,13 @@
   <Folder Name="/src/">
     <Project Path="src/Viernes.App/Viernes.App.csproj" />
     <Project Path="src/Viernes.Core/Viernes.Core.csproj" />
+    <Project Path="src/Viernes.Mcp/Viernes.Mcp.csproj" />
     <Project Path="src/Viernes.Memory/Viernes.Memory.csproj" />
     <Project Path="src/Viernes.Platform.Windows/Viernes.Platform.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Viernes.Core.Tests/Viernes.Core.Tests.csproj" />
+    <Project Path="tests/Viernes.Mcp.Tests/Viernes.Mcp.Tests.csproj" />
     <Project Path="tests/Viernes.Memory.Tests/Viernes.Memory.Tests.csproj" />
   </Folder>
 </Solution>

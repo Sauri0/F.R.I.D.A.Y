@@ -108,9 +108,13 @@
             </Canvas>
 
             <!--
-                La cola del corte. Cuando le pedís que pare en la mitad de una frase, la parte que ya
-                había salido del cuerpo no puede volver: sigue viajando, cae y se apaga afuera. Va
-                fuera del recorte de los reflejos a propósito — ya no es parte de la masa.
+                Las gotas que se soltaron del cuerpo y todavía viajan: la del corte —la parte de la
+                frase que ya había salido cuando le pediste que pare—, las dos de la salpicadura al
+                golpear un borde, y las que va perdiendo mientras la arrastrás rápido. Van fuera del
+                recorte de los reflejos a propósito: ya no son parte de la masa.
+
+                Este primer Path es el que trae el pincel; las demás se agregan en Tails y lo
+                comparten, así el color de todas lo sigue poniendo un solo lugar.
             -->
             <Path x:Name="Tail" Visibility="Collapsed">
                 <Path.Fill>
@@ -123,6 +127,8 @@
                     </RadialGradientBrush>
                 </Path.Fill>
             </Path>
+
+            <Canvas x:Name="Tails" Width="70" Height="70" />
         </Canvas>
     </Viewbox>
 </UserControl>

@@ -42,6 +42,8 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private TimeSpan _lifeSpent;
     private TimeSpan _lifeWall;
     private string _dictationText = string.Empty;
+    private bool _hasRecoveredDictation;
+    private TimeSpan _recoveredDictation;
     private string _reminderTitle = string.Empty;
     private string _reminderDetail = string.Empty;
     private string _policyMessage = "No hay ninguna regla local frenando nada.";
@@ -364,13 +366,31 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     }
 
     /// <summary>
-    /// Lo que se está dictando. Vacío mientras el micrófono todavía no devolvió palabras.
+    /// Lo que se está transcribiendo, palabra por palabra y con qué tan firme es cada una.
     /// </summary>
     /// <remarks>
-    /// Hoy el reconocedor entrega la frase entera al soltar el micrófono: el runtime arranca con
-    /// <c>EmitPartialTranscriptions = false</c> y no publica parciales. La burbuja está hecha para
-    /// recibirlas —se llena palabra por palabra y la última va en itálica hasta confirmarse—, así que
-    /// encenderla es publicar parciales, no rehacer nada de acá.
+    /// Son <b>tres</b> calidades y se deciden por palabra: lo que se rescató del búfer rodante va al
+    /// 40 %, lo que el reconocedor dio por firme va pleno, y la que se está formando va al 60 % y en
+    /// itálica. La última es <em>una sola</em> —la última— y sólo mientras la transcripción sigue
+    /// viva; quien lo decide es <c>DictationLine.Build</c>, en Core y con pruebas.
+    /// <para>
+    /// <b>Acá vivía un comentario que decía que la burbuja ya estaba hecha para esto y que alcanzaba
+    /// con encender los parciales.</b> Era falso: la burbuja era un <c>TextBlock</c> con un
+    /// <c>Text=</c> y nada más, y <see cref="DictationText"/> era un solo <c>string</c>, que no puede
+    /// cargar tres calidades por más parciales que se publiquen. Queda escrito para que nadie vuelva
+    /// a leer aquella promesa como una descripción del código.
+    /// </para>
+    /// </remarks>
+    public ObservableCollection<Viernes.Core.Voice.DictationWord> DictationWords { get; } = [];
+
+    /// <summary>
+    /// La misma línea, en texto plano.
+    /// </summary>
+    /// <remarks>
+    /// Sale de <see cref="DictationWords"/> y no de una copia aparte: dos textos que dicen lo mismo
+    /// se separan en cuanto alguien toca uno de los dos, y este repositorio ya pagó eso con el
+    /// umbral del micrófono. Sirve para lo que no necesita las calidades —leerla, medirla, la
+    /// visibilidad de la burbuja— y para el dibujo de un solo color que había antes.
     /// </remarks>
     public string DictationText
     {
@@ -383,6 +403,53 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(IsStatePillSuppressed));
             }
         }
+    }
+
+    /// <summary>Si la línea arranca con algo rescatado de la ventana rodante del oído continuo.</summary>
+    public bool HasRecoveredDictation
+    {
+        get => _hasRecoveredDictation;
+        private set
+        {
+            if (SetProperty(ref _hasRecoveredDictation, value))
+            {
+                OnPropertyChanged(nameof(RecoveredDictationLabel));
+            }
+        }
+    }
+
+    /// <summary>
+    /// El encabezado del bloque recuperado.
+    /// </summary>
+    /// <remarks>
+    /// En el boceto es literal —<c>recuperado del búfer · 6 s antes</c>— pero ese 6 es del ejemplo:
+    /// acá el número sale del recorte que se hizo de verdad, que cambia en cada frase porque llega
+    /// hasta donde arrancó esa tanda de habla y no hasta el principio de la ventana.
+    /// </remarks>
+    public string RecoveredDictationLabel => _recoveredDictation <= TimeSpan.Zero
+        ? "recuperado del búfer"
+        : $"recuperado del búfer · {_recoveredDictation.TotalSeconds:0} s antes";
+
+    /// <summary>
+    /// Deja la línea que llegó del runtime.
+    /// </summary>
+    /// <remarks>
+    /// La colección se rellena en lugar de reemplazarse para no obligar a la interfaz a rearmar la
+    /// vista entera en cada palabra: esto llega varias veces por segundo mientras alguien habla.
+    /// </remarks>
+    private void SetDictation(IReadOnlyList<Viernes.Core.Voice.DictationWord> words, TimeSpan recovered)
+    {
+        DictationWords.Clear();
+        foreach (var word in words)
+        {
+            DictationWords.Add(word);
+        }
+
+        _recoveredDictation = recovered;
+        HasRecoveredDictation =
+            words.Any(word => word.Quality == Viernes.Core.Voice.DictationQuality.Recuperado);
+        OnPropertyChanged(nameof(RecoveredDictationLabel));
+        DictationText = Viernes.Core.Voice.DictationLine.Flatten(words);
     }
 
     /// <summary>Si la burbuja de dictado está a la vista.</summary>
@@ -881,14 +948,20 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             }
 
             // Lo que se dictó se muestra en la burbuja, no en el panel: abrir un desplegable para
-            // repetir lo que el usuario acaba de decir es ruido. Al empezar a escuchar se vacía.
-            DictationText = update.State switch
+            // repetir lo que el usuario acaba de decir es ruido.
+            //
+            // La línea llega armada del runtime y no se deduce del estado. Antes se sacaba de
+            // update.Message en el borde de escuchar a pensar, o sea de un texto que además es lo
+            // que dice la píldora: cualquier publicación que trajera otro mensaje en ese borde
+            // escribía cualquier cosa en la burbuja, y las tres calidades no tenían por dónde entrar.
+            if (update.ClearDictation)
             {
-                AssistantVisualState.Listening => string.Empty,
-                AssistantVisualState.Thinking when previousState == AssistantVisualState.Listening =>
-                    update.Message ?? string.Empty,
-                _ => DictationText
-            };
+                SetDictation([], TimeSpan.Zero);
+            }
+            else if (update.Dictation is not null)
+            {
+                SetDictation(update.Dictation, update.DictationRecovered ?? _recoveredDictation);
+            }
 
             if (update.MicrophoneActive.HasValue)
             {

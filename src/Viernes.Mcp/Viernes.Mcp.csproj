@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--
+      net10.0 pelado a propósito: el conector no dibuja nada y tiene que poder arrancarlo Claude
+      con «dotnet run». Atarlo a net10.0-windows como la aplicación lo haría depender del escritorio
+      para leer tres archivos JSON.
+    -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <AssemblyName>viernes-mcp</AssemblyName>
+    <RootNamespace>Viernes.Mcp</RootNamespace>
+    <Description>Servidor MCP para trabajar con Viernes desde Claude.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      El mismo paquete que ya usa Viernes.Core del lado cliente, ahora del lado servidor:
+      ModelContextProtocol.Core trae las dos mitades. Un segundo paquete para lo mismo sería otra
+      versión del protocolo conviviendo con la primera.
+    -->
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      El conector no reimplementa nada: misiones, memoria, política de autonomía y vigilancia de
+      Claude Code ya viven acá y leen los mismos archivos que la aplicación. Si esto se copiara,
+      Claude y el orbe estarían mirando dos estados distintos del mismo asistente.
+    -->
+    <ProjectReference Include="..\Viernes.Core\Viernes.Core.csproj" />
+  </ItemGroup>
+
+</Project>

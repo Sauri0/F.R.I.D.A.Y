@@ -25,13 +25,34 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     private readonly LiveFallbackLatch _latch;
     private readonly GeminiLiveClient _client;
     private readonly LiveUserSpeechGate _speechGate;
+    private readonly ILiveAudioSink _sink;
     private readonly Lock _momentGate = new();
 
     private LiveOrbMoment _moment = LiveOrbMoment.Listening;
     private bool _waitingForReply;
+    private bool _echoRun;
     private TimeSpan _idleSilence;
     private bool _quietRaised;
+    private int _drainWatch;
     private int _disposed;
+
+    /// <summary>Cada cuánto se le pregunta al parlante si ya terminó de sonar.</summary>
+    /// <remarks>
+    /// Cuarenta milisegundos: dos bloques de los que el parlante le da al driver. Preguntar más
+    /// seguido no adelanta nada —el corte del audio no es más fino que eso— y preguntar mucho menos
+    /// seguido deja el orbe diciendo «hablando» después de que se calló.
+    /// </remarks>
+    private static readonly TimeSpan SpeakerPollInterval = TimeSpan.FromMilliseconds(40);
+
+    /// <summary>
+    /// Hasta cuándo se sigue mirando el parlante antes de darlo por perdido.
+    /// </summary>
+    /// <remarks>
+    /// Lo que aguanta la cola del parlante. Es un tope de seguridad, no un plazo esperado: sin él,
+    /// una salida que informe mal cuánto le queda dejaría esta tarea girando hasta que se apague la
+    /// máquina.
+    /// </remarks>
+    private static readonly TimeSpan SpeakerDrainLimit = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// Cuánto silencio hace falta para dar la charla por abandonada.
@@ -73,6 +94,11 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         _latch = latch ?? new LiveFallbackLatch();
         _quietTimeout = quietTimeout ?? DefaultQuietTimeout;
         _speechGate = new LiveUserSpeechGate(TimeSpan.FromMilliseconds(options.SilenceDurationMs));
+
+        // La salida se guarda además de pasársela al cliente: el cliente la usa para encolar y acá
+        // se la mira para saber si todavía está sonando, que es lo que separa «terminó el turno» de
+        // «se calló». Son dos cosas distintas y confundirlas fue el bug.
+        _sink = audioSink ?? throw new ArgumentNullException(nameof(audioSink));
         _client = new GeminiLiveClient(options, apiKey, audioSink, transportFactory);
 
         _client.TurnStateChanged += OnTurnStateChanged;
@@ -121,6 +147,16 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     /// mientras hay alguien hablando, nada de lo que llega sirve para estimar el ruido de fondo.
     /// </remarks>
     public bool IsUserSpeaking => _speechGate.IsSpeaking;
+
+    /// <summary>
+    /// Si todavía queda voz por salir por los parlantes.
+    /// </summary>
+    /// <remarks>
+    /// No es lo mismo que tener el turno abierto. El servidor despacha el audio más rápido que
+    /// tiempo real, así que cuando cierra el turno pueden quedar segundos de respuesta esperando de
+    /// este lado.
+    /// </remarks>
+    public bool IsSpeakerBusy => _sink.Pending > TimeSpan.Zero;
 
     /// <summary>El momento que le corresponde al orbe ahora mismo.</summary>
     public LiveOrbMoment Moment
@@ -179,6 +215,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         }
 
         _speechGate.Reset();
+        _echoRun = false;
         _idleSilence = TimeSpan.Zero;
         _quietRaised = false;
         SetWaiting(false);
@@ -230,12 +267,28 @@ public sealed class LiveVoiceSession : IAsyncDisposable
 
         if (edge == LiveSpeechEdge.Started)
         {
+            // Si arrancó con los parlantes sonando, esto es su propia voz volviendo por el
+            // micrófono. Se anota acá —en el borde de arranque— porque cuando llegue el borde de
+            // «terminó» ya no queda con qué distinguirlo: para entonces el parlante hace rato que se
+            // calló y el eco se lee igual que una frase de la persona.
+            _echoRun = IsSpeakerBusy;
             SetWaiting(false);
             Refresh();
             return;
         }
 
-        if (_client.TurnState == LiveTurnState.Idle)
+        if (_echoRun)
+        {
+            // Era la cola del eco de la respuesta anterior: la compuerta necesita 700 ms de silencio
+            // para cerrar, así que este borde llega bastante después de que el parlante se calló, con
+            // el turno ya en reposo. Sin esta marca, el orbe quedaba clavado en «Pensando…» sin que
+            // nadie hubiera hablado — y encima tapaba «En vivo · decime «listo» para cortar», que es
+            // el único lugar donde se dice cómo cerrar la charla.
+            _echoRun = false;
+            return;
+        }
+
+        if (_client.TurnState == LiveTurnState.Idle && !IsSpeakerBusy)
         {
             SetWaiting(true);
             Refresh();
@@ -309,6 +362,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     {
         await _client.StopAsync().ConfigureAwait(false);
         _speechGate.Reset();
+        _echoRun = false;
         _idleSilence = TimeSpan.Zero;
         _quietRaised = false;
         SetWaiting(false);
@@ -342,6 +396,14 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         }
 
         Refresh();
+
+        // El turno cerró pero el parlante puede seguir sonando, y del servidor no va a llegar ningún
+        // mensaje más que avise cuándo termina: el único que lo sabe es el parlante. Por eso acá
+        // arranca alguien que le pregunte hasta que se calle.
+        if (eventArgs.Current == LiveTurnState.Idle && IsSpeakerBusy)
+        {
+            WatchSpeakerDrain();
+        }
     }
 
     /// <summary>
@@ -357,6 +419,11 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     {
         SetWaiting(false);
         _speechGate.Reset();
+
+        // La cola ya se vació, así que lo que la persona siga diciendo arranca con el parlante
+        // callado y no se va a confundir con eco. Sin borrarlo acá, la marca de la respuesta que
+        // acaba de cortar se llevaba puesto el «pensando» de la frase nueva.
+        _echoRun = false;
         Publish(LiveOrbMoment.Interrupted);
     }
 
@@ -390,7 +457,56 @@ public sealed class LiveVoiceSession : IAsyncDisposable
             waiting = _waitingForReply;
         }
 
-        Publish(LiveOrbMoments.For(_client.TurnState, waiting));
+        Publish(LiveOrbMoments.For(_client.TurnState, waiting, IsSpeakerBusy));
+    }
+
+    /// <summary>
+    /// Mira el parlante hasta que se calle y recién ahí recalcula el momento.
+    /// </summary>
+    /// <remarks>
+    /// Es una tarea aparte y no una espera adentro del bucle de lectura a propósito: ese bucle es el
+    /// mismo que trae el aviso de interrupción, y frenarlo esperando a que termine de sonar una
+    /// respuesta es exactamente lo contrario de lo que hace falta.
+    /// <para>
+    /// Nunca hay dos: si el turno siguiente cierra mientras ésta todavía mira, la bandera la deja
+    /// pasar y sigue mirando la que ya estaba.
+    /// </para>
+    /// </remarks>
+    private void WatchSpeakerDrain()
+    {
+        if (Interlocked.Exchange(ref _drainWatch, 1) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var reloj = System.Diagnostics.Stopwatch.StartNew();
+                while (Volatile.Read(ref _disposed) == 0 &&
+                    IsSpeakerBusy &&
+                    reloj.Elapsed < SpeakerDrainLimit)
+                {
+                    await Task.Delay(SpeakerPollInterval).ConfigureAwait(false);
+                }
+
+                if (Volatile.Read(ref _disposed) == 0)
+                {
+                    Refresh();
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // Una salida que se rompa al preguntarle cuánto le queda no puede tumbar el proceso
+                // desde una tarea del pool. El orbe queda un momento de más en «hablando», que es el
+                // lado seguro del error.
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _drainWatch, 0);
+            }
+        });
     }
 
     private void Publish(LiveOrbMoment moment)

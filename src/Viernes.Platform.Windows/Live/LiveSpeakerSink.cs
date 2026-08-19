@@ -89,6 +89,17 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
         }
     }
 
+    /// <summary>
+    /// Lo mismo que <see cref="QueuedBytes"/>, dicho en tiempo.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="QueuedBytes"/> estaba y no lo leía nadie fuera de las pruebas, así que el orbe
+    /// volvía a «te escucho» con segundos de respuesta todavía adentro de esta cola. Quien decide
+    /// —<c>LiveVoiceSession</c>— razona en tiempo y no en bytes, y la frecuencia de salida es asunto
+    /// de acá.
+    /// </remarks>
+    public TimeSpan Pending => LiveAudioFormat.OutputDurationOf(QueuedBytes);
+
     /// <inheritdoc />
     public ValueTask EnqueueAsync(ReadOnlyMemory<byte> pcm24k, CancellationToken cancellationToken)
     {

@@ -84,6 +84,22 @@ public partial class MainWindow : Window
     private bool _pressPending;
     private bool _pressStartedOnButton;
 
+    /// <summary>Si hay un arrastre en curso. Mientras dure, la ventana tiene el mouse capturado.</summary>
+    private bool _dragging;
+
+    /// <summary>Dónde agarró el dedo, respecto de la esquina del orbe. Sin esto el orbe salta al dedo.</summary>
+    private Vector _grab;
+
+    /// <summary>
+    /// El cuerpo que está puesto, para pasarle el movimiento cuadro a cuadro.
+    /// </summary>
+    /// <remarks>
+    /// Se guarda en vez de buscarlo en <c>OrbHost.Children</c> cada cuadro: recorrer una colección
+    /// de WPF sesenta veces por segundo asigna un enumerador cada vez para encontrar siempre al
+    /// mismo hijo. Lo escribe <see cref="ApplyOrbShape"/>, que es el único que cambia el cuerpo.
+    /// </remarks>
+    private IOrbMotionSink? _orbMotion;
+
     /// <summary>
     /// Memoria de dónde va el orbe en cada monitor, y el vigía que lo lleva al que estás usando.
     /// </summary>
@@ -355,12 +371,14 @@ public partial class MainWindow : Window
     private void ApplyOrbShape(OrbShape shape)
     {
         OrbHost.Children.Clear();
+        _orbMotion = null;
 
         if (shape == OrbShape.Nube)
         {
             var nube = new NubeOrb { Width = ShellLayout.OrbSize, Height = ShellLayout.OrbSize };
             nube.SetBinding(NubeOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
             OrbHost.Children.Add(nube);
+            _orbMotion = nube;
 
             // El cuerpo nuevo nace sin hora y sin escritorio: se los pasa el mismo reparto de siempre.
             ApplyAmbience();
@@ -378,6 +396,7 @@ public partial class MainWindow : Window
             LiquidOrb.HasSpendAuthorizationProperty,
             new Binding(nameof(MainViewModel.HasSpendAuthorization)) { Source = _viewModel });
         OrbHost.Children.Add(gota);
+        _orbMotion = gota;
         ApplyAmbience();
     }
 
@@ -493,20 +512,27 @@ public partial class MainWindow : Window
         // cuadro a cuadro es lo que impedía que el viaje arrancara.
         var bounds = _travel?.Bounds ?? ShellLayout.OrbBounds(workArea);
 
-        if (_motion.IsDragging)
-        {
-            // Durante el arrastre la posición la manda Windows: acá sólo se anota, para poder soltar
-            // el orbe con la velocidad que traía.
-            _motion.ReportDragged(ShellLayout.OrbOriginFor(new Point(Left, Top), _opensRight), dt);
-        }
-        else
+        // Mientras se arrastra no se adopta ni se recorta. Adoptar sería leer la posición que este
+        // mismo bucle acaba de escribir, y recortar contra el área útil le sacaría al resorte
+        // justamente el sobrepaso que le da peso: el orbe tiene que poder pasarse del borde y volver.
+        if (!_motion.IsDragging)
         {
             AdoptExternalMove();
             _motion.ClampInto(bounds);
-            _motion.Step(dt, bounds);
-            SettleTravel();
-            WriteWindowPosition();
         }
+
+        _motion.Step(dt, bounds);
+
+        if (!_motion.IsDragging)
+        {
+            SettleTravel();
+        }
+
+        WriteWindowPosition();
+
+        // La costura. El cuerpo se entera de que se está moviendo acá y en ningún otro lado: de esto
+        // salen el achatamiento, la inclinación hacia donde va, el polvo que queda atrás y el golpe.
+        _orbMotion?.ReportMotion(_motion.Sample);
 
         _presence.Step(dt);
         ApplyPresence();
@@ -658,13 +684,17 @@ public partial class MainWindow : Window
     /// </summary>
     private void UpdatePanelVisibility()
     {
+        // Con la velocidad suavizada y no con la del integrador: es la misma que ve el cuerpo, así
+        // que el vidrio se retrae exactamente cuando el orbe empieza a estirarse, y no un cuadro
+        // antes ni después. Durante el arrastre la del integrador es la del resorte, que puede ser
+        // enorme sin que el orbe se haya movido todavía.
         if (_fastMove)
         {
-            _fastMove = _motion.Speed > 170;
+            _fastMove = _motion.SmoothSpeed > 170;
         }
         else
         {
-            _fastMove = _motion.Speed > 340;
+            _fastMove = _motion.SmoothSpeed > 340;
         }
 
         // El desplegable NO se abre nunca con una pantalla completa adelante. La condición vive acá,
@@ -1239,8 +1269,7 @@ public partial class MainWindow : Window
     /// <c>e.Handled</c> y llamaba a <c>DragMove</c> en un evento de túnel colgado del contenedor, así
     /// que el clic moría antes de llegar a <c>OrbButton</c>: el botón nunca tomaba foco de teclado
     /// —que es la precondición del push-to-talk— y el trigger <c>IsPressed</c> de su plantilla era
-    /// código muerto. El arrastre no puede compartirse desde acá porque <c>DragMove</c> no vuelve
-    /// hasta que soltás el botón; por eso arranca recién cuando el mouse se movió de verdad.
+    /// código muerto. Por eso el arrastre arranca recién cuando el mouse se movió de verdad.
     /// </remarks>
     private void Orb_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -1261,12 +1290,27 @@ public partial class MainWindow : Window
     /// Los cuatro píxeles de tolerancia son los mismos que antes decidían «esto fue un toque»: si no
     /// se llegan a recorrer, nadie mueve nada y el toque lo resuelve el botón.
     /// <para>
-    /// <c>DragMove</c> no vuelve hasta que se suelta el botón, así que la inercia se arma con lo que
-    /// el bucle de cuadro fue anotando mientras tanto: soltar es empezar a volar con esa velocidad.
+    /// Acá había un <c>DragMove()</c>. Se fue por dos razones: clavaba la ventana al cursor —así que
+    /// el orbe no podía quedarse atrás de la mano, que es todo su peso— y no volvía hasta que se
+    /// soltaba el botón, así que el resorte de arrastre de <see cref="OrbMotion"/> nunca corrió una
+    /// sola vez. Ahora el cursor es un <em>objetivo</em> y la ventana la mueve el resorte.
     /// </para>
     /// </remarks>
     private void Orb_PreviewMouseMove(object sender, MouseEventArgs e)
     {
+        if (_dragging)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed)
+            {
+                // Se soltó sin que llegara el MouseUp —pasó fuera de la ventana, o lo comió otro—.
+                EndDrag();
+                return;
+            }
+
+            _motion.DragTo(PointerPosition() - _grab);
+            return;
+        }
+
         if (!_pressPending)
         {
             return;
@@ -1285,32 +1329,77 @@ public partial class MainWindow : Window
         }
 
         _pressPending = false;
+        BeginDrag();
+    }
 
-        // La captura se suelta ANTES, no después. Un Button de WPF toma el mouse al presionarlo, y
-        // con el mouse capturado por otro elemento DragMove no arranca: tira InvalidOperationException
-        // y el orbe queda clavado. Era exactamente eso —«no puedo arrastrarla manteniendo apretada»—
-        // y lo introdujo el arreglo que hizo que el clic llegara al botón: el botón empezó a recibir
-        // el clic y, con él, la captura.
+    /// <summary>
+    /// Toma el mouse y arranca el arrastre.
+    /// </summary>
+    /// <remarks>
+    /// La captura ajena se suelta ANTES de tomar la propia. Un <c>Button</c> de WPF se queda con el
+    /// mouse al presionarlo, y ese fue un bug pago: con el botón capturando, el arrastre entero
+    /// dejaba de existir y el orbe quedaba clavado —«no puedo arrastrarla manteniendo apretada»—. Lo
+    /// introdujo el arreglo que hizo que el clic llegara al botón. Sacarle la captura tiene además
+    /// el efecto que se quiere: el botón cancela su presión y no dispara <c>Click</c> al soltar, así
+    /// que arrastrar nunca abre el panel de yapa.
+    /// </remarks>
+    private void BeginDrag()
+    {
         if (Mouse.Captured is not null)
         {
             Mouse.Capture(null);
         }
 
+        // La ventana captura, no el contenedor del orbe: durante el arrastre el cursor se va bien
+        // afuera de los 108 px del orbe y hay que seguir recibiendo sus movimientos igual.
+        if (!CaptureMouse())
+        {
+            return;
+        }
+
+        _dragging = true;
+        _grab = PointerPosition() - _motion.Position;
         _motion.BeginDrag();
+    }
 
-        try
+    /// <summary>Termina el arrastre y lo suelta con la velocidad que traía el resorte.</summary>
+    private void EndDrag()
+    {
+        if (!_dragging)
         {
-            // DragMove no vuelve hasta que se suelta el botón.
-            DragMove();
-        }
-        catch (InvalidOperationException)
-        {
-            // El botón se soltó antes de que arrancara el arrastre; no hay nada que guardar distinto.
+            return;
         }
 
-        _motion.ReportDragged(ShellLayout.OrbOriginFor(new Point(Left, Top), _opensRight), 1.0 / 60);
+        _dragging = false;
         _motion.Drop();
         SaveOrbPlacement();
+
+        if (IsMouseCaptured)
+        {
+            ReleaseMouseCapture();
+        }
+    }
+
+    /// <summary>
+    /// Dónde está el puntero, en el mismo espacio en el que vive la esquina del orbe.
+    /// </summary>
+    /// <remarks>
+    /// Se pregunta por la posición absoluta del cursor y no por <c>e.GetPosition(this)</c>. Durante
+    /// el arrastre la ventana se mueve debajo del cursor en cada cuadro —la mueve el resorte—, así
+    /// que medir el puntero <em>respecto de la ventana</em> sería mezclar el movimiento que estamos
+    /// causando con el que estamos midiendo: el objetivo empujaría a la ventana y la ventana al
+    /// objetivo. Absoluto no tiene ese lazo.
+    /// <para>
+    /// El cursor viene en píxeles físicos y se divide por la escala del monitor, que es exactamente
+    /// la conversión inversa a la de <see cref="ScreenAt"/>. Las dos tienen que ser la misma o el
+    /// orbe se iría corriendo del dedo en un escritorio escalado.
+    /// </para>
+    /// </remarks>
+    private Point PointerPosition()
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var cursor = System.Windows.Forms.Cursor.Position;
+        return new Point(cursor.X / dpi.DpiScaleX, cursor.Y / dpi.DpiScaleY);
     }
 
     /// <summary>
@@ -1318,6 +1407,12 @@ public partial class MainWindow : Window
     /// </summary>
     private void Orb_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (_dragging)
+        {
+            EndDrag();
+            return;
+        }
+
         if (!_pressPending)
         {
             return;
@@ -1333,6 +1428,15 @@ public partial class MainWindow : Window
 
         HandleOrbTap();
     }
+
+    /// <summary>
+    /// Si alguien más se lleva el mouse —otra ventana, un Alt-Tab—, el arrastre termina ahí.
+    /// </summary>
+    /// <remarks>
+    /// Sin esto el orbe quedaría pegado al último objetivo y <c>IsDragging</c> encendido para
+    /// siempre: la física no volvería a volar ni a imantar, y el vidrio no se abriría nunca más.
+    /// </remarks>
+    private void Orb_LostMouseCapture(object sender, MouseEventArgs e) => EndDrag();
 
     private void OrbButton_Click(object sender, RoutedEventArgs e) => HandleOrbTap();
 

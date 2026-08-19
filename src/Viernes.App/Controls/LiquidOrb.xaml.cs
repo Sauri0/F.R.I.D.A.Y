@@ -23,7 +23,7 @@ namespace Viernes.App.Controls;
 /// y el conjunto se cerraría en un patrón visible cada pocas vueltas.
 /// </para>
 /// </remarks>
-internal partial class LiquidOrb : UserControl, IOrbBody
+internal partial class LiquidOrb : UserControl, IOrbBody, IOrbMotionSink
 {
     /// <summary>Muestras del contorno. A 72 el ojo ya no encuentra el polígono.</summary>
     private const int Samples = 72;
@@ -89,24 +89,37 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     private double _voiceEpoch;
 
     /// <summary>
-    /// La gota que se desprendió en el corte, si hay una viva. Una sola, y a propósito.
+    /// Las gotas que se desprendieron del cuerpo y todavía viajan. Tope 15, como el fuente.
     /// </summary>
     /// <remarks>
-    /// El fuente desprende gotas en ocho lugares y acá está implementado <b>uno</b>: el del corte de
-    /// «hablando → interrumpida», que es el único donde el satélite <em>significa</em> algo —es la
-    /// parte de la frase que ya había salido del cuerpo cuando le pediste que pare, y por eso sigue
-    /// viajando y muere afuera—. Los otros siete son adorno de movimiento: cuatro de los ánimos
-    /// (¡listo! desprende seis de una, urgente dos, no salió y hola una cada uno), uno del estado
-    /// error mientras el cuerpo está roto, y dos de la física —al golpear contra un borde y al
-    /// arrastrar rápido—.
+    /// Acá había <b>un</b> campo para una sola gota —la del corte de «hablando → interrumpida»— y la
+    /// nota decía que portar el resto pedía convertirlo en una lista acotada, porque
+    /// <c>spawn(6, …)</c> no entra en un campo que guarda uno. Es esa lista.
     /// <para>
-    /// Portarlos pide convertir esto en una lista acotada, porque <c>spawn(6, …)</c> no entra en un
-    /// campo que guarda uno. Se anota entero para que la próxima persona sepa qué falta de verdad:
-    /// una lista de omisiones incompleta es peor que no tenerla, porque se lee como si estuviera
-    /// todo declarado.
+    /// De los ocho lugares del fuente que desprenden gotas, ahora están los tres que dependen del
+    /// movimiento: el corte, el golpe contra un borde y el arrastre rápido. Siguen faltando los
+    /// cuatro de los ánimos (¡listo! seis de una, urgente dos, no salió y hola una cada uno) y el
+    /// del estado error mientras el cuerpo está roto. Se anotan enteros para que la próxima persona
+    /// sepa qué falta de verdad: una lista de omisiones incompleta se lee como si estuviera todo.
     /// </para>
     /// </remarks>
-    private Satellite? _tail;
+    private readonly List<Satellite> _tails = [];
+
+    /// <summary>Un dibujo por gota viva. Se crean a demanda y se reciclan; nunca se destruyen.</summary>
+    /// <remarks>
+    /// Todos comparten el pincel de <c>Tail</c>, así que el color de las gotas lo sigue poniendo
+    /// <see cref="ApplyPalette"/> en un solo lugar y no hay que recorrer la pileta para teñirlas.
+    /// </remarks>
+    private readonly List<System.Windows.Shapes.Path> _tailVisuals = [];
+
+    /// <summary>El movimiento de la ventana, tal como lo dejó el último cuadro del shell.</summary>
+    private OrbMotionSample _windowMotion;
+
+    /// <summary>El último golpe que este cuerpo llegó a acusar. Ver <see cref="OrbMotionSample"/>.</summary>
+    private int _hitToken;
+
+    /// <summary>Si en el cuadro anterior el usuario lo tenía agarrado. Soltarlo es un evento.</summary>
+    private bool _wasDragging;
 
     private double _phase;
     private double _clock;
@@ -131,6 +144,11 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     public LiquidOrb()
     {
         InitializeComponent();
+
+        // La primera gota la dibuja el Path que ya estaba en el XAML: es el que trae el pincel, y
+        // las que se agreguen después lo comparten.
+        _tailVisuals.Add(Tail);
+
         Loaded += (_, _) => Start();
         Unloaded += (_, _) => Stop();
     }
@@ -263,15 +281,7 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
         if (spec.IsCut)
         {
-            var angle = _spray.NextDouble() * 2 * Math.PI;
-            _tail = new Satellite(
-                Math.Cos(angle) * 6,
-                Math.Sin(angle) * 6,
-                (26 * (0.5 + _spray.NextDouble())) + ((_spray.NextDouble() - 0.5) * 14),
-                (-6 * (0.5 + _spray.NextDouble())) + ((_spray.NextDouble() - 0.5) * 14),
-                2.2 * (0.6 + (_spray.NextDouble() * 0.7)),
-                1.0,
-                0.9);
+            Spawn(1, 26, -6, 2.2, 0.9);
         }
 
         if (spec.IsChained)
@@ -279,6 +289,85 @@ internal partial class LiquidOrb : UserControl, IOrbBody
             // Encadenada: nada se reinicia y el reloj de la voz arranca acá. La primera onda de la
             // voz no acompaña a la transición: es la transición.
             _voiceEpoch = _clock;
+        }
+    }
+
+    /// <summary>
+    /// Desprende gotas del cuerpo. Es el <c>spawn(n, vx, vy, sz, life)</c> del fuente, tal cual.
+    /// </summary>
+    /// <remarks>
+    /// Salen todas de un anillo de 6 unidades alrededor del centro y con la velocidad pedida
+    /// desparramada: cada una toma entre la mitad y una vez y media de la velocidad base, más un
+    /// ruido de ±7. Sin ese desparramo las gotas salen en fila y se leen como un chorro; con él, como
+    /// pedazos que se soltaron.
+    /// </remarks>
+    private void Spawn(int count, double velocityX, double velocityY, double size, double life)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            // El tope del fuente. Sin él, arrastrar rápido un rato deja cien gotas vivas y el
+            // presupuesto de dibujo se va a la loma del orto.
+            if (_tails.Count > 14)
+            {
+                _tails.RemoveAt(0);
+            }
+
+            var angle = _spray.NextDouble() * 2 * Math.PI;
+            _tails.Add(new Satellite(
+                Math.Cos(angle) * 6,
+                Math.Sin(angle) * 6,
+                (velocityX * (0.5 + _spray.NextDouble())) + ((_spray.NextDouble() - 0.5) * 14),
+                (velocityY * (0.5 + _spray.NextDouble())) + ((_spray.NextDouble() - 0.5) * 14),
+                size * (0.6 + (_spray.NextDouble() * 0.7)),
+                1.0,
+                life));
+        }
+    }
+
+    /// <inheritdoc />
+    public void ReportMotion(in OrbMotionSample motion) => _windowMotion = motion;
+
+    /// <summary>
+    /// Lo que el movimiento de la ventana le hace al cuerpo una vez por cuadro.
+    /// </summary>
+    /// <remarks>
+    /// La deformación no está acá —esa es geometría y se recalcula entera cada cuadro—: acá están
+    /// los tres eventos, que pasan una vez y dejan marca. Golpear un borde, soltar el orbe después
+    /// de arrastrarlo, y perder polvo mientras se lo lleva rápido.
+    /// </remarks>
+    private void ConsumeMotion()
+    {
+        var motion = _windowMotion;
+
+        if (motion.HitToken != _hitToken)
+        {
+            _hitToken = motion.HitToken;
+
+            // El golpe entra como velocidad de escala, igual que los otros impulsos: el cuerpo se
+            // achata contra el borde y vuelve solo. Y desprende dos gotas hacia adentro —contra la
+            // normal del borde—, que es la salpicadura.
+            var strength = motion.HitStrength;
+            _ripples.Add(new Ripple(_clock, 0.6 * strength));
+            _scaleVelocity += 0.9 * strength;
+            Spawn(2, -motion.HitNormalX * 42 * strength, -motion.HitNormalY * 42 * strength, 2.0, 0.8);
+        }
+
+        if (_wasDragging && !motion.IsDragging)
+        {
+            // Soltarlo es un evento del cuerpo, no de la ventana: la gota se sacude al quedar libre.
+            _ripples.Add(new Ripple(_clock, 0.5));
+            _scaleVelocity += 0.45;
+        }
+
+        _wasDragging = motion.IsDragging;
+
+        // Sólo arrastrando, sólo por encima del 55 % de la rapidez máxima y sólo el 9 % de los
+        // cuadros. No es un chorro continuo: son gotas sueltas, y ahí está la diferencia entre «va
+        // rápido» y «está perdiendo pedazos». La velocidad es la de la ventana en NEGATIVO por 0,05,
+        // así que la gota queda quieta en pantalla mientras el orbe se va.
+        if (motion.IsDragging && motion.Speed01 > 0.55 && _spray.NextDouble() < 0.09)
+        {
+            Spawn(1, -motion.VelocityX * 0.05, -motion.VelocityY * 0.05, 1.6, 0.7);
         }
     }
 
@@ -371,7 +460,11 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
         profile = ApplyTaskPacing(profile, delta);
         AdvanceBeat(delta);
-        AdvanceTail(delta);
+
+        // Primero se acusan los eventos del movimiento y después se avanzan las gotas: una gota
+        // recién desprendida tiene que empezar a viajar en este mismo cuadro, no en el que viene.
+        ConsumeMotion();
+        AdvanceTails(delta);
 
         // La velocidad del estado acelera el reloj de la ondulación, no su amplitud.
         var speed = OrbNight.Speed(NightMode) * profile.DropSpeed;
@@ -478,29 +571,36 @@ internal partial class LiquidOrb : UserControl, IOrbBody
     /// real para que la cola se vea igual en una máquina que baja a 30. Es el único lugar donde un
     /// número del fuente se reinterpreta, y es porque el fuente ahí depende de su propio fps.
     /// </remarks>
-    private void AdvanceTail(double delta)
+    private void AdvanceTails(double delta)
     {
-        if (_tail is not { } tail)
+        if (_tails.Count == 0)
         {
-            return;
-        }
-
-        var life = tail.Life - (delta / tail.Span);
-        if (life <= 0)
-        {
-            _tail = null;
             return;
         }
 
         var drag = Math.Pow(0.94, delta * 60);
-        _tail = tail with
+
+        // De atrás para adelante: sacar una de la lista mientras se la recorre para adelante saltea
+        // la siguiente, y con varias vivas eso deja gotas inmortales.
+        for (var i = _tails.Count - 1; i >= 0; i--)
         {
-            Life = life,
-            X = tail.X + (tail.VelocityX * delta),
-            Y = tail.Y + (tail.VelocityY * delta),
-            VelocityX = tail.VelocityX * drag,
-            VelocityY = (tail.VelocityY * drag) + (34 * delta * 0.6)
-        };
+            var tail = _tails[i];
+            var life = tail.Life - (delta / tail.Span);
+            if (life <= 0)
+            {
+                _tails.RemoveAt(i);
+                continue;
+            }
+
+            _tails[i] = tail with
+            {
+                Life = life,
+                X = tail.X + (tail.VelocityX * delta),
+                Y = tail.Y + (tail.VelocityY * delta),
+                VelocityX = tail.VelocityX * drag,
+                VelocityY = (tail.VelocityY * drag) + (34 * delta * 0.6)
+            };
+        }
     }
 
     private void AdvanceBeat(double delta)
@@ -611,6 +711,25 @@ internal partial class LiquidOrb : UserControl, IOrbBody
         var rollCos = Math.Cos(_mood.Roll);
         var rollSin = Math.Sin(_mood.Roll);
 
+        // El achatamiento del viaje. Es el efecto que más se nota de los siete y el que separa una
+        // gota de líquido de un óvalo escalado: el factor perpendicular es el RECÍPROCO
+        // —1/(1+0,30·s01)— y no «uno menos algo», así que al estirarse se afina en vez de engordar.
+        //
+        // Los dos coeficientes son distintos y salen así del fuente: 0,52 a lo largo del viaje y
+        // 0,30 adentro del recíproco. Con el mismo número de los dos lados el área quedaría
+        // exactamente conservada; con 0,52 contra 0,30 la gota gana un poco de área al ir rápido.
+        // No hay nada en el fuente que explique por qué, sólo que es lo que hace.
+        var speed01 = _windowMotion.Speed01;
+        var travel = _windowMotion.Angle;
+        var travelCos = Math.Cos(travel);
+        var travelSin = Math.Sin(travel);
+        var stretch = 1 + (0.52 * speed01);
+        var pinch = 1 / (1 + (0.30 * speed01));
+
+        // Por debajo del 2 % no hay movimiento que valga la pena: el ángulo de una velocidad casi
+        // nula es ruido puro y haría girar el estirón sobre sí mismo estando el orbe quieto.
+        var moving = speed01 > 0.02;
+
         for (var i = 0; i < Samples; i++)
         {
             var theta = (double)i / Samples * 2 * Math.PI;
@@ -624,8 +743,19 @@ internal partial class LiquidOrb : UserControl, IOrbBody
             }
 
             // El achatamiento de abajo es la gravedad, y es lo único que le da un arriba y un abajo
-            // a una forma que si no sería una mancha.
-            scale *= 1 - (0.055 * Math.Max(0, Math.Sin(theta)));
+            // a una forma que si no sería una mancha. En movimiento se afloja hasta el 30 %: en el
+            // aire pesa menos, y si no la gota viajaría con la panza plana.
+            scale *= 1 - (0.055 * Math.Max(0, Math.Sin(theta)) * (1 - (0.7 * speed01)));
+
+            if (moving)
+            {
+                // Cada muestra se estira según cuánto queda detrás. El coseno negativo vale 1 justo
+                // en la cola y 0 adelante, el max() mata la mitad delantera y el cuadrado concentra
+                // el efecto atrás: por eso la silueta sale con forma de cometa y no de globo más
+                // grande.
+                var behind = Math.Max(0, -Math.Cos(theta - travel));
+                scale *= 1 + (0.34 * speed01 * behind * behind);
+            }
 
             if (_mood.Sway != 0)
             {
@@ -634,6 +764,17 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
             var dx = Math.Cos(theta) * scale * radius;
             var dy = Math.Sin(theta) * scale * radius * 0.985;
+
+            if (moving)
+            {
+                // Se rota el punto al eje del viaje, se deforma ahí y se vuelve. Sin este cambio de
+                // marco el estirón saldría siempre en la misma diagonal en vez de salir siempre
+                // atrás.
+                var along = (dx * travelCos) + (dy * travelSin);
+                var across = (-dx * travelSin) + (dy * travelCos);
+                dx = (along * stretch * travelCos) - (across * pinch * travelSin);
+                dy = (along * stretch * travelSin) + (across * pinch * travelCos);
+            }
 
             if (_mood.Sway != 0)
             {
@@ -697,19 +838,7 @@ internal partial class LiquidOrb : UserControl, IOrbBody
             Mass.Data = group;
         }
 
-        if (_tail is { } tail)
-        {
-            var size = tail.Radius * (0.45 + (0.55 * tail.Life));
-            var shape = new EllipseGeometry(new Point(centerX + tail.X, centerY + tail.Y), size, size * 1.08);
-            shape.Freeze();
-            Tail.Data = shape;
-            Tail.Opacity = Math.Min(1, tail.Life * 1.4);
-            Tail.Visibility = Visibility.Visible;
-        }
-        else if (Tail.Visibility != Visibility.Collapsed)
-        {
-            Tail.Visibility = Visibility.Collapsed;
-        }
+        DrawTails(centerX, centerY);
 
         // Recortar los reflejos contra la silueta es lo que hace que la luz resbale por el borde.
         // Se recortan contra el cuerpo y no contra el signo: la luz es del ambiente y el signo es
@@ -718,6 +847,47 @@ internal partial class LiquidOrb : UserControl, IOrbBody
 
         // El sedimento usa el mismo recorte: es líquido dentro de la gota, no una banda encima.
         SedimentLayer.Clip = body;
+    }
+
+    /// <summary>
+    /// Dibuja las gotas desprendidas, una por dibujo de la pileta.
+    /// </summary>
+    /// <remarks>
+    /// Cada una necesita su propia opacidad —se apagan a destiempo— y por eso no pueden ir todas en
+    /// una <c>GeometryGroup</c> como las del signo. Los dibujos se crean a demanda y no se destruyen:
+    /// como mucho llegan a quince, y crear y tirar <c>Path</c> por cuadro sería peor que tenerlos
+    /// quietos.
+    /// </remarks>
+    private void DrawTails(double centerX, double centerY)
+    {
+        for (var i = 0; i < _tails.Count; i++)
+        {
+            if (i >= _tailVisuals.Count)
+            {
+                // Comparten el pincel del primero: teñirlos es teñir uno solo.
+                var extra = new System.Windows.Shapes.Path { Fill = Tail.Fill };
+                Tails.Children.Add(extra);
+                _tailVisuals.Add(extra);
+            }
+
+            var tail = _tails[i];
+            var size = tail.Radius * (0.45 + (0.55 * tail.Life));
+            var shape = new EllipseGeometry(new Point(centerX + tail.X, centerY + tail.Y), size, size * 1.08);
+            shape.Freeze();
+
+            var visual = _tailVisuals[i];
+            visual.Data = shape;
+            visual.Opacity = Math.Min(1, tail.Life * 1.4);
+            visual.Visibility = Visibility.Visible;
+        }
+
+        for (var i = _tails.Count; i < _tailVisuals.Count; i++)
+        {
+            if (_tailVisuals[i].Visibility != Visibility.Collapsed)
+            {
+                _tailVisuals[i].Visibility = Visibility.Collapsed;
+            }
+        }
     }
 
     /// <summary>

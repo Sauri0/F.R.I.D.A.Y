@@ -38,10 +38,23 @@ namespace Viernes.Platform.Windows.Speech.WakeWord;
 /// a sí misma y se activa sola.
 /// </para>
 /// <para>
-/// <b>Qué falta comprobar:</b> esto se escribió y compila, y sus piezas —ventana rodante, recorte de
-/// la juntura, fin de frase, detector de voz, caño de audio— tienen pruebas. Lo que <em>no</em> se
-/// pudo probar donde se escribió es el conjunto contra un micrófono real, porque no había ninguno.
-/// Antes de darlo por bueno hay que oírlo funcionar.
+/// <b>Qué se comprobó y qué no.</b> Esto se escribió, compiló, se midió pieza por pieza… y no
+/// funcionaba <em>nada</em>: no arrancaba, y cuando arrancaba no oía. Tres cosas, todas en el
+/// encuentro con SAPI y todas silenciosas, todas arregladas en <see cref="AudioPipeStream"/> y con
+/// el detalle escrito ahí:
+/// </para>
+/// <para>
+/// 1. SAPI pide el largo del caño apenas se lo pasan y el caño lanzaba por no tener largo; esa
+/// excepción no estaba entre las esperadas y dejaba la inicialización del asistente a medio hacer.
+/// 2. Antes de leer un byte pregunta la posición con <c>Seek(0, Current)</c>; lanzando ahí, abandona
+/// la entrada sin leer, sin reconocer y sin fallar. 3. Si una lectura devuelve menos de lo pedido,
+/// no vuelve a pedir nunca.
+/// </para>
+/// <para>
+/// Hoy sí: abre el micrófono de este equipo en unos 300 ms, queda en <c>Listening</c> y se sostiene,
+/// y el nombre se reconoce a lo largo del caño —hay una prueba que lo corre de punta a punta con voz
+/// sintetizada—. Lo que sigue sin comprobarse es con una persona hablando: que la gramática dispare
+/// con esa voz, y que el recorte del pre-roll caiga donde tiene que caer. Para eso hay que hablarle.
 /// </para>
 /// </remarks>
 public sealed class ContinuousWakeListener : IWakeWordService
@@ -53,6 +66,7 @@ public sealed class ContinuousWakeListener : IWakeWordService
     private readonly string[] _phrases;
     private readonly object _sync = new();
     private readonly IVoiceActivityDetector _detector;
+    private readonly bool _ownsDetector;
     private readonly WakeUtteranceAssembler _assembler;
 
     private WaveInEvent? _capture;
@@ -67,11 +81,27 @@ public sealed class ContinuousWakeListener : IWakeWordService
     /// <summary>
     /// Arma el oído. No abre el micrófono hasta <see cref="StartAsync"/>.
     /// </summary>
-    public ContinuousWakeListener(ContinuousWakeListenerOptions? options = null)
+    /// <param name="options">Qué nombres, cuánto recuerda y con qué detector.</param>
+    /// <param name="detector">
+    /// Quién decide qué es voz. Si se pasa uno, <b>no se desecha acá</b>: es de quien lo prestó.
+    /// </param>
+    /// <remarks>
+    /// El detector entra por afuera para poder compartir <em>uno solo</em> con la sesión en vivo. El
+    /// modelo entrenado tarda en cargarse y esa carga estaba pasando dos veces —una acá y otra por
+    /// conversación, adentro del micrófono de la sesión en vivo, justo después de abrir el
+    /// websocket—, así que se perdían las primeras palabras de la primera frase. Compartirlo es
+    /// seguro porque los dos nunca capturan a la vez: abrir la sesión en vivo para el oído continuo
+    /// y viceversa; el micrófono es uno solo y eso ya estaba resuelto.
+    /// </remarks>
+    public ContinuousWakeListener(
+        ContinuousWakeListenerOptions? options = null,
+        IVoiceActivityDetector? detector = null)
     {
         _options = options ?? new ContinuousWakeListenerOptions();
         _phrases = _options.ValidateAndNormalizePhrases();
-        _detector = BuildDetector(_options, out var reason);
+        _ownsDetector = detector is null;
+        string? reason = null;
+        _detector = detector ?? CreateDetector(_options, out reason);
         TrainedDetectorUnavailableReason = reason;
         _assembler = new WakeUtteranceAssembler(
             _options,
@@ -291,12 +321,32 @@ public sealed class ContinuousWakeListener : IWakeWordService
             }
 
             StopCore(WakeWordServiceState.Stopped);
-            _detector.Dispose();
+            if (_ownsDetector)
+            {
+                _detector.Dispose();
+            }
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// El detector que le corresponde a estas opciones: el entrenado si está el modelo, y si no la
+    /// heurística.
+    /// </summary>
+    /// <remarks>
+    /// Público para que el anfitrión pueda armar <b>uno solo</b> antes de que haga falta y
+    /// prestárselo también a la sesión en vivo. Cargar el modelo cuesta, y hacerlo en el medio de una
+    /// conversación se paga con las primeras palabras.
+    /// </remarks>
+    public static IVoiceActivityDetector CreateDetector(
+        ContinuousWakeListenerOptions options,
+        out string? unavailableReason)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return BuildDetector(options, out unavailableReason);
     }
 
     private static IVoiceActivityDetector BuildDetector(
@@ -613,10 +663,21 @@ public sealed class ContinuousWakeListener : IWakeWordService
         }
     }
 
+    /// <summary>
+    /// Qué fallas se dan por posibles al abrir o cerrar el oído.
+    /// </summary>
+    /// <remarks>
+    /// Acá decía <c>PlatformNotSupportedException</c> y tenía que decir <c>NotSupportedException</c>,
+    /// que es la madre. La diferencia no era teórica: SAPI pedía el largo del caño de audio, el caño
+    /// —que es infinito— lanzaba la de la madre, y como no estaba en esta lista se iba para arriba
+    /// desde <see cref="StartAsync"/> y dejaba la inicialización del asistente a medio hacer sin un
+    /// renglón en ningún lado. El largo ya está arreglado; esto queda para que la próxima sorpresa
+    /// de una API que no es nuestra degrade en vez de tumbar.
+    /// </remarks>
     private static bool IsExpectedFailure(Exception exception) =>
         exception is ArgumentException
             or InvalidOperationException
-            or PlatformNotSupportedException
+            or NotSupportedException
             or ObjectDisposedException
             or COMException
             or MmException

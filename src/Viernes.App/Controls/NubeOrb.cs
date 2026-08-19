@@ -27,7 +27,7 @@ namespace Viernes.App.Controls;
 /// acumulada y con el halo central, que es una sola forma. A 108 px la diferencia no se lee.
 /// </para>
 /// </remarks>
-internal sealed class NubeOrb : FrameworkElement, IOrbBody
+internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
 {
     /// <summary>
     /// Puntos del cuerpo. Es la única perilla de presupuesto de render que hay que tocar.
@@ -64,6 +64,27 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
 
     private const int DepthBuckets = 6;
 
+    /// <summary>
+    /// De píxeles de pantalla a unidades del lienzo. El cuerpo se dibuja en 70 y el orbe mide 108.
+    /// </summary>
+    /// <remarks>
+    /// Del fuente: <c>const u = 70 / S</c>, con <c>S</c> el tamaño del orbe. Es lo que convierte la
+    /// velocidad de la ventana —px/s— en algo que se pueda sumar a la posición de un grano.
+    /// </remarks>
+    private const double CanvasPerPixel = 70.0 / 108.0;
+
+    /// <summary>
+    /// Cuánto puede correrse un grano por la estela, en unidades del lienzo.
+    /// </summary>
+    /// <remarks>
+    /// <b>Este número no sale del fuente.</b> Allá es <c>pad · u · 0,92</c> con 132 px de guarda
+    /// alrededor del orbe, o sea unas 79 unidades: tres radios enteros. Acá el control mide lo que
+    /// mide el orbe y esa guarda no existe, así que el tope es el mismo techo de lienzo que ya usa
+    /// todo lo demás —<see cref="OrbBounds.MaxReach"/>— con el 0,92 del fuente puesto encima. Lo
+    /// que se pierde es cuánto se alarga la estela a rapidez máxima, no que exista.
+    /// </remarks>
+    private const double SmearLimit = OrbBounds.MaxReach * 0.92;
+
     private static readonly double[] RingTilts = [0.30, 0.72, 1.00];
     private static readonly double[] RingRolls = [0.0, 1.05, 2.09];
 
@@ -71,12 +92,36 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
     private readonly RingPoint[][] _rings = new RingPoint[3][];
     private readonly CorePoint[] _fringe;
     private readonly DustPoint[] _dust;
+
+    /// <summary>
+    /// El resorte de estela de cada partícula, uno por cada arreglo de arriba y en el mismo orden.
+    /// </summary>
+    /// <remarks>
+    /// Va aparte y no adentro de <c>DustPoint</c> y compañía porque aquéllos son inmutables —se
+    /// arman una vez y describen la forma— y esto cambia sesenta veces por segundo. Mezclarlos
+    /// obligaría a reescribir el arreglo entero de puntos por cuadro para mover un desplazamiento.
+    /// </remarks>
+    private readonly Smear[] _coreSmear;
+    private readonly Smear[][] _ringSmear = new Smear[3][];
+    private readonly Smear[] _fringeSmear;
+    private readonly Smear[] _dustSmear;
     private readonly List<Splat>[] _buckets = new List<Splat>[DepthBuckets];
     private readonly List<Ripple> _ripples = [];
     private readonly OrbMoodClock _moods = new();
 
     /// <summary>Sólo para el destello de los nudos. No toca la forma, así que no rompe el determinismo del cuerpo.</summary>
     private readonly Random _flicker = new(20260817);
+
+    /// <summary>
+    /// El desparramo de la salpicadura al golpear un borde y el de los resortes de estela.
+    /// </summary>
+    /// <remarks>
+    /// Aparte del destello a propósito: esto <b>sí</b> toca la forma. El cuerpo quieto sigue siendo
+    /// idéntico en cada arranque porque la semilla es fija y porque nadie lo consulta hasta que hay
+    /// un golpe; mezclarlo con el destello haría que un choque corriera la secuencia del otro y dos
+    /// sesiones dejarían de coincidir.
+    /// </remarks>
+    private readonly Random _splash = new(20260819);
 
     private readonly double[] _ringPhase = new double[3];
     private readonly double[] _ringAngle = new double[3];
@@ -123,6 +168,15 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
     private double _driftX;
     private double _driftY;
 
+    /// <summary>El movimiento de la ventana, tal como lo dejó el último cuadro del shell.</summary>
+    private OrbMotionSample _windowMotion;
+
+    /// <summary>El último golpe que este cuerpo llegó a acusar. Ver <see cref="OrbMotionSample"/>.</summary>
+    private int _hitToken;
+
+    /// <summary>Si en el cuadro anterior el usuario lo tenía agarrado. Soltarlo es un evento.</summary>
+    private bool _wasDragging;
+
     private double _nextThinkRipple;
     private double _flareTime = double.NegativeInfinity;
     private double _nextFlare;
@@ -147,22 +201,31 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         // Semilla fija: la nube tiene que verse igual en cada arranque, no distinta cada vez.
         var random = new Random(20260816);
 
+        // Los resortes de estela salen de SU PROPIA secuencia y no de la de arriba. Sacarlos de la
+        // misma corría todos los tiros siguientes y la nube quieta pasaba a tener otra forma: un
+        // cambio que no se pidió, en la parte del dibujo que ya estaba aprobada.
+        var springs = new Random(20260819);
+
         var coreCount = (int)Math.Round(TotalPoints * 0.19);
         var ringCount = (int)Math.Round(TotalPoints * 0.255);
         var fringeCount = (int)Math.Round(TotalPoints * 0.08);
 
         _core = new CorePoint[coreCount];
+        _coreSmear = new Smear[coreCount];
         for (var i = 0; i < coreCount; i++)
         {
             // Radio con raíz cúbica para que el llenado del volumen sea parejo y no se apelotone.
             _core[i] = CorePoint.OnSphere(random, Math.Cbrt(random.NextDouble()) * 0.52);
+            _coreSmear[i] = Smear.New(springs);
         }
 
         for (var shell = 0; shell < 3; shell++)
         {
             _rings[shell] = new RingPoint[ringCount];
+            _ringSmear[shell] = new Smear[ringCount];
             for (var i = 0; i < ringCount; i++)
             {
+                _ringSmear[shell][i] = Smear.New(springs);
                 _rings[shell][i] = new RingPoint(
                     ((double)i / ringCount * 2 * Math.PI) + (random.NextDouble() * 0.05),
                     0.84 + (shell * 0.08) + ((random.NextDouble() - 0.5) * 0.055),
@@ -175,14 +238,18 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         }
 
         _fringe = new CorePoint[fringeCount];
+        _fringeSmear = new Smear[fringeCount];
         for (var i = 0; i < fringeCount; i++)
         {
             _fringe[i] = CorePoint.OnSphere(random, 1.02 + (random.NextDouble() * 0.16));
+            _fringeSmear[i] = Smear.New(springs);
         }
 
         _dust = new DustPoint[DustPoints];
+        _dustSmear = new Smear[DustPoints];
         for (var i = 0; i < DustPoints; i++)
         {
+            _dustSmear[i] = Smear.New(springs);
             _dust[i] = new DustPoint(
                 random.NextDouble() * 2 * Math.PI,
                 (random.NextDouble() - 0.5) * 2.6,
@@ -271,6 +338,128 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
 
     /// <inheritdoc />
     public void ShowMood(OrbMood mood) => _channel.RequestMood(mood);
+
+    /// <inheritdoc />
+    public void ReportMotion(in OrbMotionSample motion) => _windowMotion = motion;
+
+    /// <summary>
+    /// La estela: cada partícula queda atrás de la ventana y vuelve por su propio resorte.
+    /// </summary>
+    /// <remarks>
+    /// La nube no dibuja una cola: se deshilacha. El polvo se corre entero —factor 1—, los flecos
+    /// tres cuartos, los anillos un tercio y el núcleo apenas un quinto, así que la nube se estira
+    /// en capas y no en bloque. Ese escalonado es toda la diferencia entre algo con masa y una
+    /// calcomanía que se traslada.
+    /// <para>
+    /// El empuje es <em>negativo</em> respecto de la velocidad: la ventana va para un lado y las
+    /// partículas se quedan del otro. Y no es una posición sino una fuerza, así que al frenar la
+    /// nube se pasa de largo y vuelve, que es lo que se ve como líquido.
+    /// </para>
+    /// </remarks>
+    private void RelaxSmear(double delta)
+    {
+        var velocityX = _windowMotion.VelocityX * CanvasPerPixel;
+        var velocityY = _windowMotion.VelocityY * CanvasPerPixel;
+
+        Relax(_dustSmear, 1.00, velocityX, velocityY, delta);
+        Relax(_fringeSmear, 0.72, velocityX, velocityY, delta);
+        Relax(_coreSmear, 0.20, velocityX, velocityY, delta);
+        for (var shell = 0; shell < 3; shell++)
+        {
+            Relax(_ringSmear[shell], 0.34, velocityX, velocityY, delta);
+        }
+    }
+
+    private static void Relax(Smear[] smears, double factor, double velocityX, double velocityY, double delta)
+    {
+        for (var i = 0; i < smears.Length; i++)
+        {
+            ref var q = ref smears[i];
+            q.VelocityX += ((-q.Stiffness * q.OffsetX) - (q.Damping * q.VelocityX) - (q.Coupling * factor * velocityX)) * delta;
+            q.VelocityY += ((-q.Stiffness * q.OffsetY) - (q.Damping * q.VelocityY) - (q.Coupling * factor * velocityY)) * delta;
+            q.OffsetX += q.VelocityX * delta;
+            q.OffsetY += q.VelocityY * delta;
+
+            // El tope mata la velocidad además de la posición: dejarla viva haría que la partícula
+            // se quede pegada contra el límite hasta que el resorte gane, y eso se ve como un borde.
+            if (q.OffsetX > SmearLimit)
+            {
+                q.OffsetX = SmearLimit;
+                q.VelocityX = 0;
+            }
+            else if (q.OffsetX < -SmearLimit)
+            {
+                q.OffsetX = -SmearLimit;
+                q.VelocityX = 0;
+            }
+
+            if (q.OffsetY > SmearLimit)
+            {
+                q.OffsetY = SmearLimit;
+                q.VelocityY = 0;
+            }
+            else if (q.OffsetY < -SmearLimit)
+            {
+                q.OffsetY = -SmearLimit;
+                q.VelocityY = 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Los dos eventos del movimiento: el golpe contra un borde y el momento en que se lo suelta.
+    /// </summary>
+    /// <remarks>
+    /// El golpe entra por dos puertas a la vez —la escala del cuerpo entero y un empujón por
+    /// partícula contra la normal del borde— y por eso se lee como un choque y no como un pulso: la
+    /// nube se aplasta contra el borde y el polvo salpica hacia adentro. El desparramo de 0,5 a 1,6
+    /// en el polvo es lo que evita que salpique como un bloque.
+    /// </remarks>
+    private void ConsumeMotion()
+    {
+        var motion = _windowMotion;
+
+        if (motion.HitToken != _hitToken)
+        {
+            _hitToken = motion.HitToken;
+
+            var strength = motion.HitStrength;
+            var kickX = -motion.HitNormalX * 26 * strength;
+            var kickY = -motion.HitNormalY * 26 * strength;
+
+            _ripples.Add(new Ripple(_wallClock, 0.6 * strength));
+            _scaleVelocity += 0.85 * strength;
+
+            for (var i = 0; i < _dustSmear.Length; i++)
+            {
+                _dustSmear[i].VelocityX += kickX * (0.5 + (_splash.NextDouble() * 1.1));
+                _dustSmear[i].VelocityY += kickY * (0.5 + (_splash.NextDouble() * 1.1));
+            }
+
+            for (var i = 0; i < _fringeSmear.Length; i++)
+            {
+                _fringeSmear[i].VelocityX += kickX * 0.55;
+                _fringeSmear[i].VelocityY += kickY * 0.55;
+            }
+
+            for (var shell = 0; shell < 3; shell++)
+            {
+                for (var i = 0; i < _ringSmear[shell].Length; i++)
+                {
+                    _ringSmear[shell][i].VelocityX += kickX * 0.22;
+                    _ringSmear[shell][i].VelocityY += kickY * 0.22;
+                }
+            }
+        }
+
+        if (_wasDragging && !motion.IsDragging)
+        {
+            _ripples.Add(new Ripple(_wallClock, 0.5));
+            _scaleVelocity += 0.45;
+        }
+
+        _wasDragging = motion.IsDragging;
+    }
 
     private static void OnStateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -390,6 +579,11 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var decay = Math.Exp(-delta * 7);
         _driftX *= decay;
         _driftY *= decay;
+
+        // El movimiento de la ventana, antes de mover nada más: los golpes tienen que entrar en los
+        // resortes de este cuadro y no en los del que viene.
+        ConsumeMotion();
+        RelaxSmear(delta);
 
         // En movimiento reducido el reloj no se detiene, se arrastra al 5 %: lo que queda es una
         // silueta que casi no cambia, no un dibujo congelado.
@@ -575,6 +769,11 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             }
         }
 
+        // La rapidez de la ventana hincha el cuerpo entero un poco: no es la estela —esa la hacen
+        // los resortes por partícula— sino el aire que la nube empuja delante al ir rápido.
+        var speed01 = _windowMotion.Speed01;
+        extra += 0.045 * speed01;
+
         // El estirón de sorda no tiene cadencia propia: la marca la escalera de reintentos, y cada
         // intento sale más débil que el anterior. Ver OrbDeafRetry.
         var reach = profile.ReachPeriod > 0 ? OrbDeafRetry.CloudStretch(_channel.Retry) : 0;
@@ -600,8 +799,15 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var scale = side / 70.0;
         context.PushTransform(new ScaleTransform(scale, scale));
 
+        // La rapidez y el nivel de voz entran al halo por el MISMO canal: el orbe brilla igual
+        // cuando lo tirás y cuando le hablás fuerte, y eso es lo que lo hace sentir una sola cosa.
         var pulse = Math.Min(1, Math.Abs(_scale - 1) * 11);
-        DrawHalo(context, baseColor, light, alpha * (1 + (0.38 * pulse) + (1.1 * soundEnergy)));
+        DrawHalo(
+            context,
+            baseColor,
+            light,
+            alpha * (1 + (0.38 * pulse) + (0.35 * speed01) + (1.1 * soundEnergy)),
+            speed01);
 
         DrawDust(context, profile, dustColor, alpha, light, dispersion, extra, reach, sound, soundEnergy, turbulence, waveEnvelope, voice);
         DrawCore(context, profile, coreColor, alpha, light, dispersion, extra, sound, turbulence, waveEnvelope, voice);
@@ -611,7 +817,15 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         context.Pop();
     }
 
-    private void DrawHalo(DrawingContext context, Color tint, bool light, double strength)
+    /// <summary>
+    /// El halo, estirado hacia donde va.
+    /// </summary>
+    /// <remarks>
+    /// Es un círculo al que se le aplica <c>rotar(α) · escalar(1+0,42·s01, 1−0,20·s01) · rotar(−α)</c>
+    /// con α el ángulo de viaje: se lleva el eje del movimiento al eje X, se estira ahí y se vuelve.
+    /// Escalar directo daría un óvalo siempre horizontal, que a 45° se ve como un error de dibujo.
+    /// </remarks>
+    private void DrawHalo(DrawingContext context, Color tint, bool light, double strength, double speed01)
     {
         // El halo da masa: sin él los puntos se desarman a 108 px. Es también lo que reemplaza al
         // resplandor horneado de cada grano, que en WPF no se puede pagar.
@@ -632,7 +846,29 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         brush.Freeze();
 
         var span = Radius * 1.36;
+
+        if (speed01 <= 0.02)
+        {
+            // Quieto no hay eje de viaje: el ángulo de una velocidad casi nula es ruido, y aplicarlo
+            // haría girar el óvalo sobre sí mismo con el orbe apoyado en una esquina.
+            context.DrawEllipse(brush, null, new Point(_originX, _originY), span, span);
+            return;
+        }
+
+        var degrees = _windowMotion.Angle * 180 / Math.PI;
+        var matrix = Matrix.Identity;
+        matrix.Translate(-_originX, -_originY);
+        matrix.Rotate(-degrees);
+        matrix.Scale(1 + (0.42 * speed01), 1 - (0.20 * speed01));
+        matrix.Rotate(degrees);
+        matrix.Translate(_originX, _originY);
+
+        var transform = new MatrixTransform(matrix);
+        transform.Freeze();
+
+        context.PushTransform(transform);
         context.DrawEllipse(brush, null, new Point(_originX, _originY), span, span);
+        context.Pop();
     }
 
     private void DrawDust(
@@ -654,8 +890,10 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var yawCos = Math.Cos(_yaw);
         var yawSin = Math.Sin(_yaw);
 
-        foreach (var grain in _dust)
+        // Indexado y no foreach: cada grano tiene su resorte de estela en el arreglo paralelo.
+        for (var index = 0; index < _dust.Length; index++)
         {
+            var grain = _dust[index];
             var radius = grain.Radius * profile.DustRadius * dispersion *
                 (1 + (extra * 1.2) + (0.09 * Math.Sin((2 * Math.PI * _clock / grain.Period) + grain.Offset)));
             var fade = 0.45 + (0.55 * Math.Abs(Math.Sin((2 * Math.PI * _clock / (grain.Period * 0.7)) + grain.Offset)));
@@ -702,8 +940,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
                 radius,
                 grain.Size * fade * 1.5 * shimmer * (1 - (0.8 * drop)),
                 rim: false,
-                sway + _driftX,
+                sway + _driftX + _dustSmear[index].OffsetX,
                 (_mood.DriftY * (0.35 + (0.65 * grain.Delay)) * 0.02) + (_mood.DropY * drop * 0.34) + _driftY +
+                    _dustSmear[index].OffsetY +
 
                     // Con la pregunta vieja el polvo sedimenta: cada grano baja distinto según su
                     // escalonado, así que la nube se deshilacha en una banda abajo en vez de mudarse
@@ -731,8 +970,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var yawCos = Math.Cos(_yaw);
         var yawSin = Math.Sin(_yaw);
 
-        foreach (var point in _core)
+        for (var index = 0; index < _core.Length; index++)
         {
+            var point = _core[index];
             var radius = point.Radius * dispersion *
                 (1 + extra + (profile.Wobble * Math.Sin((2 * Math.PI * _clock / point.Period) + point.Offset)));
 
@@ -750,7 +990,15 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             (x, y, z) = Flow(x, y, z, point.Radius, turbulence);
 
             _glyphSeed = point.Seed;
-            Push((x * yawCos) + (z * yawSin), y, (-x * yawSin) + (z * yawCos), radius, 0.85, rim: false, 0, 0);
+            Push(
+                (x * yawCos) + (z * yawSin),
+                y,
+                (-x * yawSin) + (z * yawCos),
+                radius,
+                0.85,
+                rim: false,
+                _coreSmear[index].OffsetX,
+                _coreSmear[index].OffsetY);
         }
 
         Paint(context, tint, (light ? 0.46 : 0.34) * alpha, light, rim: false, flat: false, glow: 2.2);
@@ -840,7 +1088,17 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
                 var lit = shell == _flareShell && i == _flareIndex ? 1 + (1.8 * flare * _mood.FlareBoost) : 1;
 
                 _glyphSeed = point.Seed;
-                Push(lx, ly, lz, radius, 0.82 * lit, rim: true, 0, shell == 2 ? -_mood.RingLift : 0, rollCos, rollSin);
+                Push(
+                    lx,
+                    ly,
+                    lz,
+                    radius,
+                    0.82 * lit,
+                    rim: true,
+                    _ringSmear[shell][i].OffsetX,
+                    _ringSmear[shell][i].OffsetY + (shell == 2 ? -_mood.RingLift : 0),
+                    rollCos,
+                    rollSin);
             }
         }
 
@@ -862,8 +1120,10 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
         var yawCos = Math.Cos(_yaw);
         var yawSin = Math.Sin(_yaw);
 
-        foreach (var point in _fringe)
+        for (var index = 0; index < _fringe.Length; index++)
         {
+            var point = _fringe[index];
+
             // Los flecos rompen el círculo perfecto: sin ellos parece un planeta.
             var radius = point.Radius * dispersion *
                 (1 + (extra * 1.3) + (profile.Wobble * 1.5 * Math.Sin((2 * Math.PI * _clock / point.Period) + point.Offset))) *
@@ -875,7 +1135,15 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
             (x, y, z) = Flow(x, y, z, point.Radius, turbulence);
 
             _glyphSeed = point.Seed;
-            Push((x * yawCos) + (z * yawSin), y, (-x * yawSin) + (z * yawCos), radius, 0.66, rim: false, 0, 0);
+            Push(
+                (x * yawCos) + (z * yawSin),
+                y,
+                (-x * yawSin) + (z * yawCos),
+                radius,
+                0.66,
+                rim: false,
+                _fringeSmear[index].OffsetX,
+                _fringeSmear[index].OffsetY);
         }
 
         Paint(context, light ? tint : Mix(tint, Colors.White, 0.36), (light ? 0.30 : 0.22) * alpha, light, rim: false, flat: false, glow: 2.6);
@@ -1103,6 +1371,44 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody
     private static Color Mix(Color from, Color to, double t) => OrbPalette.LerpColor(from, to, t);
 
     private readonly record struct Splat(double X, double Y, double Size, double Rim);
+
+    /// <summary>
+    /// El resorte con el que una partícula se queda atrás cuando la ventana se mueve.
+    /// </summary>
+    /// <remarks>
+    /// Es mutable y vive en un arreglo a propósito: se integra por cuadro y se lo toca por
+    /// referencia, así que copiarlo para modificarlo sería copiar seiscientas veces por cuadro.
+    /// </remarks>
+    private struct Smear
+    {
+        public double OffsetX;
+        public double OffsetY;
+        public double VelocityX;
+        public double VelocityY;
+        public double Stiffness;
+        public double Damping;
+        public double Coupling;
+
+        /// <summary>
+        /// Un resorte con las constantes del fuente y su desparramo.
+        /// </summary>
+        /// <remarks>
+        /// Rigidez entre 13 y 28; amortiguación entre el 52 % y el 86 % de la crítica —siempre por
+        /// debajo, así que cada partícula rebota un poco distinto—; acoplamiento a la velocidad de
+        /// la ventana entre 0,45 y 1,80. El desparramo es todo: con las tres iguales la nube se
+        /// mueve en bloque y deja de leerse como polvo.
+        /// </remarks>
+        public static Smear New(Random random)
+        {
+            var stiffness = 13 + (random.NextDouble() * 15);
+            return new Smear
+            {
+                Stiffness = stiffness,
+                Damping = 2 * Math.Sqrt(stiffness) * (0.52 + (random.NextDouble() * 0.34)),
+                Coupling = 0.45 + (random.NextDouble() * 1.35)
+            };
+        }
+    }
 
     private readonly record struct Ripple(double Start, double Amplitude);
 

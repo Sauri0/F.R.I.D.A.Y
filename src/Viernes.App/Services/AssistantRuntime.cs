@@ -110,6 +110,17 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// respuesta y no hace falta repetir el nombre. Se cierra únicamente cuando el usuario lo dice.
     /// </summary>
     private bool _conversationActive;
+
+    /// <summary>
+    /// Lo que se lleva transcripto de la tanda de habla abierta.
+    /// </summary>
+    /// <remarks>
+    /// Uno solo para los tres caminos por los que entra voz —las hipótesis de SAPI, los fragmentos
+    /// de la sesión en vivo y el WAV que entrega el oído continuo—: son tres formas de traer el
+    /// mismo texto y sin un acumulador común cada una armaría la línea a su manera, que es
+    /// exactamente cómo la burbuja termina dibujándose distinta según por dónde entró la voz.
+    /// </remarks>
+    private readonly DictationBoard _dictation = new();
     private System.Diagnostics.Stopwatch? _captureClock;
     private int _voiceTraced;
     private int _microphoneTraced;
@@ -185,7 +196,6 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
     private readonly ReminderScheduler _reminderScheduler;
     private readonly LocalSettingsStore _settingsStore = new();
-    private readonly WakeWordRecognitionCoordinator _wakeCoordinator = new();
     private readonly SemaphoreSlim _voiceTransitionGate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
     private readonly object _confirmationGate = new();
@@ -201,6 +211,24 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     private McpToolProvider? _mcpProvider;
     private ISpeechRecognitionProvider? _recognition;
     private IWakeWordService? _wakeWord;
+
+    /// <summary>
+    /// El que decide qué es voz, uno solo para todo el asistente.
+    /// </summary>
+    /// <remarks>
+    /// Cargar el modelo entrenado cuesta, y estaba pasando dos veces: una al armar el oído y otra
+    /// <b>por conversación</b>, adentro del micrófono de la sesión en vivo — o sea, justo después de
+    /// abrir el websocket y antes de empezar a subir audio. Ahí se perdían las primeras palabras de
+    /// la primera frase de cada charla. Se arma una vez, en el arranque, y se presta: los dos nunca
+    /// capturan a la vez porque el micrófono es uno solo.
+    /// </remarks>
+    private IVoiceActivityDetector? _voiceDetector;
+
+    /// <summary>El oído continuo, si es el que está escuchando. Nulo con el wake de siempre.</summary>
+    private ContinuousWakeListener? _continuousWake;
+
+    /// <summary>Distinto de cero mientras se está armando la frase que empezó con el nombre.</summary>
+    private int _awaitingUtterance;
     private ViernesLocalSettings _settings = new();
     private PendingConfirmation? _pendingConfirmation;
 
@@ -577,6 +605,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
         // Recién acá, con el archivo leído, se sabe qué voz eligió el usuario. Es el único lugar
         // donde se fija: las opciones con las que se construye el sintetizador.
+        // Este SpeechService sólo sintetiza: el que reconoce es _recognition, que sale de
+        // CreateRecognitionSelection. Los parciales de la transcripción se prenden allá, y prenderlos
+        // acá no haría nada — costó un rato entenderlo, porque el nombre de la bandera no dice de
+        // cuál de los dos oficios habla y acá era el único lugar donde aparecía apagada.
         _speechSynthesizer = new SpeechService(new SpeechServiceOptions
         {
             RecognitionCulture = "es-AR",
@@ -591,12 +623,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         _recognitionFallbackReason = selection.UsedFallback ? selection.FallbackReason : null;
         SubscribeRecognition(_recognition);
 
-        _wakeWord = new SapiWakeWordService(new WakeWordServiceOptions
-        {
-            Phrases = ResolveWakePhrases(_settings.EffectiveWakePhrases),
-            RecognitionCulture = _settings.RecognitionCulture,
-            MinimumConfidence = ResolveWakeConfidence()
-        });
+        _wakeWord = BuildWakeListener();
         SubscribeWakeWord(_wakeWord);
 
         await _recognition.SetMicrophoneMutedAsync(_isMuted, cancellationToken).ConfigureAwait(false);
@@ -606,8 +633,26 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         var wakeStarted = false;
         if (_isWakeWordEnabled && !_isMuted)
         {
-            var wakeResult = await _wakeWord.StartAsync(cancellationToken).ConfigureAwait(false);
-            wakeStarted = wakeResult.Succeeded;
+            // Con try, y no por prolijidad. Lo que sigue de acá para abajo es la mitad del arranque
+            // —el vigía del escritorio, los recordatorios, la marca de inicializado— y una excepción
+            // que suba desde el oído se la lleva entera y en silencio: el asistente queda abierto,
+            // dibujado y sin nada andando. Ya pasó con una NotSupportedException del caño de audio y
+            // no dejó una sola línea en la bitácora. Que no arranque el oído es quedarse sin wake;
+            // que no arranque el resto es quedarse sin asistente.
+            try
+            {
+                var wakeResult = await _wakeWord.StartAsync(cancellationToken).ConfigureAwait(false);
+                wakeStarted = wakeResult.Succeeded;
+                if (!wakeStarted)
+                {
+                    RuntimeTrace.Write("wake.no.arranco", $"{wakeResult.ErrorCode} · {wakeResult.ErrorMessage}");
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                RuntimeTrace.Write("wake.excepcion", $"{exception.GetType().Name} · {exception.Message}");
+            }
+
             if (!wakeStarted)
             {
                 _isWakeWordEnabled = false;
@@ -978,7 +1023,9 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             AssistantVisualState.Thinking,
             "Entendido · procesando…",
             transcript,
-            MicrophoneActive: false));
+            MicrophoneActive: false,
+            Dictation: _dictation.Settle(transcript),
+            DictationRecovered: _dictation.RecoveredSpan));
         await SendAsync(transcript, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1703,7 +1750,23 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// Abre una conversación: a partir de acá el micrófono vuelve solo después de cada respuesta.
     /// La llama el wake word y también el toque en el orbe.
     /// </summary>
-    public Task StartConversationAsync(CancellationToken cancellationToken)
+    public Task StartConversationAsync(CancellationToken cancellationToken) =>
+        StartConversationAsync(opening: null, cancellationToken);
+
+    /// <summary>
+    /// Abre la conversación con una frase ya dicha.
+    /// </summary>
+    /// <param name="opening">
+    /// Lo que la persona dijo antes de que hubiera conversación. Lo trae el oído continuo, que ya
+    /// grabó la frase entera —incluido lo anterior al nombre— mientras el resto todavía no existía.
+    /// Con <c>null</c> se abre como siempre: saluda y espera.
+    /// </param>
+    /// <remarks>
+    /// Que la primera frase entre por acá es lo que evita el turno perdido. Sin esto, el oído
+    /// entiende «Viernes creame una carpeta», abre la conversación, y la conversación pregunta «¿qué
+    /// necesitás?» sobre un pedido que ya se hizo.
+    /// </remarks>
+    private Task StartConversationAsync(string? opening, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_conversationActive || IsMuted || _recognition is null)
@@ -1714,19 +1777,21 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             return Task.CompletedTask;
         }
 
-        RuntimeTrace.Write("conversacion.abierta");
+        RuntimeTrace.Write("conversacion.abierta", opening is null ? "sin frase" : "con la frase ya dicha");
 
         _conversationActive = true;
         _conversationCancellation?.Dispose();
         _conversationCancellation = new CancellationTokenSource();
 
         Publish(new AssistantRuntimeUpdate(
-            AssistantVisualState.Listening,
-            "En conversación · decime «listo» para cortar",
-            "Te escucho.",
-            MicrophoneActive: true));
+            opening is null ? AssistantVisualState.Listening : AssistantVisualState.Thinking,
+            opening is null
+                ? "En conversación · decime «listo» para cortar"
+                : "Entendido · procesando…",
+            opening is null ? "Te escucho." : null,
+            MicrophoneActive: opening is null));
 
-        _ = RunChosenConversationAsync(_conversationCancellation.Token);
+        _ = RunChosenConversationAsync(_conversationCancellation.Token, opening);
         return Task.CompletedTask;
     }
 
@@ -1740,12 +1805,20 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// hubiera intentado. El motivo de la elección queda escrito en la bitácora, siempre, incluso
     /// cuando la elección es la de siempre.
     /// </remarks>
-    private async Task RunChosenConversationAsync(CancellationToken cancellationToken)
+    private async Task RunChosenConversationAsync(CancellationToken cancellationToken, string? opening)
     {
         try
         {
             if (await TryStartLiveConversationAsync(cancellationToken).ConfigureAwait(false))
             {
+                // La frase que ya se dijo entra por el mismo canal, escrita: el audio de esa frase lo
+                // grabó el oído continuo y la sesión en vivo no lo escuchó nunca. Mandarla como texto
+                // es lo único que la sesión puede hacer con audio que no pasó por ella.
+                if (!string.IsNullOrWhiteSpace(opening) && _liveSession is not null)
+                {
+                    await _liveSession.SendTextAsync(opening, cancellationToken).ConfigureAwait(false);
+                }
+
                 // A partir de acá manda el servidor: no hay bucle que correr de este lado. La charla
                 // la cierra el usuario, el mute, el freno o una caída de la sesión.
                 return;
@@ -1762,7 +1835,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             RuntimeTrace.Write("vivo.arranque.excepcion", $"{exception.GetType().Name} · {exception.Message}");
         }
 
-        await RunConversationLoopAsync(cancellationToken).ConfigureAwait(false);
+        await RunConversationLoopAsync(cancellationToken, opening).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1822,6 +1895,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             await _recognition.CancelPushToTalkAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        _dictation.Clear();
         Publish(new AssistantRuntimeUpdate(
             Resting(),
             reason,
@@ -1829,6 +1903,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             WakeWordEnabled: _isWakeWordEnabled,
             ClearSteps: true,
             ClearItems: true,
+            ClearDictation: true,
             Quiet: quiet));
 
         await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
@@ -1838,7 +1913,9 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// Escucha, responde y vuelve a escuchar. No se corta por silencio: sólo por una frase de
     /// cierre, por mute o porque el dispositivo falle. Ese es el punto de tener conversación.
     /// </summary>
-    private async Task RunConversationLoopAsync(CancellationToken cancellationToken)
+    private async Task RunConversationLoopAsync(
+        CancellationToken cancellationToken,
+        string? opening = null)
     {
         if (Interlocked.CompareExchange(ref _conversationLoopRunning, 1, 0) != 0)
         {
@@ -1854,7 +1931,18 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
             // SAPI avisa que soltó el micrófono antes de que el driver lo libere de verdad.
             await Task.Delay(TimeSpan.FromMilliseconds(400), cancellationToken).ConfigureAwait(false);
-            await GreetAsync(cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrWhiteSpace(opening))
+            {
+                await GreetAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Con el pedido ya hecho, saludar es hacerla esperar para decirle algo que no
+                // preguntó. Se contesta y listo.
+                AddConversationTurn(opening);
+                await SendAsync(opening, spoken: true, cancellationToken).ConfigureAwait(false);
+            }
 
             while (_conversationActive && !cancellationToken.IsCancellationRequested && !IsMuted)
             {
@@ -1996,6 +2084,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
                 }
 
                 consecutiveSilences = 0;
+
+                // La frase quedó cerrada: lo que estaba en itálica pasa a firme y ahí se queda
+                // mientras piensa. Sin esto, la última palabra sigue temblando durante todo el turno.
+                PublishDictation(_dictation.Settle(transcript));
 
                 // Confirmar por voz. Sin esto, cualquier acción que pida permiso queda muerta en una
                 // conversación hablada: el botón vive en la burbuja, y la burbuja está oculta.
@@ -2578,9 +2670,73 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
                 RecognitionCulture = settings.RecognitionCulture,
                 SynthesisCulture = settings.RecognitionCulture,
                 PreferredVoiceName = settings.PreferredVoiceName,
+
+                // Las hipótesis de SAPI son la única fuente de transcripción palabra por palabra del
+                // camino de siempre: Whisper no entrega nada hasta que el micrófono se cerró, porque
+                // transcribe el WAV entero de una vez. Con este respaldo la burbuja se llena
+                // mientras se habla; con Whisper aparece completa al final. Es una diferencia real
+                // entre los dos reconocedores y no hay cómo emparejarla desde acá.
                 EmitPartialTranscriptions = true
             }
         });
+    }
+
+    /// <summary>
+    /// Arma el oído: el continuo por defecto, y el de siempre si alguien lo pide.
+    /// </summary>
+    /// <remarks>
+    /// El continuo abre el micrófono una sola vez y reparte el audio a tres lugares: la ventana
+    /// rodante de diez segundos, el reconocedor de nombre y el detector de voz. La diferencia que se
+    /// nota es que <em>lo dicho antes del nombre ya está grabado</em>: «Viernes, creame una carpeta»
+    /// sale de un tirón, sin la coreografía de soltar el dispositivo y esperar 220 ms a que Windows
+    /// lo libere antes de empezar a grabar.
+    /// <para>
+    /// Estaba escrito, medido y calibrado, y no lo llamaba nadie. Se enciende por defecto con la
+    /// caída puesta: si falta el modelo entrenado, adentro se usa la heurística, y si el oído no
+    /// arranca —lo dice <see cref="ContinuousWakeListener.StartAsync"/>— el que llama se queda sin
+    /// wake exactamente igual que antes. <c>VIERNES_WAKE_LISTENER=sapi</c> vuelve al de siempre sin
+    /// recompilar.
+    /// </para>
+    /// </remarks>
+    private IWakeWordService BuildWakeListener()
+    {
+        var phrases = ResolveWakePhrases(_settings.EffectiveWakePhrases);
+        var confidence = ResolveWakeConfidence();
+
+        if (string.Equals(
+            Environment.GetEnvironmentVariable("VIERNES_WAKE_LISTENER")?.Trim(),
+            "sapi",
+            StringComparison.OrdinalIgnoreCase))
+        {
+            RuntimeTrace.Write("oido.continuo", "apagado por VIERNES_WAKE_LISTENER=sapi");
+            return new SapiWakeWordService(new WakeWordServiceOptions
+            {
+                Phrases = phrases,
+                RecognitionCulture = _settings.RecognitionCulture,
+                MinimumConfidence = confidence
+            });
+        }
+
+        var options = new ContinuousWakeListenerOptions
+        {
+            Phrases = phrases,
+            RecognitionCulture = _settings.RecognitionCulture,
+            MinimumConfidence = confidence
+        };
+
+        // El detector se arma acá y no adentro del oído para poder prestárselo a la sesión en vivo.
+        // Es la carga que se estaba pagando de nuevo en cada conversación.
+        var reloj = System.Diagnostics.Stopwatch.StartNew();
+        _voiceDetector = ContinuousWakeListener.CreateDetector(options, out var faltante);
+        reloj.Stop();
+        RuntimeTrace.Write(
+            "vad.cargado",
+            $"{_voiceDetector.Info.Name} en {reloj.ElapsedMilliseconds} ms" +
+            (faltante is null ? string.Empty : $" · {faltante}"));
+
+        var listener = new ContinuousWakeListener(options, _voiceDetector);
+        _continuousWake = listener;
+        return listener;
     }
 
     private static bool ResolveWakeEnabled(VoiceActivationMode configuredMode)
@@ -2708,6 +2864,12 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         wakeWord.MicrophoneActivityChanged += WakeOnMicrophoneActivityChanged;
         wakeWord.WakeWordDetected += WakeOnWakeWordDetected;
         wakeWord.ServiceError += WakeOnError;
+
+        if (wakeWord is ContinuousWakeListener continuous)
+        {
+            continuous.UtteranceCaptured += WakeOnUtteranceCaptured;
+            continuous.AudioLevelChanged += WakeOnAudioLevel;
+        }
     }
 
     private void RecognitionOnMicrophoneActivityChanged(object? sender, MicrophoneActivityChangedEventArgs e)
@@ -2717,6 +2879,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             // Windows entregó el dispositivo: lo que enciende la sordera es justamente que no lo
             // entregue, así que acá deja de valer sin esperar a que alguien hable.
             Volatile.Write(ref _deaf, 0);
+
+            // Micrófono abierto es frase nueva. Lo que quedaba de la anterior —incluido lo que se
+            // había rescatado del búfer— pertenece a un pedido que ya se contestó.
+            ClearDictation();
         }
 
         if (e.IsActive && Interlocked.Exchange(ref _microphoneTraced, 1) == 0)
@@ -2749,16 +2915,22 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             WakeWordEnabled: _isWakeWordEnabled));
     }
 
+    /// <summary>
+    /// Llegó texto del reconocedor: firme o todavía formándose.
+    /// </summary>
+    /// <remarks>
+    /// La diferencia entre una hipótesis y un tramo cerrado es justo la que la burbuja dibuja: la
+    /// última palabra en itálica mientras puede cambiar, y plena cuando ya no. Antes las dos salían
+    /// por el mismo campo de texto y del otro lado no había con qué distinguirlas.
+    /// </remarks>
     private void RecognitionOnTranscriptionUpdated(object? sender, SpeechTranscriptionEventArgs e)
     {
-        if (!string.IsNullOrWhiteSpace(e.Text))
+        if (string.IsNullOrWhiteSpace(e.Text))
         {
-            Publish(new AssistantRuntimeUpdate(
-                AssistantVisualState.Listening,
-                e.IsFinal ? "Frase capturada" : "Escuchando…",
-                e.Text,
-                MicrophoneActive: IsAnyMicrophoneActive()));
+            return;
         }
+
+        PublishDictation(e.IsFinal ? _dictation.Confirm(e.Text) : _dictation.Hear(e.Text));
     }
 
     /// <summary>
@@ -2804,8 +2976,229 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             WakeWordEnabled: _isWakeWordEnabled));
     }
 
-    private void WakeOnWakeWordDetected(object? sender, WakeWordDetectedEventArgs e) =>
+    /// <summary>
+    /// Sonó el nombre.
+    /// </summary>
+    /// <remarks>
+    /// Con el oído continuo esto <b>no</b> abre la conversación: el micrófono ya está abierto y la
+    /// persona probablemente siga hablando —«Viernes, creame una carpeta» es una sola frase—. Abrir
+    /// acá le sacaría el dispositivo al oído en el medio de la frase y perdería justamente lo que
+    /// esta clase existe para no perder. Se avisa que la oyó y se espera la frase entera.
+    /// <para>
+    /// Con el wake de siempre no hay frase que esperar —sólo detecta— y sigue el camino de antes.
+    /// </para>
+    /// </remarks>
+    private void WakeOnWakeWordDetected(object? sender, WakeWordDetectedEventArgs e)
+    {
+        if (_continuousWake is not null && _recognition is WhisperSpeechRecognitionProvider)
+        {
+            NoteWakeHeard(e);
+            return;
+        }
+
         _ = HandleWakeWordDetectedAsync(e);
+    }
+
+    /// <summary>
+    /// El nivel del oído continuo, que llega todo el día.
+    /// </summary>
+    /// <remarks>
+    /// Con el orbe escondido no hay nada que mover: publicarlo igual es despertar el dispatcher
+    /// treinta veces por segundo para no dibujar nada. Durante el dictado no hace falta esta guarda
+    /// —ahí la captura dura lo que dura una frase— y por eso el camino es otro.
+    /// </remarks>
+    private void WakeOnAudioLevel(object? sender, AudioLevelEventArgs e)
+    {
+        if (!_isShellVisible)
+        {
+            return;
+        }
+
+        RecognitionOnAudioLevel(sender, e);
+    }
+
+    /// <summary>Se oyó el nombre y el oído sigue grabando: acá sólo se dice que la escuchó.</summary>
+    private void NoteWakeHeard(WakeWordDetectedEventArgs eventArgs)
+    {
+        if (_isDisposed || IsMuted || !_isWakeWordEnabled)
+        {
+            return;
+        }
+
+        if (_conversationActive)
+        {
+            // Con una conversación abierta, decir el nombre es parte de la charla.
+            RuntimeTrace.Write("wake.ignorado", "ya hay conversación abierta");
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _awaitingUtterance, 1, 0) != 0)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write(
+            "wake.detected",
+            $"frase «{eventArgs.Phrase}» confianza {eventArgs.Confidence:0.00} · esperando la frase");
+
+        RequestActivation(new ShellActivationRequest(
+            ShellActivationReason.WakeWord,
+            _identity.Name,
+            $"Te escuché decir “{eventArgs.Phrase}”."));
+
+        _orchestrator.SetListening(true);
+        _dictation.Clear();
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Listening,
+            "Te escucho · seguí",
+            MicrophoneActive: true,
+            WakeWordEnabled: true,
+            ClearDictation: true));
+    }
+
+    /// <summary>
+    /// Llegó la frase entera. Se atiende en otro hilo, y eso no es opcional.
+    /// </summary>
+    /// <remarks>
+    /// Esto lo dispara la devolución de llamada del dispositivo de captura, y lo primero que hace el
+    /// trabajo es <b>cerrar ese mismo dispositivo</b> para dejárselo a la conversación. Sin el
+    /// <c>Task.Run</c>, el cuerpo arranca inline sobre el hilo del driver —el semáforo del oído está
+    /// libre, así que el <c>await</c> no cede nada— y <c>StopRecording</c> se queda esperando a que
+    /// termine la devolución de llamada que lo está llamando. Es el mismo abrazo mortal que ya está
+    /// comentado en el micrófono de la sesión en vivo.
+    /// </remarks>
+    private void WakeOnUtteranceCaptured(object? sender, WakeUtteranceEventArgs e) =>
+        _ = Task.Run(() => HandleWakeUtteranceAsync(e));
+
+    /// <summary>Si lo que se dijo no es más que el nombre con el que la llamaron.</summary>
+    /// <remarks>
+    /// Se compara contra la frase que <em>efectivamente</em> se oyó y no contra una lista fija: si
+    /// alguien le puso otro nombre al asistente, o dijo «hola Viernes» en vez de «Viernes», la que
+    /// corresponde es la que disparó.
+    /// </remarks>
+    private static bool IsJustTheName(string spoken, string phrase)
+    {
+        if (string.IsNullOrWhiteSpace(spoken))
+        {
+            return true;
+        }
+
+        var nombre = phrase
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(word => word.ToLowerInvariant())
+            .ToHashSet(StringComparer.Ordinal);
+
+        return spoken
+            .Split(
+                [' ', ',', '.', ';', ':', '¿', '?', '¡', '!', '\u2026'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .All(word => nombre.Contains(word.ToLowerInvariant()));
+    }
+
+    /// <summary>
+    /// Llegó la frase entera: lo de antes del nombre y lo de después, pegado.
+    /// </summary>
+    /// <remarks>
+    /// No es <c>async void</c> aunque sea lo que uno escribiría para un manejador de eventos: una
+    /// excepción adentro de un <c>async void</c> no tiene a dónde ir y ya se llevó puesto el proceso
+    /// una vez en este repositorio. Sale por una tarea con su propio <c>try</c>.
+    /// <para>
+    /// El WAV es de quien recibe el evento, así que lo cierra este método pase lo que pase.
+    /// </para>
+    /// </remarks>
+    private async Task HandleWakeUtteranceAsync(WakeUtteranceEventArgs eventArgs)
+    {
+        var abrio = false;
+        try
+        {
+            if (Interlocked.Exchange(ref _awaitingUtterance, 0) == 0 ||
+                _isDisposed || IsMuted || _conversationActive ||
+                _recognition is not WhisperSpeechRecognitionProvider whisper)
+            {
+                return;
+            }
+
+            // El oído suelta el micrófono antes de que lo tome la conversación: es de uno solo, y
+            // dos capturas sobre el mismo dispositivo es la falla que ya costó una tarde.
+            await PauseWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+
+            var reloj = System.Diagnostics.Stopwatch.StartNew();
+            var transcripcion = await whisper
+                .TranscribeWaveWithSegmentsAsync(eventArgs.Wave, CancellationToken.None)
+                .ConfigureAwait(false);
+            reloj.Stop();
+
+            // La frase NO se escribe en la traza: es un archivo de texto plano que queda en el disco
+            // y se pega en un reporte cuando algo falla. Lo que se dijo en voz alta adentro de la
+            // casa no tiene por qué terminar ahí.
+            RuntimeTrace.Write(
+                "oido.frase",
+                $"{reloj.ElapsedMilliseconds} ms · antes {eventArgs.PreRollDuration.TotalMilliseconds:0} ms · " +
+                $"después {eventArgs.TailDuration.TotalMilliseconds:0} ms · corte={eventArgs.StopReason} · " +
+                $"ok={transcripcion.Result.Succeeded} · tramos={transcripcion.Segments.Count}");
+
+            var texto = transcripcion.Result.Text?.Trim();
+            if (!transcripcion.Result.Succeeded || string.IsNullOrWhiteSpace(texto))
+            {
+                Publish(new AssistantRuntimeUpdate(
+                    Resting(),
+                    "No te entendí · llamame de nuevo",
+                    MicrophoneActive: IsAnyMicrophoneActive(),
+                    WakeWordEnabled: _isWakeWordEnabled,
+                    ClearDictation: true));
+                _dictation.Clear();
+                return;
+            }
+
+            // Lo anterior al nombre se dibuja distinto: se manda igual —es contexto del pedido— pero
+            // no se lo dijeron a ella, y mostrarlo idéntico al pedido se siente como espiar.
+            var partes = UtteranceTranscript.Split(
+                transcripcion.Segments,
+                eventArgs.PreRollDuration,
+                eventArgs.Phrase);
+            _dictation.Clear();
+            _dictation.Recover(partes.Recovered, eventArgs.PreRollDuration);
+            var palabras = _dictation.Settle(partes.Spoken);
+
+            // Llamarla y callarse es pedirle que atienda, no hacerle un pedido. Mandarle «Viernes»
+            // al modelo como si fuera una consulta le hace contestar cualquier cosa; lo que
+            // corresponde ahí es el «te escucho» de siempre. Se distingue por el corte: el oído dejó
+            // de grabar porque nadie habló después del nombre, no porque alguien terminara de hablar.
+            var soloLlamado = eventArgs.StopReason == UtteranceStopReason.InitialSilence &&
+                string.IsNullOrEmpty(partes.Recovered) &&
+                IsJustTheName(partes.Spoken, eventArgs.Phrase);
+
+            Publish(new AssistantRuntimeUpdate(
+                soloLlamado ? AssistantVisualState.Listening : AssistantVisualState.Thinking,
+                soloLlamado ? "Te escucho · decime «listo» para cortar" : "Entendido · procesando…",
+                soloLlamado ? null : partes.Full,
+                MicrophoneActive: soloLlamado,
+                Dictation: palabras,
+                DictationRecovered: _dictation.RecoveredSpan));
+
+            abrio = true;
+            await StartConversationAsync(
+                soloLlamado ? null : partes.Full,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            RuntimeTrace.Write("oido.frase.excepcion", $"{exception.GetType().Name} · {exception.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _awaitingUtterance, 0);
+            eventArgs.Wave.Dispose();
+
+            // Si no se abrió conversación, el oído tiene que volver a escuchar o el asistente se
+            // queda sordo hasta que alguien apriete algo.
+            if (!abrio && !_conversationActive)
+            {
+                _orchestrator.SetListening(false);
+                await ResumeWakeWordAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+    }
 
     private void WakeOnError(object? sender, SpeechServiceErrorEventArgs e) =>
         Publish(new AssistantRuntimeUpdate(
@@ -2851,6 +3244,34 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     {
         _lastVisualState = update.State;
         Updated?.Invoke(this, update);
+    }
+
+    /// <summary>
+    /// Manda la línea de dictado sin tocar el estado del orbe.
+    /// </summary>
+    /// <remarks>
+    /// Va por <c>Updated</c> y no por <see cref="Publish"/> por la misma razón que el nivel del
+    /// micrófono: esto llega varias veces por segundo mientras alguien habla y no es un cambio de
+    /// estado, es el mismo estado con más texto. Y porque publicarlo como estado tenía un efecto
+    /// concreto y feo: Whisper transcribe <em>después</em> de cerrar el micrófono, así que su tramo
+    /// firme llegaba con el orbe ya en «pensando» y lo devolvía a «te escucho» en el medio del turno.
+    /// </remarks>
+    private void PublishDictation(IReadOnlyList<DictationWord> words) =>
+        Updated?.Invoke(this, new AssistantRuntimeUpdate(
+            _lastVisualState,
+            CurrentStateLabel(_lastVisualState),
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            Dictation: words,
+            DictationRecovered: _dictation.RecoveredSpan));
+
+    /// <summary>Empieza otra frase: se borra la línea, también lo que se había rescatado.</summary>
+    private void ClearDictation()
+    {
+        _dictation.Clear();
+        Updated?.Invoke(this, new AssistantRuntimeUpdate(
+            _lastVisualState,
+            CurrentStateLabel(_lastVisualState),
+            ClearDictation: true));
     }
 
     /// <summary>
@@ -3123,6 +3544,13 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             _wakeWord.MicrophoneActivityChanged -= WakeOnMicrophoneActivityChanged;
             _wakeWord.WakeWordDetected -= WakeOnWakeWordDetected;
             _wakeWord.ServiceError -= WakeOnError;
+
+            if (_wakeWord is ContinuousWakeListener continuous)
+            {
+                continuous.UtteranceCaptured -= WakeOnUtteranceCaptured;
+                continuous.AudioLevelChanged -= WakeOnAudioLevel;
+            }
+
             await _wakeWord.DisposeAsync().ConfigureAwait(false);
         }
 
@@ -3135,6 +3563,12 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             _recognition.ServiceError -= RecognitionOnError;
             await _recognition.DisposeAsync().ConfigureAwait(false);
         }
+
+        // Después del oído y de la sesión en vivo, que son los dos que lo usaban prestado. Al revés
+        // se desecharía el modelo debajo de una captura que todavía está en vuelo.
+        _voiceDetector?.Dispose();
+        _voiceDetector = null;
+        _continuousWake = null;
 
         _speechCancellation?.Cancel();
         _speechCancellation?.Dispose();

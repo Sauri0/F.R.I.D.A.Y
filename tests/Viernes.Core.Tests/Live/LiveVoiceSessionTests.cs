@@ -117,6 +117,22 @@ public sealed class LiveVoiceSessionTests
         return (sesion, banco, parlantes);
     }
 
+    /// <summary>
+    /// Lo mismo, pero con unos parlantes que tardan en sonar, que es lo que hace un parlante.
+    /// </summary>
+    private static (LiveVoiceSession Sesion, Banco Banco, DrainingAudioSink Parlantes) ArmarConParlanteLento()
+    {
+        var banco = new Banco();
+        var parlantes = new DrainingAudioSink();
+        var sesion = new LiveVoiceSession(
+            new GeminiLiveOptions(enabled: true, setupTimeout: TimeSpan.FromMilliseconds(300)),
+            () => "clave-de-mentira",
+            parlantes,
+            banco.Create);
+
+        return (sesion, banco, parlantes);
+    }
+
     [Fact]
     public async Task ConClaveYEncendida_AbreLaSesionYVaPorElCaminoNuevo()
     {
@@ -599,5 +615,131 @@ public sealed class LiveVoiceSessionTests
 
         Assert.True(await sesion.PushMicrophoneAsync(bloque));
         Assert.True(await EsperarAsync(() => banco.Last.SentSnapshot().Count > 1));
+    }
+
+    [Fact]
+    public async Task ConElParlanteTodaviaSonando_CerrarElTurnoNoDibujaTeEscucho()
+    {
+        // El servidor manda la respuesta más rápido que tiempo real: cuando llega el turnComplete
+        // pueden quedar segundos de voz sin salir. Durante todo ese tramo la pantalla decía «te
+        // escucho» mientras en el cuarto se la seguía oyendo.
+        var (sesion, banco, parlantes) = ArmarConParlanteLento();
+        await using var _guard = sesion;
+        await sesion.StartAsync();
+
+        // Tres segundos de respuesta encolados.
+        banco.Last.Deliver(AudioMessage(24_000 * 2 * 3));
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Speaking));
+
+        banco.Last.Deliver("""{"serverContent":{"generationComplete":true}}""");
+        banco.Last.Deliver("""{"serverContent":{"turnComplete":true}}""");
+
+        Assert.True(await EsperarAsync(() => sesion.TurnState == LiveTurnState.Idle));
+        Assert.True(sesion.IsSpeakerBusy);
+        Assert.Equal(LiveOrbMoment.Speaking, sesion.Moment);
+
+        // Y cuando termina de sonar de verdad, ahí sí, sin que llegue ningún mensaje más.
+        parlantes.Drain();
+
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Listening));
+    }
+
+    [Fact]
+    public async Task LaColaDelEcoDespuesDelTurno_NoDejaElOrbeClavadoEnPensando()
+    {
+        // El caso que ninguna prueba cubría: el eco DURANTE el turno ya estaba, pero su propia voz
+        // sigue volviendo por el micrófono después del turnComplete. La compuerta necesita 700 ms de
+        // silencio para cerrar, así que su borde de «terminó» llega con el turno ya en reposo — y el
+        // orbe se quedaba en «Pensando…» sin que nadie hubiera hablado, tapando además «En vivo ·
+        // decime «listo» para cortar», que es el único lugar donde se dice cómo cerrar la charla.
+        var (sesion, banco, parlantes) = ArmarConParlanteLento();
+        await using var _guard = sesion;
+        await sesion.StartAsync();
+
+        banco.Last.Deliver(AudioMessage(24_000 * 2));
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Speaking));
+
+        var bloque = TimeSpan.FromMilliseconds(20);
+
+        // El eco arranca mientras el parlante suena.
+        sesion.NoteUserAudio(isVoice: true, bloque);
+
+        banco.Last.Deliver("""{"serverContent":{"turnComplete":true}}""");
+        Assert.True(await EsperarAsync(() => sesion.TurnState == LiveTurnState.Idle));
+
+        parlantes.Drain();
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Listening));
+
+        // Y recién ahora la compuerta junta el silencio que le faltaba para cerrar el tramo del eco.
+        for (var i = 0; i < 40; i++)
+        {
+            sesion.NoteUserAudio(isVoice: false, bloque);
+        }
+
+        Assert.Equal(LiveOrbMoment.Listening, sesion.Moment);
+    }
+
+    [Fact]
+    public async Task DespuesDelEco_UnaFraseDeVerdadSiPasaAPensando()
+    {
+        // La contracara de la prueba anterior: callar el eco no puede callar a la persona.
+        var (sesion, banco, parlantes) = ArmarConParlanteLento();
+        await using var _guard = sesion;
+        await sesion.StartAsync();
+
+        banco.Last.Deliver(AudioMessage(24_000 * 2));
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Speaking));
+
+        var bloque = TimeSpan.FromMilliseconds(20);
+        sesion.NoteUserAudio(isVoice: true, bloque);
+
+        banco.Last.Deliver("""{"serverContent":{"turnComplete":true}}""");
+        Assert.True(await EsperarAsync(() => sesion.TurnState == LiveTurnState.Idle));
+        parlantes.Drain();
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Listening));
+
+        for (var i = 0; i < 40; i++)
+        {
+            sesion.NoteUserAudio(isVoice: false, bloque);
+        }
+
+        // Con el parlante callado, lo que arranca ahora es alguien hablando.
+        sesion.NoteUserAudio(isVoice: true, bloque);
+        for (var i = 0; i < 40; i++)
+        {
+            sesion.NoteUserAudio(isVoice: false, bloque);
+        }
+
+        Assert.Equal(LiveOrbMoment.Thinking, sesion.Moment);
+    }
+
+    [Fact]
+    public async Task AlInterrumpirla_LaVozQueSigueNoSeConfundeConSuEco()
+    {
+        // Hablarle encima vacía la cola en el acto, así que lo que la persona siga diciendo arranca
+        // con el parlante callado. Sin borrar la marca del eco al interrumpir, la frase nueva
+        // heredaba la marca de la respuesta que acaba de cortar y no dibujaba «pensando».
+        var (sesion, banco, _) = ArmarConParlanteLento();
+        await using var _guard = sesion;
+        await sesion.StartAsync();
+
+        banco.Last.Deliver(AudioMessage(24_000 * 2));
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Speaking));
+
+        var bloque = TimeSpan.FromMilliseconds(20);
+        sesion.NoteUserAudio(isVoice: true, bloque);
+
+        banco.Last.Deliver("""{"serverContent":{"interrupted":true}}""");
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Interrupted));
+        banco.Last.Deliver("""{"serverContent":{"turnComplete":true}}""");
+        Assert.True(await EsperarAsync(() => sesion.TurnState == LiveTurnState.Idle));
+
+        sesion.NoteUserAudio(isVoice: true, bloque);
+        for (var i = 0; i < 40; i++)
+        {
+            sesion.NoteUserAudio(isVoice: false, bloque);
+        }
+
+        Assert.Equal(LiveOrbMoment.Thinking, sesion.Moment);
     }
 }

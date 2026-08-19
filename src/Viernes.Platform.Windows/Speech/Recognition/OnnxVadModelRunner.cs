@@ -40,6 +40,7 @@ public sealed class OnnxVadModelRunner : IVadModelRunner
     private static int _nativeResolverInstalled;
 
     private readonly IDisposable _session;
+    private readonly IDisposable? _sessionOptions;
     private readonly IDisposable _runOptions;
     private readonly List<IDisposable> _values = [];
     private readonly MethodInfo _run;
@@ -224,7 +225,10 @@ public sealed class OnnxVadModelRunner : IVadModelRunner
         var ortValueType = Require(runtime, "Microsoft.ML.OnnxRuntime.OrtValue");
         var runOptionsType = Require(runtime, "Microsoft.ML.OnnxRuntime.RunOptions");
 
-        _session = (IDisposable)Activator.CreateInstance(sessionType, modelPath)!;
+        _sessionOptions = BuildSessionOptions(runtime);
+        _session = _sessionOptions is null
+            ? (IDisposable)Activator.CreateInstance(sessionType, modelPath)!
+            : (IDisposable)Activator.CreateInstance(sessionType, modelPath, _sessionOptions)!;
         _runOptions = (IDisposable)Activator.CreateInstance(runOptionsType)!;
 
         // La variante de Run que devuelve void es la que recibe las salidas ya reservadas. Es la que
@@ -299,6 +303,63 @@ public sealed class OnnxVadModelRunner : IVadModelRunner
         _outputValues = ToTypedList(ortValueType, resultValues);
     }
 
+    /// <summary>
+    /// Le pone freno de mano al planificador de ONNX Runtime.
+    /// </summary>
+    /// <remarks>
+    /// <b>Medido: sin esto, el oído continuo consumía 3,2 núcleos enteros todo el tiempo</b> —39,5 s
+    /// de CPU cada 12 s de reloj—, contra 4 % de un núcleo con la heurística. No es que la inferencia
+    /// sea cara: es una ventana de 512 muestras treinta y una veces por segundo. Lo caro es lo que
+    /// ONNX Runtime hace <em>entre</em> inferencias: reparte cada operación entre todos los núcleos y
+    /// los deja girando en espera activa para que la próxima llamada arranque un microsegundo antes.
+    /// Ese cambio es excelente para un servidor que infiere sin parar y desastroso para un proceso
+    /// que arranca con Windows, escucha todo el día y tiene que desaparecer detrás de lo que el
+    /// usuario está haciendo.
+    /// <para>
+    /// Un hilo, sin paralelismo entre operaciones y sin espera activa. Va por reflexión y con todo
+    /// opcional porque el runtime lo pone el usuario en una carpeta y no se sabe qué versión es: si
+    /// alguna de estas perillas no existe, se arma la sesión sin ellas y el modelo igual corre.
+    /// </para>
+    /// </remarks>
+    private static IDisposable? BuildSessionOptions(Assembly runtime)
+    {
+        try
+        {
+            var type = runtime.GetType("Microsoft.ML.OnnxRuntime.SessionOptions");
+            if (type is null || Activator.CreateInstance(type) is not IDisposable options)
+            {
+                return null;
+            }
+
+            type.GetProperty("IntraOpNumThreads")?.SetValue(options, 1);
+            type.GetProperty("InterOpNumThreads")?.SetValue(options, 1);
+
+            // ORT_SEQUENTIAL. Se arma desde el cero para no depender del nombre del enum.
+            var executionMode = type.GetProperty("ExecutionMode");
+            if (executionMode is not null && executionMode.PropertyType.IsEnum)
+            {
+                executionMode.SetValue(options, Enum.ToObject(executionMode.PropertyType, 0));
+            }
+
+            var addEntry = type.GetMethod("AddSessionConfigEntry", [typeof(string), typeof(string)]);
+            if (addEntry is not null)
+            {
+                // Acá está la mayor parte de los tres núcleos: sin esto los hilos giran esperando la
+                // próxima ventana en vez de dormirse.
+                addEntry.Invoke(options, ["session.intra_op.allow_spinning", "0"]);
+                addEntry.Invoke(options, ["session.inter_op.allow_spinning", "0"]);
+            }
+
+            return options;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // Un runtime con otra forma no puede dejar sin detector al asistente: se arma la sesión
+            // como antes y, como mucho, gasta de más.
+            return null;
+        }
+    }
+
     public float Probability(ReadOnlySpan<float> window)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -355,6 +416,9 @@ public sealed class OnnxVadModelRunner : IVadModelRunner
 
         _runOptions.Dispose();
         _session.Dispose();
+
+        // Después de la sesión: las opciones son de ella mientras viva.
+        _sessionOptions?.Dispose();
     }
 
     private object Track(object? value)
