@@ -35,12 +35,32 @@ Volver a correr `INSTALAR.cmd` actualiza a la última versión sin volver a preg
 El instalador pregunta cómo se va a llamar. Ese nombre entra en la primera línea de su prompt, en el
 título de la ventana, en la bandeja del sistema, y define cómo lo despertás.
 
-**Siempre son dos palabras.** Si lo llamás Ana, lo despertás diciendo *«Hola Ana»*, *«Che Ana»* o
-*«Ey Ana»* — nunca *«Ana»* a secas. No es un capricho: con el nombre original, la palabra suelta
-dicha al pasar (*«el viernes tengo turno»*) lo despertaba con confianza 0,69, mientras las
-activaciones verdaderas puntuaban entre 0,62 y 0,68. El falso positivo puntuaba **más alto** que casi
-todos los aciertos, así que ningún umbral los separaba. Dos palabras resuelven el problema de raíz, y
-sirven para cualquier nombre.
+**El nombre alcanza, y va donde caiga en la frase.** Si lo llamás Ana:
+
+> *«Ana, creame una carpeta en el escritorio»* — o *«creame una carpeta en el escritorio, Ana»*
+
+Sin saludo y sin pausa. El micrófono lo abre una sola cosa y el audio se reparte a la vez a una
+ventana rodante de diez segundos, al reconocedor del nombre y al detector de voz; cuando el nombre
+aparece en cualquier posición, se pega lo anterior adelante y se manda la frase entera. El recorte no
+son siempre los diez segundos: llega hasta donde arrancó esa tanda de habla, así que con la tele
+puesta no le mete diez segundos de tele adelante del pedido.
+
+En la burbuja vas a ver lo que dijiste **antes** de nombrarla dibujado más apagado, con el encabezado
+*«recuperado del búfer»*. Es a propósito: eso no se lo dijiste a ella.
+
+<details>
+<summary>Antes hacían falta dos palabras, y por qué dejaron de hacer falta</summary>
+
+Durante un tiempo había que decir *«Hola Ana»* o *«Che Ana»*, nunca *«Ana»* a secas, porque con el
+nombre original la palabra suelta dicha al pasar —*«el viernes tengo turno»*— disparaba con confianza
+0,69 mientras las activaciones verdaderas puntuaban entre 0,62 y 0,68: el falso positivo puntuaba
+**más alto** que casi todos los aciertos y ningún umbral los separaba.
+
+Eso se resolvió por otro lado. Al dispararse ya no contesta *«¿sí?»*: manda la frase entera al
+modelo, que lee *«el viernes tengo turno»*, ve que no es un pedido y no hace nada. El falso positivo
+sigue existiendo y dejó de molestar. **El problema nunca fue la detección: era el saludo.**
+
+</details>
 
 Para cambiarlo después, volvé a correr el instalador.
 

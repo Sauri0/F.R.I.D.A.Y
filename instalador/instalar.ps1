@@ -31,11 +31,23 @@ $ModeloUrl = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-sma
 $ModeloNombre = 'ggml-small.bin'
 $ModeloMinimoBytes = 400MB
 
+# El detector de voz entrenado. Sin esto la aplicación cae a una heurística que mide energía y cruces
+# por cero, y esa heurística no distingue una voz de un aplauso ni de un portazo: se interrumpe sola.
+# La versión está fija a propósito —el nombre de los archivos adentro del paquete cambió entre
+# versiones de ONNX Runtime— y los tamaños se comprobaron uno por uno contra los paquetes reales.
+$VadVersion = '1.23.2'
+$SileroUrl = 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx'
+$SileroMinimoBytes = 2MB
+$OnnxAdministradoUrl = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.Managed/$VadVersion"
+$OnnxNativoUrl = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/$VadVersion"
+
 # La carpeta de datos NO sigue al nombre elegido. Identifica al producto, no al asistente: si
 # siguiera al nombre, renombrarlo abandonaría el historial, las preferencias y el modelo de voz.
 $Datos = Join-Path $env:LOCALAPPDATA 'Viernes'
 $Aplicacion = Join-Path $Datos 'app'
 $Modelos = Join-Path $Datos 'Models\Whisper'
+$Deteccion = Join-Path $Datos 'Models\Vad'
+$Claves = Join-Path $Datos 'claves.json'
 
 #region presentación
 
@@ -298,6 +310,81 @@ function Instalar-Modelo {
     Listo 'Modelo de voz instalado.'
 }
 
+<#
+    Saca un archivo de adentro de un paquete de NuGet, que es un zip con otro nombre.
+#>
+function Extraer-Del-Paquete([string] $paquete, [string] $adentro, [string] $destino) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($paquete)
+    try {
+        $entrada = $zip.Entries | Where-Object { $_.FullName -eq $adentro } | Select-Object -First 1
+        if ($null -eq $entrada) {
+            throw "El paquete no trae «$adentro». Puede haber cambiado de nombre en otra versión."
+        }
+
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entrada, $destino, $true)
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
+function Instalar-Deteccion {
+    Titulo 'Distinguir tu voz de un ruido'
+
+    $silero = Join-Path $Deteccion 'silero_vad.onnx'
+    $administrado = Join-Path $Deteccion 'Microsoft.ML.OnnxRuntime.dll'
+    $nativo = Join-Path $Deteccion 'onnxruntime.dll'
+    $compartido = Join-Path $Deteccion 'onnxruntime_providers_shared.dll'
+
+    $completo = (Test-Path -LiteralPath $silero) -and
+        ((Get-Item -LiteralPath $silero).Length -ge $SileroMinimoBytes) -and
+        (Test-Path -LiteralPath $administrado) -and
+        (Test-Path -LiteralPath $nativo) -and
+        (Test-Path -LiteralPath $compartido)
+
+    if ($completo) {
+        Listo 'El detector de voz ya está.'
+        return
+    }
+
+    Write-Host '  Un aplauso, un portazo o la tele no la interrumpen: hay un detector' -ForegroundColor DarkGray
+    Write-Host '  entrenado que separa la voz del ruido, y corre en tu máquina.' -ForegroundColor DarkGray
+
+    New-Item -ItemType Directory -Path $Deteccion -Force | Out-Null
+
+    if (-not (Test-Path -LiteralPath $silero) -or
+        (Get-Item -LiteralPath $silero).Length -lt $SileroMinimoBytes) {
+        Bajar-Archivo $SileroUrl $silero 'el detector de voz (2 MB)'
+    }
+
+    # Los dos paquetes se bajan a un temporal y se tiran: de los 124 MB quedan 14 en disco. Se hace
+    # así y no con una descarga directa porque los binarios oficiales de ONNX Runtime sólo se
+    # publican adentro de estos paquetes, y una copia propia en otro lado sería una cadena de
+    # suministro más para vigilar.
+    $temporal = Join-Path ([IO.Path]::GetTempPath()) ("viernes-vad-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temporal -Force | Out-Null
+    try {
+        if (-not (Test-Path -LiteralPath $administrado)) {
+            $paquete = Join-Path $temporal 'administrado.zip'
+            Bajar-Archivo $OnnxAdministradoUrl $paquete 'la parte administrada (1 MB)'
+            Extraer-Del-Paquete $paquete 'lib/netstandard2.0/Microsoft.ML.OnnxRuntime.dll' $administrado
+        }
+
+        if (-not (Test-Path -LiteralPath $nativo) -or -not (Test-Path -LiteralPath $compartido)) {
+            $paquete = Join-Path $temporal 'nativo.zip'
+            Bajar-Archivo $OnnxNativoUrl $paquete 'el motor de inferencia (124 MB, quedan 14)'
+            Extraer-Del-Paquete $paquete 'runtimes/win-x64/native/onnxruntime.dll' $nativo
+            Extraer-Del-Paquete $paquete 'runtimes/win-x64/native/onnxruntime_providers_shared.dll' $compartido
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $temporal -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Listo 'Detector de voz instalado.'
+}
+
 #endregion
 
 #region configuración
@@ -322,6 +409,37 @@ function Guardar-Nombre([string] $nombre) {
 
     $preferencias | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ruta -Encoding UTF8
     Listo "Se va a llamar $nombre."
+}
+
+<#
+    Deja el archivo donde se pega la clave de Google, si todavía no existe.
+
+    No pide la clave acá. La de OpenRouter sí se pide —sin ella no arranca nada— pero la de Google es
+    opcional: sirve para la conversación hablada, que es otra forma de usarla y no un requisito. Pedir
+    dos claves en la instalación de algo que todavía no se sabe si va a gustar es una puerta de más.
+
+    El archivo se crea igual, con las instrucciones adentro: un archivo que ya existe y explica qué
+    va, se completa cuando uno quiere. Una variable de entorno que nadie mencionó, no.
+#>
+function Crear-Claves {
+    if (Test-Path -LiteralPath $Claves) {
+        return
+    }
+
+    $plantilla = [ordered]@{
+        '_leeme' = 'Pegá tu clave de Google entre las comillas de GOOGLE_API_KEY y guardá. No hace falta reiniciar nada más que la aplicación.'
+        '_para_que_sirve' = 'Con clave de Google la conversación es hablada y en tiempo real: la escuchás contestar mientras piensa y la podés cortar hablándole encima. Sin clave anda igual, por el camino de siempre: la escuchás cuando terminó de pensar.'
+        '_donde_se_saca' = 'https://aistudio.google.com/apikey — es gratis para empezar.'
+        'GOOGLE_API_KEY' = ''
+        '_apagar_la_sesion_hablada' = 'Con la clave puesta, la sesión hablada arranca encendida. Para usar el camino de siempre teniendo clave, poné VIERNES_LIVE en "false".'
+        'VIERNES_LIVE' = ''
+        '_openrouter' = 'La clave de OpenRouter NO va acá: vive en las variables de entorno de tu cuenta de Windows, que la puso el instalador. Es más difícil de filtrar por accidente que un archivo.'
+        '_seguridad' = 'Este archivo vive fuera del repositorio y nunca se sube a ningún lado. Si compartís tu carpeta de datos con alguien, sacá la clave antes.'
+    }
+
+    New-Item -ItemType Directory -Path $Datos -Force | Out-Null
+    $plantilla | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $Claves -Encoding UTF8
+    Listo 'Archivo de claves creado (la de Google es opcional).'
 }
 
 function Crear-Accesos([string] $nombre) {
@@ -401,15 +519,56 @@ try {
     if (-not $Nombre) { Pedir-Clave }
 
     Instalar-Aplicacion
-    if (-not $SinModelo) { Instalar-Modelo }
+    if (-not $SinModelo) {
+        Instalar-Modelo
+        Instalar-Deteccion
+    }
 
     Titulo 'Últimos detalles'
     Guardar-Nombre $elegido
+    Crear-Claves
     Crear-Accesos $elegido
     if (-not $Nombre) { Ofrecer-Arranque }
 
     Write-Host ''
-    Write-Host "   Listo. Decile «Hola $elegido» y esperá a que la gota reaccione." -ForegroundColor Green
+
+    # Acá decía «Decile "Hola $nombre" y esperá a que la gota reaccione», y las dos mitades dejaron de
+    # ser ciertas: el nombre se reconoce en cualquier parte de la frase y lo dicho antes se recupera
+    # de una ventana rodante, así que no hay que saludar ni hay que esperar. La frase vieja enseñaba
+    # el gesto equivocado, que es peor que no decir nada: el usuario aprende a hacer una pausa que el
+    # programa dejó de necesitar y cree que así funciona.
+    Write-Host "   Listo. Nombrala en cualquier parte de la frase y seguí hablando:" -ForegroundColor Green
+    Write-Host "   «$elegido, creame una carpeta en el escritorio» — o «creame una carpeta," -ForegroundColor Green
+    Write-Host "   $elegido». No hace falta saludar ni esperar." -ForegroundColor Green
+    Write-Host ''
+
+    if (Test-Path -LiteralPath $Claves) {
+        $tieneGoogle = $false
+        try {
+            $puestas = Get-Content -LiteralPath $Claves -Raw | ConvertFrom-Json
+            $tieneGoogle = -not [string]::IsNullOrWhiteSpace($puestas.GOOGLE_API_KEY)
+        }
+        catch {
+            # Un archivo de claves que alguien editó mal no puede frenar el final de la instalación.
+        }
+
+        if (-not $tieneGoogle) {
+            Write-Host '   Para que la conversación sea hablada y en tiempo real —que la puedas' -ForegroundColor DarkGray
+            Write-Host '   cortar hablándole encima— pegá una clave de Google en:' -ForegroundColor DarkGray
+            Write-Host "     $Claves" -ForegroundColor DarkGray
+            Write-Host '   Es opcional: sin ella anda igual, por el camino de siempre.' -ForegroundColor DarkGray
+            Write-Host ''
+        }
+    }
+
+    # El conector se nombra y no se da de alta.
+    #
+    # Darlo de alta escribe en la configuración de Claude del usuario, que es de otra aplicación y no
+    # de ésta. Un instalador que toca la configuración de un programa que no instaló es exactamente
+    # lo que uno no espera que haga un instalador, por más que el comando sea de una línea.
+    Write-Host "   Y si usás Claude, $elegido se le puede enchufar: ver misiones, dejarle una" -ForegroundColor DarkGray
+    Write-Host '   pregunta, mirar tus proyectos. El comando está en docs/CONECTOR.md del' -ForegroundColor DarkGray
+    Write-Host '   repositorio. No lo damos de alta solo porque toca tu configuración de Claude.' -ForegroundColor DarkGray
     Write-Host ''
 
     if (-not $Nombre) {
