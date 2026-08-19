@@ -101,7 +101,7 @@
                     Margin="0,0,10,0" Click="MedirRuido_Click"/>
             <Button x:Name="BotonHablar" Content="2 · Grabar una frase" Padding="18,11"
                     Margin="0,0,10,0" Click="Grabar_Click"/>
-            <Button x:Name="BotonWake" Content="3 · Probar «Hola Viernes» (30 s)" Padding="18,11"
+            <Button x:Name="BotonWake" Content="3 · Probar el nombre (30 s)" Padding="18,11"
                     Margin="0,0,10,0" Click="ProbarWake_Click"/>
             <Button x:Name="BotonInforme" Content="Guardar informe" Padding="18,11"
                     Click="Informe_Click"/>

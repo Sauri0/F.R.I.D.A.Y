@@ -293,9 +293,7 @@ public partial class MicrophoneLab : Window
         {
         BotonWake.IsEnabled = false;
         Escribir("");
-        Escribir("── 3 · LA PALABRA CLAVE ──");
-        Escribir("Durante 30 segundos decí «Hola Viernes» unas diez veces, con pausas.");
-        Escribir("Probá algunas normal, alguna más bajo y alguna desde lejos.");
+        Escribir("── 3 · EL NOMBRE ──");
 
         _detecciones.Clear();
 
@@ -309,6 +307,18 @@ public partial class MicrophoneLab : Window
         var settings = new Viernes.Platform.Windows.Storage.LocalSettingsStore();
         var cargadas = await settings.LoadAsync();
         var frases = cargadas.Settings.EffectiveWakePhrases;
+
+        // Las instrucciones salen de la configuración y no de un texto fijo.
+        //
+        // Acá decía «decí "Hola Viernes"» escrito a mano, con dos cosas mal a la vez: el nombre no es
+        // Viernes para quien lo llamó de otra forma en el instalador, y el saludo dejó de hacer falta
+        // hace rato. Un banco que enseña el gesto equivocado mide bien y aconseja mal, que es peor
+        // que no medir: quien lo corre se lleva la idea de que hay que saludar.
+        var ejemplo = frases.FirstOrDefault() ?? "el nombre";
+        Escribir($"Durante 30 segundos decí «{ejemplo}» unas diez veces, con pausas.");
+        Escribir("Probá algunas normal, alguna más bajo y alguna desde lejos.");
+        Escribir("En uso real no hace falta saludar ni esperar: el nombre vale en cualquier parte de");
+        Escribir("la frase. Acá se dice suelto sólo para poder contar cuántas de diez se reconocen.");
 
         Escribir($"  frases activas      {string.Join(" · ", frases)}");
 
