@@ -1,0 +1,445 @@
+namespace Viernes.Core.Live;
+
+/// <summary>
+/// El enchufe de la sesión en vivo: elige el camino, la abre, traduce lo que pasa a momentos del
+/// orbe y se cae sola al camino de siempre cuando algo se rompe.
+/// </summary>
+/// <remarks>
+/// <see cref="GeminiLiveClient"/> sabe hablar el protocolo y nada más: no sabe que existe otro
+/// camino, ni que hay un orbe, ni cuándo conviene no intentar. Todo eso es la decisión del
+/// anfitrión, y estaba sin escribir — por eso el cliente quedó completo y sin que nadie lo llamara.
+/// <para>
+/// Vive en Core y no en la aplicación por una sola razón, que es la que importa: de este lado se
+/// puede probar entero sin red, sin micrófono y sin parlantes. Lo que queda del otro lado son los
+/// dispositivos y la traducción de cuatro momentos a cuatro estados del orbe.
+/// </para>
+/// <para>
+/// No toca el micrófono ni los parlantes: recibe audio por <see cref="PushMicrophoneAsync"/> y
+/// entrega por el <see cref="ILiveAudioSink"/> que le pasen.
+/// </para>
+/// </remarks>
+public sealed class LiveVoiceSession : IAsyncDisposable
+{
+    private readonly GeminiLiveOptions _options;
+    private readonly Func<string?> _apiKey;
+    private readonly LiveFallbackLatch _latch;
+    private readonly GeminiLiveClient _client;
+    private readonly LiveUserSpeechGate _speechGate;
+    private readonly Lock _momentGate = new();
+
+    private LiveOrbMoment _moment = LiveOrbMoment.Listening;
+    private bool _waitingForReply;
+    private TimeSpan _idleSilence;
+    private bool _quietRaised;
+    private int _disposed;
+
+    /// <summary>
+    /// Cuánto silencio hace falta para dar la charla por abandonada.
+    /// </summary>
+    /// <remarks>
+    /// Un minuto, que es lo que ya tarda en cerrarse el camino de siempre: seis ventanas de
+    /// escucha de diez segundos sin que nadie diga nada. No se elige un número nuevo porque el
+    /// usuario no tiene por qué notar dos paciencias distintas según por dónde haya ido la charla.
+    /// </remarks>
+    public static readonly TimeSpan DefaultQuietTimeout = TimeSpan.FromSeconds(60);
+
+    private readonly TimeSpan _quietTimeout;
+
+    /// <summary>Arma la sesión sin abrir nada.</summary>
+    /// <param name="options">Cómo se abre y cómo se comporta la sesión en vivo.</param>
+    /// <param name="apiKey">
+    /// De dónde sale la clave de Google. Entra como función porque se lee en cada conexión: si el
+    /// usuario acaba de pegar una clave nueva, la reconexión la toma sin reiniciar nada.
+    /// <b>El valor no se guarda en ningún campo de esta clase</b>; lo único que se conserva es la
+    /// función.
+    /// </param>
+    /// <param name="audioSink">Dónde sale la voz. Tiene que poder vaciarse de golpe.</param>
+    /// <param name="transportFactory">Con qué se conecta. Se deja abierto para poder probar sin red.</param>
+    /// <param name="latch">La traba de caída. Si no se pasa una, se arma con los valores por defecto.</param>
+    /// <param name="quietTimeout">
+    /// Cuánto silencio hace falta para avisar que la charla quedó abandonada. Por defecto
+    /// <see cref="DefaultQuietTimeout"/>; se puede acortar para probarlo sin esperar el minuto.
+    /// </param>
+    public LiveVoiceSession(
+        GeminiLiveOptions options,
+        Func<string?> apiKey,
+        ILiveAudioSink audioSink,
+        Func<ILiveTransport>? transportFactory = null,
+        LiveFallbackLatch? latch = null,
+        TimeSpan? quietTimeout = null)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
+        _latch = latch ?? new LiveFallbackLatch();
+        _quietTimeout = quietTimeout ?? DefaultQuietTimeout;
+        _speechGate = new LiveUserSpeechGate(TimeSpan.FromMilliseconds(options.SilenceDurationMs));
+        _client = new GeminiLiveClient(options, apiKey, audioSink, transportFactory);
+
+        _client.TurnStateChanged += OnTurnStateChanged;
+        _client.Interrupted += OnInterrupted;
+        _client.TranscriptReceived += OnTranscriptReceived;
+        _client.Failed += OnFailed;
+    }
+
+    /// <summary>Cambió el momento de la charla. Es lo que mira el orbe.</summary>
+    public event EventHandler<LiveMomentChangedEventArgs>? MomentChanged;
+
+    /// <summary>Llegó texto transcripto, de uno u otro lado.</summary>
+    public event EventHandler<LiveTranscriptEventArgs>? TranscriptReceived;
+
+    /// <summary>
+    /// La sesión en vivo se cayó y hay que seguir por el camino de siempre.
+    /// </summary>
+    /// <remarks>
+    /// Sólo se dispara con fallas de las que no se vuelve. Las pasajeras —una desconexión de la que
+    /// el cliente se recupera solo— no llegan acá: avisar de cada una haría que el anfitrión cortara
+    /// una conversación que en realidad siguió andando.
+    /// </remarks>
+    public event EventHandler<LiveFailureEventArgs>? FellBack;
+
+    /// <summary>
+    /// Pasó un minuto sin que nadie hable: la charla quedó abandonada.
+    /// </summary>
+    /// <remarks>
+    /// Se dispara una sola vez por tramo de silencio; si la persona vuelve a hablar, el contador se
+    /// borra y puede volver a dispararse más tarde. Quien la cierra es el anfitrión: acá sólo se
+    /// avisa, porque cerrar es una decisión sobre la conversación entera y no sobre esta conexión.
+    /// </remarks>
+    public event EventHandler? WentQuiet;
+
+    /// <summary>Si la sesión está abierta y aceptada.</summary>
+    public bool IsConnected => _client.IsConnected;
+
+    /// <summary>En qué anda el turno.</summary>
+    public LiveTurnState TurnState => _client.TurnState;
+
+    /// <summary>
+    /// Si la compuerta considera que la persona está hablando ahora mismo.
+    /// </summary>
+    /// <remarks>
+    /// Lo lee el anfitrión para saber si el audio que está entrando es voz de alguien o es el cuarto:
+    /// mientras hay alguien hablando, nada de lo que llega sirve para estimar el ruido de fondo.
+    /// </remarks>
+    public bool IsUserSpeaking => _speechGate.IsSpeaking;
+
+    /// <summary>El momento que le corresponde al orbe ahora mismo.</summary>
+    public LiveOrbMoment Moment
+    {
+        get
+        {
+            lock (_momentGate)
+            {
+                return _moment;
+            }
+        }
+    }
+
+    /// <summary>Cuántas veces la cortaron desde que arrancó.</summary>
+    public int InterruptionCount => _client.InterruptionCount;
+
+    /// <summary>Cuánto va costando la sesión.</summary>
+    public LiveCostMeter Cost => _client.Cost;
+
+    /// <summary>Lo último que salió mal. Nunca incluye la clave.</summary>
+    public string? LastFailure => _client.LastFailure;
+
+    /// <summary>Por qué está trabado el camino nuevo, si lo está.</summary>
+    public string? BlockedReason => _latch.BlockedReason;
+
+    /// <summary>
+    /// Qué camino corresponde ahora mismo, sin abrir nada.
+    /// </summary>
+    /// <remarks>
+    /// Se puede llamar todas las veces que haga falta: no toca la red ni cambia nada. Sirve para
+    /// mostrar por dónde va a ir la próxima conversación antes de empezarla.
+    /// </remarks>
+    public VoiceRouteDecision Decide() =>
+        VoiceRouter.Choose(
+            _options.Enabled,
+            !string.IsNullOrWhiteSpace(_apiKey()),
+            _latch.BlockedReason);
+
+    /// <summary>
+    /// Elige el camino y, si es el nuevo, abre la sesión.
+    /// </summary>
+    /// <remarks>
+    /// Nunca lanza por no poder conectar: devuelve la decisión con el motivo, que es lo que el
+    /// anfitrión necesita para escribirlo en la bitácora y seguir por el camino de siempre. Un
+    /// asistente que se queda mudo porque un servicio no contestó es exactamente lo que esto viene a
+    /// impedir.
+    /// </remarks>
+    public async Task<VoiceRouteDecision> StartAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+
+        var decision = Decide();
+        if (!decision.IsLive)
+        {
+            return decision;
+        }
+
+        _speechGate.Reset();
+        _idleSilence = TimeSpan.Zero;
+        _quietRaised = false;
+        SetWaiting(false);
+
+        if (await _client.StartAsync(cancellationToken).ConfigureAwait(false))
+        {
+            // Abrir es la única prueba de que el servicio volvió; recién acá se borra la escalera.
+            _latch.Reset();
+            Publish(LiveOrbMoment.Listening);
+            return decision;
+        }
+
+        var reason = _client.LastFailure ?? "no pude abrir la sesión en vivo";
+        _latch.Trip(reason);
+        return new VoiceRouteDecision(VoiceRoute.Classic, reason);
+    }
+
+    /// <summary>Manda audio del micrófono. PCM 16 bits little endian, mono, 16 kHz.</summary>
+    public Task<bool> PushMicrophoneAsync(ReadOnlyMemory<byte> pcm16k, CancellationToken cancellationToken = default) =>
+        _client.SendAudioAsync(pcm16k, cancellationToken);
+
+    /// <summary>
+    /// Le cuenta a la sesión lo que el detector de voz del anfitrión opinó de un bloque.
+    /// </summary>
+    /// <remarks>
+    /// Es de dónde sale «pensando», y es el único momento del orbe que el servidor no manda: entre
+    /// que cerrás la frase y que llega el primer bloque de voz no hay ningún mensaje. Ver
+    /// <see cref="LiveOrbMoments"/>.
+    /// <para>
+    /// El micrófono queda abierto mientras ella habla, así que acá entra también su propia voz
+    /// filtrada por los parlantes. Por eso el borde de «terminó» sólo cuenta con el turno en reposo:
+    /// si contara siempre, el eco de una respuesta larga dibujaría «pensando» encima de «hablando».
+    /// </para>
+    /// <para>
+    /// Lo llama un solo hilo, el del dispositivo de captura. La compuerta no lleva candado por eso;
+    /// llamarlo desde varios lados a la vez le desordenaría el contador de silencio.
+    /// </para>
+    /// </remarks>
+    public void NoteUserAudio(bool isVoice, TimeSpan blockDuration)
+    {
+        var edge = _speechGate.Write(isVoice, blockDuration);
+
+        TrackAbandonment(isVoice, blockDuration);
+
+        if (edge == LiveSpeechEdge.None)
+        {
+            return;
+        }
+
+        if (edge == LiveSpeechEdge.Started)
+        {
+            SetWaiting(false);
+            Refresh();
+            return;
+        }
+
+        if (_client.TurnState == LiveTurnState.Idle)
+        {
+            SetWaiting(true);
+            Refresh();
+        }
+    }
+
+    /// <summary>
+    /// Lleva la cuenta del silencio para poder avisar que la charla quedó abandonada.
+    /// </summary>
+    /// <remarks>
+    /// El camino de siempre se cierra solo cuando nadie contesta; el nuevo no tenía cómo, y eso no
+    /// es un detalle de prolijidad: una sesión en vivo abierta manda audio del micrófono a la nube
+    /// sin parar y se cobra por minuto. Alguien que se levanta de la silla sin decir nada deja el
+    /// micrófono transmitiendo hasta que apague la máquina.
+    /// <para>
+    /// Se cuenta sumando la duración de los bloques y no mirando el reloj, para que se pueda probar
+    /// sin esperar el minuto de verdad. Y sólo cuenta el silencio con el turno en reposo: mientras
+    /// ella contesta no hay nadie abandonando nada.
+    /// </para>
+    /// </remarks>
+    private void TrackAbandonment(bool isVoice, TimeSpan blockDuration)
+    {
+        if (isVoice || _client.TurnState != LiveTurnState.Idle)
+        {
+            _idleSilence = TimeSpan.Zero;
+            _quietRaised = false;
+            return;
+        }
+
+        if (_quietRaised)
+        {
+            return;
+        }
+
+        _idleSilence += blockDuration;
+        if (_idleSilence < _quietTimeout)
+        {
+            return;
+        }
+
+        _quietRaised = true;
+        Raise(WentQuiet, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Calla los parlantes ahora, por decisión de este lado.
+    /// </summary>
+    /// <remarks>
+    /// <b>No está enganchado al detector de voz a propósito.</b> El micrófono sigue abierto mientras
+    /// ella habla, así que su propia voz vuelve por los parlantes y el detector la ve; engancharlo
+    /// sin un umbral medido contra este equipo la haría cortarse sola a mitad de cada respuesta, que
+    /// es peor que llegar unos milisegundos tarde a la interrupción. La interrupción de verdad la
+    /// manda el servidor y el cliente ya la atiende.
+    /// <para>
+    /// Queda expuesto porque el freno del usuario —el botón de pánico, el orbe— sí tiene que poder
+    /// callarla sin esperar a nadie.
+    /// </para>
+    /// </remarks>
+    public void SilenceNow()
+    {
+        _client.SilenceNow();
+        Publish(LiveOrbMoment.Interrupted);
+    }
+
+    /// <summary>Manda texto escrito por el mismo canal.</summary>
+    public Task<bool> SendTextAsync(string text, CancellationToken cancellationToken = default) =>
+        _client.SendTextAsync(text, cancellationToken);
+
+    /// <summary>Cierra la sesión y vuelve a dejar todo como al principio.</summary>
+    public async Task StopAsync()
+    {
+        await _client.StopAsync().ConfigureAwait(false);
+        _speechGate.Reset();
+        _idleSilence = TimeSpan.Zero;
+        _quietRaised = false;
+        SetWaiting(false);
+        Publish(LiveOrbMoment.Listening);
+    }
+
+    /// <inheritdoc />
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        // Primero desuscribir y después cerrar: al revés, el cierre dispara el último cambio de
+        // turno y lo recibe un anfitrión que ya se dio por terminado.
+        _client.TurnStateChanged -= OnTurnStateChanged;
+        _client.Interrupted -= OnInterrupted;
+        _client.TranscriptReceived -= OnTranscriptReceived;
+        _client.Failed -= OnFailed;
+
+        await _client.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private void OnTurnStateChanged(object? sender, LiveTurnStateChangedEventArgs eventArgs)
+    {
+        // Empezó a llegar la respuesta: lo que se estaba esperando ya llegó.
+        if (eventArgs.Current != LiveTurnState.Idle)
+        {
+            SetWaiting(false);
+        }
+
+        Refresh();
+    }
+
+    /// <summary>
+    /// La cortaron. La cola de audio ya se vació antes de que esto se dispare.
+    /// </summary>
+    /// <remarks>
+    /// Se publica acá y no sólo desde el cambio de turno porque el orbe tiene que ver el corte en el
+    /// mismo cuadro: la transición de hablando a interrumpida dura 80 ms y es un corte, no un
+    /// fundido. Si esperara a que se recalcule el momento por otro camino, se vería como un fundido
+    /// tardío y se leería como que no hizo caso.
+    /// </remarks>
+    private void OnInterrupted(object? sender, EventArgs eventArgs)
+    {
+        SetWaiting(false);
+        _speechGate.Reset();
+        Publish(LiveOrbMoment.Interrupted);
+    }
+
+    private void OnTranscriptReceived(object? sender, LiveTranscriptEventArgs eventArgs) =>
+        Raise(TranscriptReceived, eventArgs);
+
+    private void OnFailed(object? sender, LiveFailureEventArgs eventArgs)
+    {
+        if (!eventArgs.Fatal)
+        {
+            return;
+        }
+
+        _latch.Trip(eventArgs.Message);
+        Raise(FellBack, eventArgs);
+    }
+
+    private void SetWaiting(bool waiting)
+    {
+        lock (_momentGate)
+        {
+            _waitingForReply = waiting;
+        }
+    }
+
+    private void Refresh()
+    {
+        bool waiting;
+        lock (_momentGate)
+        {
+            waiting = _waitingForReply;
+        }
+
+        Publish(LiveOrbMoments.For(_client.TurnState, waiting));
+    }
+
+    private void Publish(LiveOrbMoment moment)
+    {
+        LiveOrbMoment previous;
+        lock (_momentGate)
+        {
+            if (_moment == moment)
+            {
+                return;
+            }
+
+            previous = _moment;
+            _moment = moment;
+        }
+
+        Raise(MomentChanged, new LiveMomentChangedEventArgs(previous, moment));
+    }
+
+    /// <summary>
+    /// Dispara un evento sin dejar que un suscriptor roto suba hasta el bucle de lectura del cliente.
+    /// </summary>
+    /// <remarks>
+    /// El cliente ya se protege de esto, pero se protege anotando la falla y siguiendo: si la
+    /// excepción sale de acá, lo que queda escrito es «un suscriptor de la sesión en vivo falló» sin
+    /// decir cuál. Atajarla en el borde deja el motivo donde se puede leer.
+    /// </remarks>
+    private void Raise<TArgs>(EventHandler<TArgs>? handler, TArgs args)
+        where TArgs : EventArgs
+    {
+        try
+        {
+            handler?.Invoke(this, args);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Un oyente roto no puede cortar la charla.
+        }
+    }
+
+    private void Raise(EventHandler? handler, EventArgs args)
+    {
+        try
+        {
+            handler?.Invoke(this, args);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Idem.
+        }
+    }
+}

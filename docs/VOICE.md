@@ -142,3 +142,71 @@ Ocultar el orbe cancela la frase en curso pero mantiene la escucha: con `ListenW
 ## TTS
 
 La respuesta se sintetiza con una voz local de Windows compatible con `es-AR` cuando está disponible. La salida se limita a 1.200 caracteres por intervención, se puede cancelar y respeta mute. STT/TTS no consumen tokens de OpenRouter.
+
+## Sesión en vivo (Gemini Live)
+
+Es el segundo camino de voz y **viene apagado**. El de siempre —Whisper local, modelo por OpenRouter, síntesis local— sigue intacto y es el que corre si éste no está encendido o no puede abrirse.
+
+Lo que cambia no es sólo que tarda menos: el micrófono queda abierto mientras Viernes habla, así que **hablarle encima la calla**. El camino de siempre no puede hacer eso por más que se lo apure, porque ahí, mientras habla, no hay nadie escuchando.
+
+### Encenderlo
+
+Hacen falta las dos cosas, y las dos se leen primero de `%LOCALAPPDATA%\Viernes\claves.json` y después del entorno:
+
+```
+GOOGLE_API_KEY   la clave de Google
+VIERNES_LIVE     1 · true · si     enciende el camino nuevo
+```
+
+Opcionales, con sus valores por defecto entre paréntesis:
+
+```
+VIERNES_LIVE_MODEL        (gemini-3.1-flash-live-preview)
+VIERNES_LIVE_VOICE        (Aoede)
+VIERNES_LIVE_SILENCE_MS   (700)  silencio que el servidor espera para cerrar tu turno
+VIERNES_LIVE_CHUNK_MS     (20)   cuánto audio entra en cada fragmento que se sube
+```
+
+Un valor mal escrito no impide arrancar: se cae al de por defecto.
+
+### Cómo se elige el camino
+
+Se elige al abrir una conversación —el nombre o el toque en el orbe—, una sola vez, y el motivo queda escrito en `%LOCALAPPDATA%\Viernes\trace.log`:
+
+```
+voz.camino.inicial   vivo · hay clave de Google y la sesión en vivo está encendida
+voz.camino           siempre · falta la clave de Google
+vivo.abierta
+vivo.momento         Listening → Speaking
+vivo.caida           Se cortó la sesión en vivo y no pude reconectar.
+vivo.cerrada         Conversación cerrada
+```
+
+La línea nunca lleva la clave adentro: quien decide recibe *si hay* clave, no la clave.
+
+### Estados del orbe
+
+La sesión sabe cuatro momentos y sólo cuatro; el resto de lo que dibuja el orbe —guardia, sin clave, sorda, un proyecto esperando— es una condición del asistente y la sigue decidiendo quien la decidía.
+
+| Momento | Estado | De dónde sale |
+|---|---|---|
+| te escucho | `Listening` | turno en reposo |
+| pensando | `Thinking` | dejaste de hablar y todavía no volvió nada |
+| hablando | `Speaking` | está llegando o sonando audio |
+| interrumpida | `Interrupted` | `serverContent.interrupted` |
+
+**«Pensando» no lo manda el servidor.** Entre que el servidor da por cerrada tu frase y el primer bloque de voz de la respuesta no hay ningún mensaje en el protocolo. Ese momento lo pone el detector de voz local —el mismo modelo entrenado que usa el oído continuo— cuando ve que dejaste de hablar y el turno sigue en reposo.
+
+### Cuándo se cae al camino de siempre
+
+Sin que el usuario tenga que hacer nada, y siempre con el motivo en la traza: si falta la clave, si está apagado, si el servidor no acepta la sesión, si no se puede abrir el micrófono, o si la sesión se muere en el medio de la charla —ahí la conversación no se corta, se muda—.
+
+Después de una caída el camino nuevo queda trabado un rato y la espera crece con cada caída seguida, hasta media hora. Sin eso, «se cae al camino de siempre» duraría una conversación: la siguiente volvería a intentar y a esperar la conexión, y desde afuera eso no se ve como un servicio caído sino como un asistente que tarda de más cada vez que le hablás.
+
+### Lo que el camino nuevo todavía no tiene
+
+**Herramientas.** El `setup` que se manda no declara ninguna, así que en vivo se conversa pero no se abre una aplicación ni se crea una carpeta ni se anota un recordatorio. Está dicho en la instrucción de sistema para que no prometa lo que no puede, y escribir cierra la sesión hablada y devuelve el turno al camino de siempre, que sí las tiene.
+
+### Cierres automáticos
+
+Un minuto sin que nadie hable cierra la charla, igual que en el camino de siempre. No es prolijidad: la sesión manda audio del micrófono a la nube sin parar y se cobra por minuto de audio —unos USD 0,005 el minuto que sube y 0,018 el que baja—, así que un cuarto vacío con el orbe abierto es plata.

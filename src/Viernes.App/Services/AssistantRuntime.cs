@@ -36,7 +36,14 @@ namespace Viernes.App.Services;
 /// Conecta el orbe WPF con el core, Whisper/SAPI locales y una demo visible de wake word.
 /// Las credenciales se resuelven sólo desde el entorno; nunca pasan por settings ni logs.
 /// </summary>
-internal sealed class AssistantRuntime : IAssistantRuntime
+/// <remarks>
+/// Es parcial: el camino en vivo —la sesión dúplex con Gemini— vive en
+/// <c>AssistantRuntime.Live.cs</c>. No es una división por tamaño sino por camino: son dos formas
+/// distintas de tener una conversación y la única frontera entre las dos está en
+/// <see cref="StartConversationAsync"/>. Tenerlas mezcladas en el mismo archivo haría que cada
+/// arreglo del camino de siempre tuviera que releerse preguntándose a cuál de los dos afecta.
+/// </remarks>
+internal sealed partial class AssistantRuntime : IAssistantRuntime
 {
     private const int MaximumSpokenCharacters = 1_200;
 
@@ -621,6 +628,11 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             "inicio",
             $"stt={_recognitionProviderName} · wake={(wakeStarted ? "escuchando" : "apagado")} · " +
             $"muted={_isMuted} · nube={IsCloudConfigured}");
+
+        // Por dónde va a ir la primera charla, dicho antes de que alguien hable. Sale del mismo
+        // router que la decide de verdad, así que no puede desincronizarse de lo que después pasa;
+        // y nunca lleva la clave adentro, sólo si la hay.
+        RuntimeTrace.Write("voz.camino.inicial", DescribeVoiceRoute().ToString());
         var providerStatus = selection.Availability.IsAvailable
             ? $"{_recognitionProviderName} listo"
             : "entrada de voz no disponible";
@@ -682,6 +694,17 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         try
         {
+            // Escribir cierra la charla hablada, y no es una limitación técnica: es la misma regla
+            // que ya vale en la interfaz —escribir es la prueba de que este turno se lee, no se
+            // escucha— y además lo único seguro. Con la sesión en vivo abierta, la voz de siempre
+            // saldría por los parlantes con su micrófono escuchando: se oiría a sí misma, el
+            // servidor lo tomaría como que alguien le habló encima, y se contestaría sola.
+            if (IsLiveConversation)
+            {
+                await EndConversationAsync("Seguimos por escrito", quiet: true, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
             await PauseWakeWordAsync(turn.Token).ConfigureAwait(false);
             CancelSpeechSafely();
             _neuralPlayer.Stop();
@@ -977,6 +1000,12 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         // corrían: apretabas silenciar y la voz seguía hablando.
         CancelSpeechSafely();
         _neuralPlayer.Stop();
+
+        // Silenciar es silenciar todo, venga la voz de donde venga. Sin esto, apretar silenciar
+        // durante una charla en vivo callaba la voz de siempre —que no estaba sonando— y dejaba
+        // hablando a la única que sí.
+        SilenceLive();
+
         await SilenceVoiceAsync(cancellationToken).ConfigureAwait(false);
         _orchestrator.SetListening(false);
         Publish(new AssistantRuntimeUpdate(
@@ -1300,6 +1329,10 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         CancelSpeechSafely();
         _neuralPlayer.Stop();
 
+        // Y la voz de la sesión en vivo, que sale por otro dispositivo y no la para ninguna de las
+        // dos líneas de arriba. Es sincrónico a propósito: acá cada milisegundo se oye.
+        SilenceLive();
+
         // El turno es lo único que puede estar tecleando en otra ventana o corriendo un comando.
         // Es lo que el atajo existe para cortar, y lo que hasta ahora no cortaba.
         try
@@ -1330,6 +1363,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
         {
             try
             {
+                await StopLiveAsync("freno de emergencia").ConfigureAwait(false);
                 await SilenceVoiceAsync(CancellationToken.None).ConfigureAwait(false);
                 if (_recognition?.IsMicrophoneActive == true)
                 {
@@ -1685,8 +1719,43 @@ internal sealed class AssistantRuntime : IAssistantRuntime
             "Te escucho.",
             MicrophoneActive: true));
 
-        _ = RunConversationLoopAsync(_conversationCancellation.Token);
+        _ = RunChosenConversationAsync(_conversationCancellation.Token);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Elige por cuál de los dos caminos va esta charla y arranca el que corresponda.
+    /// </summary>
+    /// <remarks>
+    /// <b>Es la única frontera entre los dos caminos.</b> El de siempre —reconocer acá, pensar en la
+    /// nube, sintetizar acá— y el de la sesión en vivo no se mezclan en ningún otro lado: si el
+    /// nuevo no se puede abrir, no dejó nada abierto y se sigue con el de siempre como si nunca se
+    /// hubiera intentado. El motivo de la elección queda escrito en la bitácora, siempre, incluso
+    /// cuando la elección es la de siempre.
+    /// </remarks>
+    private async Task RunChosenConversationAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await TryStartLiveConversationAsync(cancellationToken).ConfigureAwait(false))
+            {
+                // A partir de acá manda el servidor: no hay bucle que correr de este lado. La charla
+                // la cierra el usuario, el mute, el freno o una caída de la sesión.
+                return;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            // Que el camino nuevo se rompa de una forma que no se previó no puede dejar mudo al
+            // asistente: se anota y se sigue por el de siempre, que es lo que ya funcionaba.
+            RuntimeTrace.Write("vivo.arranque.excepcion", $"{exception.GetType().Name} · {exception.Message}");
+        }
+
+        await RunConversationLoopAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1729,11 +1798,16 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         if (!_conversationActive)
         {
+            // Aunque la charla ya se haya dado por cerrada, el camino nuevo puede seguir con el
+            // micrófono y el parlante tomados: cerrarlo acá también es lo que impide que un cierre
+            // por un camino raro deje la sesión en vivo escuchando de fondo.
+            await StopLiveAsync(reason).ConfigureAwait(false);
             return;
         }
 
         RuntimeTrace.Write("conversacion.cerrada", reason);
         _conversationActive = false;
+        await StopLiveAsync(reason).ConfigureAwait(false);
         _conversationCancellation?.Cancel();
 
         if (_recognition?.IsMicrophoneActive == true)
@@ -3014,6 +3088,7 @@ internal sealed class AssistantRuntime : IAssistantRuntime
 
         _isDisposed = true;
         _conversationActive = false;
+        await DisposeLiveAsync().ConfigureAwait(false);
         _ambientTimer?.Dispose();
         _ambientTimer = null;
         _conversationCancellation?.Cancel();

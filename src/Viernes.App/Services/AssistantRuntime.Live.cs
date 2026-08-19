@@ -1,0 +1,536 @@
+using System.Text;
+using Viernes.App.Diagnostics;
+using Viernes.App.ViewModels;
+using Viernes.Core.Configuration;
+using Viernes.Core.Live;
+using Viernes.Platform.Windows.Live;
+
+namespace Viernes.App.Services;
+
+/// <summary>
+/// El camino en vivo: una sola conexión dúplex que reemplaza reconocer, pensar y sintetizar.
+/// </summary>
+/// <remarks>
+/// Los dos caminos conviven y la frontera entre ellos es una sola línea, en
+/// <see cref="StartConversationAsync"/>: al abrir una conversación se elige, se escribe por qué en la
+/// bitácora, y a partir de ahí no se mezclan. Todo lo que hay acá adentro corre <em>en lugar de</em>
+/// <c>RunConversationLoopAsync</c>, nunca además.
+/// <para>
+/// Lo que cambia no es sólo que tarda menos. Es que el micrófono queda abierto mientras ella habla,
+/// así que hablarle encima la calla — y eso el camino de siempre no lo puede hacer por más que se lo
+/// apure, porque ahí, mientras habla, no hay nadie escuchando.
+/// </para>
+/// <para>
+/// <b>Lo que el camino nuevo todavía no tiene son herramientas.</b> El setup que manda
+/// <c>LiveClientMessages</c> no declara ninguna, así que en vivo se conversa pero no se abre Spotify
+/// ni se crea una carpeta. Es una diferencia real entre los dos caminos y está dicha en la
+/// instrucción de sistema, para que no prometa lo que no puede.
+/// </para>
+/// </remarks>
+internal sealed partial class AssistantRuntime
+{
+    /// <summary>
+    /// La traba vive en el runtime y no en la sesión para que sobreviva a cerrar y abrir la charla.
+    /// </summary>
+    /// <remarks>
+    /// Si se armara junto con la sesión, cada conversación arrancaría con la escalera en cero y el
+    /// «apagado automático» duraría exactamente una conversación, que es no tenerlo.
+    /// </remarks>
+    private readonly LiveFallbackLatch _liveLatch = new();
+
+    /// <summary>Lo que la persona viene diciendo en el turno abierto, según el servidor.</summary>
+    private readonly StringBuilder _liveHeard = new();
+
+    /// <summary>Lo que ella viene diciendo en el turno abierto.</summary>
+    private readonly StringBuilder _liveSaid = new();
+
+    private readonly object _liveTextGate = new();
+
+    private LiveSpeakerSink? _liveSink;
+    private LiveVoiceSession? _liveSession;
+    private LiveMicrophonePump? _liveMicrophone;
+
+    /// <summary>Distinto de cero mientras la charla abierta va por el camino nuevo.</summary>
+    private int _liveConversation;
+
+    /// <summary>Si la conversación abierta está yendo por la sesión en vivo.</summary>
+    internal bool IsLiveConversation => Volatile.Read(ref _liveConversation) != 0;
+
+    /// <summary>
+    /// Qué camino tomaría una conversación abierta ahora mismo. No abre nada.
+    /// </summary>
+    /// <remarks>
+    /// Se puede llamar desde cualquier lado: es una consulta, no un intento. Sirve para escribir en
+    /// la bitácora del arranque por dónde va a ir la primera charla, antes de que alguien hable.
+    /// </remarks>
+    internal VoiceRouteDecision DescribeVoiceRoute() => EnsureLiveSession().Decide();
+
+    /// <summary>
+    /// Arma la sesión en vivo la primera vez que hace falta y la reusa después.
+    /// </summary>
+    /// <remarks>
+    /// Reusarla no es una optimización: la traba de caída y el contador de interrupciones son de la
+    /// sesión que el usuario percibe como una sola —el asistente encendido—, no de cada charla.
+    /// Rearmarla por conversación los borraría a los dos.
+    /// </remarks>
+    private LiveVoiceSession EnsureLiveSession()
+    {
+        if (_liveSession is not null)
+        {
+            return _liveSession;
+        }
+
+        _liveSink = new LiveSpeakerSink();
+
+        // La instrucción se arma acá y no en Core porque lleva el nombre que eligió quien instaló, y
+        // ese nombre vive en las preferencias — que a esta altura ya se leyeron.
+        var options = GeminiLiveOptions.FromEnvironment(ReadLiveSetting, BuildLiveInstruction());
+
+        var session = new LiveVoiceSession(
+            options,
+            () => LocalCredentials.Get("GOOGLE_API_KEY"),
+            _liveSink,
+            transportFactory: null,
+            _liveLatch);
+
+        session.MomentChanged += LiveOnMomentChanged;
+        session.TranscriptReceived += LiveOnTranscript;
+        session.FellBack += LiveOnFellBack;
+        session.WentQuiet += LiveOnWentQuiet;
+
+        _liveSession = session;
+        return session;
+    }
+
+    /// <summary>
+    /// De dónde salen los interruptores del camino nuevo.
+    /// </summary>
+    /// <remarks>
+    /// Por el mismo lugar que la clave: primero <c>claves.json</c>, después el entorno. Pedirle al
+    /// usuario que abra un archivo para pegar la clave y que además aprenda <c>setx</c> para prender
+    /// el interruptor es pedirle dos cosas distintas para encender una sola.
+    /// </remarks>
+    private static string? ReadLiveSetting(string name) => LocalCredentials.Get(name);
+
+    /// <summary>
+    /// La instrucción de sistema de la sesión hablada.
+    /// </summary>
+    /// <remarks>
+    /// No es el prompt del camino de siempre y no puede serlo: aquél está escrito alrededor de las
+    /// herramientas —usá <c>pc_action</c>, anotá una misión, aprendé esto— y acá no hay ninguna
+    /// declarada. Copiarlo produciría un asistente que dice que abrió Spotify sin haber abierto
+    /// nada, que es la peor forma de fallar porque suena a que funcionó.
+    /// </remarks>
+    private string BuildLiveInstruction() => $"""
+        Sos {_identity.Name}, el asistente personal de esta computadora, y esto es una conversación
+        hablada: te escuchan, no te leen.
+
+        Hablás en castellano rioplatense, de vos. Sereno, preciso y directo. Frases cortas: quien te
+        escucha no puede volver atrás a releer.
+
+        Ahora mismo estás en la sesión de voz, y en la sesión de voz no tenés herramientas: no podés
+        abrir aplicaciones, ni crear archivos, ni anotar recordatorios. No digas que lo hiciste ni
+        prometas hacerlo. Decí que para eso te lo escriba o te lo pida cuando no estés en esta
+        sesión, y seguí con lo que sí podés: conversar, explicar, acordarte de lo que se viene
+        hablando en esta charla.
+
+        Te pueden interrumpir hablándote encima, y está bien: cuando pase, callate y escuchá lo
+        nuevo. No retomes la frase anterior.
+        """;
+
+    /// <summary>
+    /// Intenta abrir la conversación por el camino nuevo. Devuelve si se hizo cargo.
+    /// </summary>
+    /// <remarks>
+    /// Cuando devuelve <c>false</c> no dejó nada abierto: el llamador puede seguir con
+    /// <c>RunConversationLoopAsync</c> sin limpiar nada. Es lo que hace que «se cae al camino de
+    /// siempre» sea una línea y no una coreografía.
+    /// </remarks>
+    private async Task<bool> TryStartLiveConversationAsync(CancellationToken cancellationToken)
+    {
+        var session = EnsureLiveSession();
+
+        var decision = session.Decide();
+        RuntimeTrace.Write("voz.camino", decision.ToString());
+        if (!decision.IsLive)
+        {
+            return false;
+        }
+
+        // El micrófono es de uno solo. El oído continuo lo suelta acá igual que para el bucle de
+        // siempre, y la voz de siempre no puede estar sonando encima de la nueva.
+        await PauseWakeWordAsync(cancellationToken).ConfigureAwait(false);
+        CancelSpeechSafely();
+        _neuralPlayer.Stop();
+        await SilenceVoiceAsync(cancellationToken).ConfigureAwait(false);
+
+        var opened = await session.StartAsync(cancellationToken).ConfigureAwait(false);
+        if (!opened.IsLive)
+        {
+            RuntimeTrace.Write("vivo.no.abrio", opened.Reason);
+            await session.StopAsync().ConfigureAwait(false);
+            _liveSink?.Close();
+            return false;
+        }
+
+        var microphone = new LiveMicrophonePump(session);
+        microphone.LevelChanged += LiveOnAudioLevel;
+        if (!microphone.Start())
+        {
+            microphone.LevelChanged -= LiveOnAudioLevel;
+            RuntimeTrace.Write("vivo.microfono", microphone.LastFailure ?? "no abrió");
+            await microphone.DisposeAsync().ConfigureAwait(false);
+            await session.StopAsync().ConfigureAwait(false);
+            _liveSink?.Close();
+            return false;
+        }
+
+        _liveMicrophone = microphone;
+        ClearLiveText();
+        Interlocked.Exchange(ref _liveConversation, 1);
+        RuntimeTrace.Write("vivo.abierta");
+
+        Publish(new AssistantRuntimeUpdate(
+            AssistantVisualState.Listening,
+            "En vivo · hablame encima para cortarme",
+            "Te escucho.",
+            MicrophoneActive: true));
+
+        return true;
+    }
+
+    /// <summary>
+    /// Cierra el camino nuevo y deja los dispositivos libres.
+    /// </summary>
+    /// <remarks>
+    /// Se puede llamar de más: si la charla no iba por acá, no hace nada. Lo llaman el cierre de
+    /// conversación, el mute, el freno de emergencia y el apagado, y ninguno de ellos sabe —ni
+    /// tiene por qué saber— por qué camino iba la charla.
+    /// </remarks>
+    private async Task StopLiveAsync(string reason)
+    {
+        if (Interlocked.Exchange(ref _liveConversation, 0) == 0)
+        {
+            return;
+        }
+
+        var microphone = _liveMicrophone;
+        _liveMicrophone = null;
+
+        if (microphone is not null)
+        {
+            microphone.LevelChanged -= LiveOnAudioLevel;
+            await microphone.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (_liveSession is not null)
+        {
+            await _liveSession.StopAsync().ConfigureAwait(false);
+        }
+
+        // El parlante se cierra y no se desecha: la sesión se reusa y la próxima charla lo vuelve a
+        // abrir sola. Tener el dispositivo tomado entre charla y charla es tenerlo tomado todo el
+        // día, y hay una sola tarjeta de sonido.
+        _liveSink?.Close();
+        ClearLiveText();
+
+        RuntimeTrace.Write("vivo.cerrada", reason);
+    }
+
+    /// <summary>
+    /// Apaga el camino nuevo del todo: cierra la sesión, se desuscribe y suelta el parlante.
+    /// </summary>
+    /// <remarks>
+    /// Desuscribirse no es prolijidad. La sesión dispara sus eventos desde el hilo que lee del
+    /// servidor, y un manejador que sobrevive al cierre se encuentra con un runtime desechado
+    /// publicando sobre un dispatcher apagado. Es la misma clase de fuga que este repositorio ya
+    /// arregló en el reconocedor y en el oído continuo.
+    /// </remarks>
+    private async Task DisposeLiveAsync()
+    {
+        await StopLiveAsync("apagado").ConfigureAwait(false);
+
+        var session = _liveSession;
+        _liveSession = null;
+
+        if (session is not null)
+        {
+            session.MomentChanged -= LiveOnMomentChanged;
+            session.TranscriptReceived -= LiveOnTranscript;
+            session.FellBack -= LiveOnFellBack;
+            session.WentQuiet -= LiveOnWentQuiet;
+            await session.DisposeAsync().ConfigureAwait(false);
+        }
+
+        _liveSink?.Dispose();
+        _liveSink = null;
+    }
+
+    /// <summary>Calla los parlantes de la sesión en vivo. Lo llama el freno del usuario.</summary>
+    private void SilenceLive()
+    {
+        if (Volatile.Read(ref _liveConversation) == 0)
+        {
+            return;
+        }
+
+        _liveSession?.SilenceNow();
+    }
+
+    /// <summary>
+    /// Cambió el momento de la charla en vivo.
+    /// </summary>
+    /// <remarks>
+    /// Llega desde el hilo que lee del servidor o desde el del micrófono, así que acá no se espera
+    /// nada: lo único que se hace es publicar —y publicar despacha con <c>InvokeAsync</c> del otro
+    /// lado— y, si hay que cerrar la charla, se sale por una tarea. Esperar acá traba el bucle que
+    /// trae el aviso de interrupción, que es justo el que no puede trabarse.
+    /// </remarks>
+    private void LiveOnMomentChanged(object? sender, LiveMomentChangedEventArgs eventArgs)
+    {
+        if (_isDisposed || Volatile.Read(ref _liveConversation) == 0)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("vivo.momento", $"{eventArgs.Previous} → {eventArgs.Current}");
+
+        // Al salir de «te escucho» la frase de la persona quedó cerrada; al volver, la respuesta.
+        // Es el único momento en que una y otra se pueden leer enteras: llegan de a fragmentos.
+        var heard = eventArgs.Current == LiveOrbMoment.Listening ? null : TakeLiveText(_liveHeard);
+        var said = eventArgs.Current == LiveOrbMoment.Listening ? TakeLiveText(_liveSaid) : null;
+
+        if (heard is not null && IsClosingPhrase(heard))
+        {
+            _ = Task.Run(() => CloseLiveConversationAsync(heard));
+            return;
+        }
+
+        if (heard is not null)
+        {
+            AddConversationTurn(heard);
+        }
+
+        Publish(new AssistantRuntimeUpdate(
+            ToVisualState(eventArgs.Current),
+            LiveStatusLabel(eventArgs.Current),
+            heard ?? said,
+            MicrophoneActive: true));
+    }
+
+    /// <summary>
+    /// Reenvía el nivel del micrófono a la interfaz sin tocar el estado.
+    /// </summary>
+    /// <remarks>
+    /// Llega cincuenta veces por segundo y viaja por el mismo canal que la captura de siempre, que
+    /// del otro lado se atiende antes que nada y sale. Sin esto el orbe dibuja «te escucho» quieto
+    /// durante toda la charla en vivo, y quieto no se distingue de colgado.
+    /// </remarks>
+    private void LiveOnAudioLevel(object? sender, Viernes.Platform.Windows.Speech.AudioLevelEventArgs eventArgs)
+    {
+        if (_isDisposed || Volatile.Read(ref _liveConversation) == 0)
+        {
+            return;
+        }
+
+        if (eventArgs.IsVoice)
+        {
+            // Entra audio: sorda deja de valer en este mismo cuadro, igual que en el otro camino.
+            Volatile.Write(ref _deaf, 0);
+        }
+
+        // Va por Updated y no por Publish, igual que en el otro camino: Publish reescribe el último
+        // estado publicado, y esto no es un cambio de estado sino el mismo estado moviéndose.
+        Updated?.Invoke(this, new AssistantRuntimeUpdate(
+            _lastVisualState,
+            CurrentStateLabel(_lastVisualState),
+            AudioLevel: eventArgs.Level));
+    }
+
+    /// <summary>
+    /// Llegó un pedazo de transcripción.
+    /// </summary>
+    /// <remarks>
+    /// Llega de a fragmentos y no de a frases, así que acá sólo se acumula. Publicar cada fragmento
+    /// haría parpadear la burbuja varias veces por palabra; quien la arma entera es
+    /// <see cref="LiveOnMomentChanged"/>, en el borde del turno.
+    /// </remarks>
+    private void LiveOnTranscript(object? sender, LiveTranscriptEventArgs eventArgs)
+    {
+        if (_isDisposed || Volatile.Read(ref _liveConversation) == 0)
+        {
+            return;
+        }
+
+        lock (_liveTextGate)
+        {
+            var target = eventArgs.Speaker == LiveSpeaker.User ? _liveHeard : _liveSaid;
+            target.Append(eventArgs.Text);
+        }
+    }
+
+    /// <summary>
+    /// La sesión en vivo se murió: se sigue por el camino de siempre sin que el usuario haga nada.
+    /// </summary>
+    /// <remarks>
+    /// No es <c>async void</c> aunque todo lo que hay adentro sea asincrónico. Un <c>async void</c>
+    /// en un manejador de eventos ya tumbó el proceso una vez en este repositorio: la excepción no
+    /// tiene a dónde ir. Acá el trabajo sale por una tarea con su propio <c>try</c>.
+    /// </remarks>
+    private void LiveOnFellBack(object? sender, LiveFailureEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("vivo.caida", eventArgs.Message);
+
+        if (Volatile.Read(ref _liveConversation) == 0)
+        {
+            return;
+        }
+
+        var token = ConversationToken();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await StopLiveAsync(eventArgs.Message).ConfigureAwait(false);
+
+                if (_isDisposed || !_conversationActive)
+                {
+                    return;
+                }
+
+                // La charla no se corta: se muda. El usuario no tiene por qué enterarse de que un
+                // servicio se cayó más allá de la línea de estado.
+                Publish(new AssistantRuntimeUpdate(
+                    AssistantVisualState.Listening,
+                    "Sigo por el camino de siempre",
+                    eventArgs.Message,
+                    MicrophoneActive: true));
+
+                await RunConversationLoopAsync(token).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                RuntimeTrace.Write("vivo.caida.excepcion", exception.GetType().Name);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Pasó un minuto sin que nadie hable: se cierra la charla.
+    /// </summary>
+    /// <remarks>
+    /// No es sólo prolijidad. Una sesión en vivo abierta manda audio del micrófono a la nube sin
+    /// parar y se cobra por minuto: dejarla escuchando un cuarto vacío es dejar el micrófono
+    /// transmitiendo hasta que alguien apague la máquina. El camino de siempre ya se cerraba solo
+    /// cuando nadie contestaba; éste no tenía cómo.
+    /// </remarks>
+    private void LiveOnWentQuiet(object? sender, EventArgs eventArgs)
+    {
+        if (_isDisposed || Volatile.Read(ref _liveConversation) == 0)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("vivo.abandonada", "un minuto sin voz");
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var turns = TakeConversationTurns();
+                await EndConversationAsync("Cerré por silencio", quiet: true, CancellationToken.None)
+                    .ConfigureAwait(false);
+                await LearnFromConversationAsync(turns).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                RuntimeTrace.Write("vivo.abandonada.excepcion", exception.GetType().Name);
+            }
+        });
+    }
+
+    private async Task CloseLiveConversationAsync(string transcript)
+    {
+        try
+        {
+            RuntimeTrace.Write("vivo.cierre.hablado", transcript);
+
+            // Los turnos se retiran antes de cerrar, porque el cierre los descarta.
+            var turns = TakeConversationTurns();
+            await EndConversationAsync("Conversación cerrada", quiet: true, CancellationToken.None)
+                .ConfigureAwait(false);
+            await LearnFromConversationAsync(turns).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            RuntimeTrace.Write("vivo.cierre.excepcion", exception.GetType().Name);
+        }
+    }
+
+    /// <summary>El token de la charla abierta, sin explotar si el cierre ganó la carrera.</summary>
+    private CancellationToken ConversationToken()
+    {
+        try
+        {
+            return _conversationCancellation?.Token ?? CancellationToken.None;
+        }
+        catch (ObjectDisposedException)
+        {
+            return CancellationToken.None;
+        }
+    }
+
+    private string? TakeLiveText(StringBuilder buffer)
+    {
+        lock (_liveTextGate)
+        {
+            if (buffer.Length == 0)
+            {
+                return null;
+            }
+
+            var text = buffer.ToString().Trim();
+            buffer.Clear();
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+    }
+
+    private void ClearLiveText()
+    {
+        lock (_liveTextGate)
+        {
+            _liveHeard.Clear();
+            _liveSaid.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Traduce el momento de la sesión al estado del orbe.
+    /// </summary>
+    /// <remarks>
+    /// Es la única traducción que hace falta y por eso los momentos son cuatro y no quince: el resto
+    /// de lo que dibuja el orbe —guardia, sin clave, sorda, un proyecto esperando— no es un momento
+    /// de esta conversación sino una condición del asistente, y la sigue decidiendo
+    /// <c>Resting()</c>.
+    /// </remarks>
+    private static AssistantVisualState ToVisualState(LiveOrbMoment moment) => moment switch
+    {
+        LiveOrbMoment.Thinking => AssistantVisualState.Thinking,
+        LiveOrbMoment.Speaking => AssistantVisualState.Speaking,
+        LiveOrbMoment.Interrupted => AssistantVisualState.Interrupted,
+        _ => AssistantVisualState.Listening
+    };
+
+    private static string LiveStatusLabel(LiveOrbMoment moment) => moment switch
+    {
+        LiveOrbMoment.Thinking => "Pensando…",
+        LiveOrbMoment.Speaking => "Hablando · hablame encima para cortarme",
+        LiveOrbMoment.Interrupted => "Te escucho",
+        _ => "En vivo · decime «listo» para cortar"
+    };
+}
