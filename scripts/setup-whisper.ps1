@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     # small es el default por medición, no por tamaño: en CPU transcribe a ×0,88 del tiempo real y
     # acierta nombres propios, mientras que turbo tarda ×4,88 y castellaniza el rioplatense.

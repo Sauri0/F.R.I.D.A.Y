@@ -1,16 +1,19 @@
-<#
+﻿<#
 .SYNOPSIS
     Instala el asistente y lo deja funcionando.
 
 .DESCRIPTION
     Un solo archivo que hace todo: baja la aplicación, baja el modelo de voz, pregunta cómo se va a
-    llamar el asistente, guarda la clave de OpenRouter del usuario y crea los accesos directos.
+    llamar el asistente, guarda sus claves y crea los accesos directos.
 
     Volver a correrlo actualiza la instalación sin volver a preguntar nada.
 
 .NOTES
-    La clave es del usuario y nunca viaja acá adentro. Se pide en el momento, se guarda como variable
-    de entorno de la cuenta de Windows y no se escribe en ningún archivo del proyecto.
+    Las claves son del usuario y ninguna viaja acá adentro. Las dos se piden en el momento, se leen
+    como texto oculto, no se muestran, no se registran y no se escriben en ningún archivo del
+    proyecto. La de OpenRouter va a las variables de entorno de la cuenta de Windows; la de Google
+    —que es opcional— al archivo de claves de la carpeta de datos, porque así lo pidió quien lo usa:
+    abrir, pegar y guardar es más simple que aprender setx.
 #>
 
 [CmdletBinding()]
@@ -20,7 +23,10 @@ param(
 
     # Instala sin preguntar, con estos valores. Para pruebas automatizadas.
     [string] $Nombre,
-    [switch] $SinModelo
+    [switch] $SinModelo,
+
+    # Comprueba un nombre y sale sin instalar nada. Ver el bloque principal para el porqué.
+    [string] $ProbarNombre
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,9 +96,13 @@ function Confirmar-Equipo {
 #region el nombre
 
 <#
-    Las mismas reglas que AssistantIdentity en el código. Si se separan, el instalador va a aceptar
-    un nombre que la aplicación después normaliza a otra cosa, y el usuario va a ver que su asistente
-    se llama distinto de lo que escribió.
+    Las mismas reglas que AssistantIdentity en el código, en el mismo orden y con los mismos
+    mensajes. Si se separan, el instalador va a aceptar un nombre que la aplicación después normaliza
+    a otra cosa, y el usuario va a ver que su asistente se llama distinto de lo que escribió.
+
+    No se pueden compartir de verdad —esto corre antes de que la aplicación exista en el disco—, así
+    que lo que las mantiene juntas es una prueba: AssistantNameRulesMatchInstallerTests corre este
+    mismo archivo con -ProbarNombre y compara veredicto y forma final contra los del código.
 #>
 function Probar-Nombre([string] $candidato) {
     $limpio = if ($null -eq $candidato) { '' } else { $candidato.Trim() }
@@ -100,11 +110,41 @@ function Probar-Nombre([string] $candidato) {
     if ($limpio.Length -eq 0) { return 'Escribí un nombre.' }
     if ($limpio.Length -lt 2) { return 'El nombre necesita al menos dos letras.' }
     if ($limpio.Length -gt 24) { return 'El nombre no puede pasar de 24 caracteres.' }
-    if ($limpio -match '\d') { return 'Sin números: el nombre se dice en voz alta y no se reconocen bien.' }
+    if ($limpio -match '\d') { return 'Sin números: el nombre se dice en voz alta y los números no se reconocen bien.' }
     if ($limpio -notmatch '\p{L}') { return 'El nombre tiene que tener letras.' }
     if ($limpio -match "[^\p{L} \-'’]") { return 'Usá sólo letras, espacios, guiones o apóstrofos.' }
 
     return $null
+}
+
+<#
+    Deja el nombre en la misma forma canónica que AssistantIdentity.Normalize.
+
+    Acá había un ToTitleCase, que parece lo mismo y no lo es: ToTitleCase baja todo a minúscula antes
+    de subir la primera letra de cada palabra, así que «JARVIS» se guardaba como «Jarvis» y «McCoy»
+    como «Mccoy». El código respeta esas mayúsculas a propósito —quien las escribió las eligió—, con
+    lo cual el instalador guardaba un nombre y la aplicación mostraba otro.
+#>
+function Normalizar-Nombre([string] $candidato) {
+    # Los espacios internos se colapsan: «Ana   María» y «Ana María» tienen que despertar igual.
+    $colapsado = ($candidato.Trim() -split '\s+' | Where-Object { $_.Length -gt 0 }) -join ' '
+
+    $armado = [Text.StringBuilder]::new($colapsado.Length)
+    $inicioDePalabra = $true
+    foreach ($caracter in $colapsado.ToCharArray()) {
+        $letra = if ($inicioDePalabra -and [char]::IsLower($caracter)) {
+            [char]::ToUpper($caracter, [Globalization.CultureInfo]::CurrentCulture)
+        } else {
+            $caracter
+        }
+
+        [void] $armado.Append($letra)
+
+        # El apóstrofo no abre palabra: «D'Ana» no es «D'ana» con mayúscula en la a.
+        $inicioDePalabra = ($caracter -eq ' ' -or $caracter -eq '-')
+    }
+
+    return $armado.ToString()
 }
 
 function Pedir-Nombre {
@@ -118,7 +158,7 @@ function Pedir-Nombre {
 
         $problema = Probar-Nombre $respuesta
         if ($null -eq $problema) {
-            $nombre = (Get-Culture).TextInfo.ToTitleCase($respuesta.Trim().ToLower())
+            $nombre = Normalizar-Nombre $respuesta
 
             # Se muestran las frases porque la regla de dos palabras sorprende: alguien que escribe
             # «Ana» espera despertarlo diciendo «Ana». Verlo ahora evita el «no me escucha» después.
@@ -137,6 +177,30 @@ function Pedir-Nombre {
 #endregion
 
 #region la clave
+
+<#
+    Lee una clave sin mostrarla, y suelta el texto plano apenas deja de hacer falta.
+
+    Está acá afuera porque las dos claves se piden igual y una sola forma de pedirlas es una sola
+    forma de equivocarse. Read-Host -AsSecureString no alcanza por sí solo: para poder guardarla hay
+    que sacarla de la SecureString, y eso deja una copia en memoria no administrada que nadie libera
+    si no se lo pide. Acá se libera en el finally, pase lo que pase.
+#>
+function Leer-Clave-Oculta([string] $etiqueta) {
+    $segura = Read-Host $etiqueta -AsSecureString
+    $puntero = [IntPtr]::Zero
+    try {
+        $puntero = [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($segura)
+        return [Runtime.InteropServices.Marshal]::PtrToStringUni($puntero).Trim()
+    }
+    finally {
+        if ($puntero -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($puntero)
+        }
+
+        $segura.Dispose()
+    }
+}
 
 <#
     La clave es del usuario, no del proyecto. Se guarda como variable de entorno de la cuenta —no en
@@ -158,9 +222,7 @@ function Pedir-Clave {
     Write-Host ''
 
     while ($true) {
-        $segura = Read-Host '  Clave (no se ve mientras escribís)' -AsSecureString
-        $clave = [Runtime.InteropServices.Marshal]::PtrToStringUni(
-            [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($segura)).Trim()
+        $clave = Leer-Clave-Oculta '  Clave (no se ve mientras escribís)'
 
         if ([string]::IsNullOrWhiteSpace($clave)) {
             Aviso 'Sin clave el asistente arranca pero no puede pensar. Podés ponerla después.'
@@ -233,7 +295,17 @@ function Instalar-Aplicacion {
         # Un 404 acá casi nunca es «no existe»: es un repositorio privado visto sin credenciales, y
         # GitHub contesta lo mismo en los dos casos a propósito. Decir «no encontrado» mandaría a
         # buscar un problema de red que no existe.
-        $codigo = $_.Exception.Response.StatusCode.value__
+        # Sin la comprobación, una falla que no sea HTTP —sin red, sin DNS, un proxy que no atiende—
+        # rebota contra el modo estricto al pedir una propiedad que esa excepción no tiene, y lo que
+        # se ve es «The property 'Response' cannot be found» en vez del motivo real. El peor mensaje
+        # posible es el que manda a buscar el problema donde no está.
+        $respuesta = if ($_.Exception.PSObject.Properties.Name -contains 'Response') {
+            $_.Exception.Response
+        } else {
+            $null
+        }
+
+        $codigo = if ($null -ne $respuesta) { $respuesta.StatusCode.value__ } else { 0 }
         if ($codigo -eq 404) {
             throw @'
 El repositorio no está accesible. Puede ser que sea privado y no tengas permiso.
@@ -412,14 +484,11 @@ function Guardar-Nombre([string] $nombre) {
 }
 
 <#
-    Deja el archivo donde se pega la clave de Google, si todavía no existe.
+    Deja el archivo donde vive la clave de Google, si todavía no existe.
 
-    No pide la clave acá. La de OpenRouter sí se pide —sin ella no arranca nada— pero la de Google es
-    opcional: sirve para la conversación hablada, que es otra forma de usarla y no un requisito. Pedir
-    dos claves en la instalación de algo que todavía no se sabe si va a gustar es una puerta de más.
-
-    El archivo se crea igual, con las instrucciones adentro: un archivo que ya existe y explica qué
-    va, se completa cuando uno quiere. Una variable de entorno que nadie mencionó, no.
+    El archivo se crea aunque la clave no se ponga, con las instrucciones adentro: un archivo que ya
+    existe y explica qué va, se completa cuando uno quiere. Una variable de entorno que nadie
+    mencionó, no.
 #>
 function Crear-Claves {
     if (Test-Path -LiteralPath $Claves) {
@@ -440,6 +509,98 @@ function Crear-Claves {
     New-Item -ItemType Directory -Path $Datos -Force | Out-Null
     $plantilla | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $Claves -Encoding UTF8
     Listo 'Archivo de claves creado (la de Google es opcional).'
+}
+
+<#
+    Lee el archivo de claves. Devuelve $null si no está o si alguien lo dejó ilegible.
+#>
+function Leer-Claves {
+    if (-not (Test-Path -LiteralPath $Claves)) {
+        return $null
+    }
+
+    try {
+        $crudo = Get-Content -LiteralPath $Claves -Raw
+        if ([string]::IsNullOrWhiteSpace($crudo)) { return $null }
+        return $crudo | ConvertFrom-Json
+    }
+    catch {
+        # Un archivo de claves editado a mano y roto no puede frenar la instalación. El mensaje no se
+        # muestra: podría venir con un pedazo del archivo adentro, y en ese archivo hay una clave.
+        return $null
+    }
+}
+
+<#
+    Pega la clave de Google en el archivo sin tocar el resto.
+
+    Se edita lo que hay en vez de reescribirlo entero porque adentro pueden estar VIERNES_LIVE y las
+    notas, y quien reinstala no tiene por qué perderlas. Si el archivo no se puede leer no se lo
+    pisa: es del usuario y puede tener otra clave adentro.
+#>
+function Guardar-Clave-Google([string] $clave) {
+    $archivo = Leer-Claves
+    if ($null -eq $archivo) {
+        Aviso "No pude leer $Claves, así que no lo toco. Pegá la clave a mano en GOOGLE_API_KEY."
+        return $false
+    }
+
+    if ($archivo.PSObject.Properties.Name -contains 'GOOGLE_API_KEY') {
+        $archivo.GOOGLE_API_KEY = $clave
+    }
+    else {
+        $archivo | Add-Member -NotePropertyName 'GOOGLE_API_KEY' -NotePropertyValue $clave
+    }
+
+    $archivo | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $Claves -Encoding UTF8
+    return $true
+}
+
+<#
+    Pide la clave de Google, que es opcional y por eso se explica antes de pedirla.
+
+    Antes no se pedía: el archivo se creaba con la entrada vacía y las instrucciones adentro, porque
+    pedir dos claves en la instalación de algo que todavía no se sabe si va a gustar es una puerta de
+    más. Ahora se pide igual —lo pidió quien lo usa—, pero sigue siendo opcional de verdad: Enter y
+    se sigue de largo, con el archivo creado y las instrucciones adentro como antes.
+
+    La línea que dice para qué sirve no es decoración. Nadie pega una clave que no sabe qué hace, y
+    sin esa línea la pregunta se lee como un requisito más de la instalación.
+#>
+function Pedir-Clave-Google {
+    Crear-Claves
+
+    $puestas = Leer-Claves
+    if ($null -ne $puestas -and
+        ($puestas.PSObject.Properties.Name -contains 'GOOGLE_API_KEY') -and
+        -not [string]::IsNullOrWhiteSpace($puestas.GOOGLE_API_KEY)) {
+        # Volver a correr el instalador no puede pisar la clave de nadie en silencio.
+        Listo 'Ya tenés una clave de Google configurada.'
+        $cambiar = Read-Host '  ¿La reemplazás? (s/N)'
+        if ($cambiar -notmatch '^[sS]') { return }
+    }
+
+    Titulo 'Tu clave de Google (opcional)'
+    Write-Host '  Con clave la escuchás contestar mientras piensa y la podés cortar hablándole' -ForegroundColor DarkGray
+    Write-Host '  encima. Sin clave la escuchás cuando terminó de pensar, y todo lo demás anda' -ForegroundColor DarkGray
+    Write-Host '  exactamente igual.' -ForegroundColor DarkGray
+    Write-Host '  Sacala gratis en https://aistudio.google.com/apikey — o dale Enter y seguimos.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $clave = Leer-Clave-Oculta '  Clave de Google (Enter para dejarla para después)'
+    if ([string]::IsNullOrWhiteSpace($clave)) {
+        Paso 'Sin clave de Google: anda igual, por el camino de siempre.'
+        Paso "La podés pegar cuando quieras en $Claves."
+        return
+    }
+
+    # A diferencia de la de OpenRouter, acá no se comprueba el prefijo: las claves de Google Cloud
+    # empiezan con «AIza» hoy y ese formato no está prometido en ningún lado. Una advertencia que se
+    # equivoca enseña a ignorar las advertencias.
+    if (Guardar-Clave-Google $clave) {
+        $clave = $null
+        Listo 'Clave de Google guardada en tu carpeta de datos.'
+    }
 }
 
 function Crear-Accesos([string] $nombre) {
@@ -492,6 +653,24 @@ function Detener-Aplicacion {
 #region principal
 
 try {
+    # Una sola pregunta: ¿este nombre sirve, y en qué queda?
+    #
+    # No instala nada y no imprime nada más. Existe para que una prueba pueda comprobar que estas
+    # reglas y las de AssistantIdentity dicen lo mismo: son las únicas dos que juzgan el mismo
+    # nombre, no se pueden compartir —esto corre antes de que la aplicación exista— y si se separan,
+    # el instalador acepta nombres que la aplicación rechaza o los guarda con otra forma.
+    if ($PSBoundParameters.ContainsKey('ProbarNombre')) {
+        $problema = Probar-Nombre $ProbarNombre
+        if ($null -eq $problema) {
+            Write-Output "ok`t$(Normalizar-Nombre $ProbarNombre)"
+        }
+        else {
+            Write-Output "no`t$problema"
+        }
+
+        exit 0
+    }
+
     Clear-Host
     Write-Host ''
     Write-Host '   ┌─────────────────────────────────────────────┐' -ForegroundColor Cyan
@@ -511,12 +690,17 @@ try {
     $elegido = if ($Nombre) {
         $problema = Probar-Nombre $Nombre
         if ($problema) { throw $problema }
-        (Get-Culture).TextInfo.ToTitleCase($Nombre.Trim().ToLower())
+        Normalizar-Nombre $Nombre
     } else {
         Pedir-Nombre
     }
 
-    if (-not $Nombre) { Pedir-Clave }
+    # Las tres preguntas van juntas y antes de las descargas: contestás y te vas. Preguntar algo
+    # después de los 500 MB obliga a quedarse mirando una barra para poder contestar.
+    if (-not $Nombre) {
+        Pedir-Clave
+        Pedir-Clave-Google
+    }
 
     Instalar-Aplicacion
     if (-not $SinModelo) {
