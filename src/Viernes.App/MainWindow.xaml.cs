@@ -97,6 +97,26 @@ public partial class MainWindow : Window
     /// <summary>Cuadros que quedan por anotar del vuelo en curso.</summary>
     private int _afterDrop;
 
+    /// <summary>
+    /// Los últimos cuadros del arrastre, para poder mirarlos después de soltar.
+    /// </summary>
+    /// <remarks>
+    /// Es un anillo y no una lista que crece: lo que importa es el final del gesto —el envión y la
+    /// pausa antes de levantar el dedo— y un arrastre puede durar minutos. Se vuelca en
+    /// <see cref="EndDrag"/>, que es cuando se sabe cuál era el final.
+    /// <para>
+    /// Hace falta porque medir sólo el instante de soltar no alcanza: el primer tiro sintético dio
+    /// <c>tiro=11 px/s</c> con el orbe 37 px <em>adelante</em> del objetivo, o sea que ya lo había
+    /// alcanzado y estaba volviendo. Eso no se explica desde el instante de soltar: se explica
+    /// mirando si el objetivo venía siguiendo al cursor durante el arrastre, o no.
+    /// </para>
+    /// </remarks>
+    private readonly (double Dt, Point Target, Point Position, double Speed, bool Held)[] _dragTrail =
+        new (double, Point, Point, double, bool)[24];
+
+    private int _dragTrailNext;
+    private int _dragTrailCount;
+
     /// <summary>Dónde agarró el dedo, respecto de la esquina del orbe. Sin esto el orbe salta al dedo.</summary>
     private Vector _grab;
 
@@ -633,6 +653,28 @@ public partial class MainWindow : Window
         // hacia un objetivo viejo durante varios cuadros y después pegaba el tirón. El cursor no
         // necesita eventos: se pregunta al sistema y contesta siempre, cueste lo que cueste el
         // cuadro anterior.
+        // El arrastre termina acá y no cuando llega el evento de soltar. Medido, y es EL defecto.
+        //
+        // CompositionTarget.Rendering corre en prioridad Render; los eventos de mouse, en Input, que
+        // es más baja. El cuerpo cuesta unos 11 ms por cuadro y el cuadro dura 5,56 a 180 Hz, así
+        // que el hilo está permanentemente saturado y el mouse-up hace cola detrás del dibujo.
+        //
+        // Medido con un tiro sintético: el botón se suelta de verdad en un cuadro y EndDrag corre
+        // DIECINUEVE cuadros después, 222 ms más tarde. En el ínterin el arrastre sigue vivo, el
+        // resorte alcanza al cursor que ya está quieto, lo pasa 37 px y se muere: la velocidad va de
+        // 3129 px/s a 6. Eso es, en las palabras del usuario, «se queda pegado al mouse», «no deja
+        // soltarlo» y «no lo puedo tirar» —tres síntomas y una sola causa—.
+        //
+        // Es exactamente el mismo defecto que se arregló para la POSICIÓN del cursor unas versiones
+        // atrás, con el mismo razonamiento y sin darse cuenta de que al botón le pasaba igual: al
+        // sistema se le pregunta y contesta siempre, cueste lo que cueste el cuadro anterior. Los
+        // manejadores de eventos quedan igual, de respaldo: si alguno llega primero, encuentra el
+        // arrastre ya terminado y se va.
+        if (_motion.IsDragging && !ButtonHeld())
+        {
+            EndDrag("sondeo");
+        }
+
         if (_motion.IsDragging)
         {
             // El objetivo se recorta; la POSICIÓN no. La diferencia es todo el arreglo.
@@ -659,6 +701,13 @@ public partial class MainWindow : Window
         }
 
         _motion.Step(dt, bounds);
+
+        if (_motion.IsDragging)
+        {
+            _dragTrail[_dragTrailNext] = (dt, _motion.Target, _motion.Position, _motion.Speed, ButtonHeld());
+            _dragTrailNext = (_dragTrailNext + 1) % _dragTrail.Length;
+            _dragTrailCount++;
+        }
 
         if (!_motion.IsDragging)
         {
@@ -787,6 +836,20 @@ public partial class MainWindow : Window
         // recorta igual, pero lo que se guardaba no era dónde quedó.
         SaveOrbPlacement();
     }
+
+    /// <summary>Si el botón izquierdo está apretado AHORA, según el hardware.</summary>
+    /// <remarks>
+    /// No es <c>Mouse.LeftButton</c>: ése es el estado que WPF dedujo del último evento que llegó a
+    /// procesar, y llegar a procesarlo es justamente lo que está en duda. Esto le pregunta al
+    /// sistema, que contesta siempre y cueste lo que cueste el cuadro anterior.
+    /// </remarks>
+    private static bool ButtonHeld() =>
+        (GetAsyncKeyState(VkLeftButton) & 0x8000) != 0;
+
+    private const int VkLeftButton = 0x01;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int key);
 
     /// <summary>Un punto llevado adentro de un rectángulo, sin moverlo si ya estaba.</summary>
     private static Point Clamp(Point point, Rect bounds) => new(
@@ -1889,7 +1952,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Termina el arrastre y lo suelta con la velocidad que traía el resorte.</summary>
-    private void EndDrag()
+    private void EndDrag(string por = "evento")
     {
         if (!_dragging)
         {
@@ -1912,10 +1975,27 @@ public partial class MainWindow : Window
         var cursor = PointerPosition() - _grab;
         Diagnostics.RuntimeTrace.Write(
             "orbe.suelto",
-            $"tiro={_motion.Speed:0} px/s · retraso={(_motion.Target - _motion.Position).Length:0} px · " +
+            $"por={por} · tiro={_motion.Speed:0} px/s · retraso={(_motion.Target - _motion.Position).Length:0} px · " +
             $"objetivo=({_motion.Target.X:0};{_motion.Target.Y:0}) · " +
             $"cursor=({cursor.X:0};{cursor.Y:0}) · " +
             $"orbe=({_motion.Position.X:0};{_motion.Position.Y:0})");
+
+        // Los últimos cuadros del arrastre, en orden. Sin esto, «salió a 11 px/s» no se puede
+        // explicar: hay que ver si el objetivo venía siguiendo al cursor o se había quedado.
+        var vueltas = Math.Min(_dragTrailCount, _dragTrail.Length);
+        var desde = _dragTrailCount <= _dragTrail.Length ? 0 : _dragTrailNext;
+        for (var i = 0; i < vueltas; i++)
+        {
+            var m = _dragTrail[(desde + i) % _dragTrail.Length];
+            Diagnostics.RuntimeTrace.Write(
+                "orbe.arrastre",
+                $"n={i - vueltas} · dt={m.Dt * 1000:0.0} ms · v={m.Speed:0} px/s · " +
+                $"objetivo=({m.Target.X:0};{m.Target.Y:0}) · orbe=({m.Position.X:0};{m.Position.Y:0}) · " +
+                $"atraso={(m.Target - m.Position).Length:0} px · boton={(m.Held ? "APRETADO" : "suelto")}");
+        }
+
+        _dragTrailCount = 0;
+        _dragTrailNext = 0;
 
         _motion.Drop();
         _afterDrop = FlightSamples;
@@ -1987,7 +2067,7 @@ public partial class MainWindow : Window
     /// Sin esto el orbe quedaría pegado al último objetivo y <c>IsDragging</c> encendido para
     /// siempre: la física no volvería a volar ni a imantar, y el vidrio no se abriría nunca más.
     /// </remarks>
-    private void Orb_LostMouseCapture(object sender, MouseEventArgs e) => EndDrag();
+    private void Orb_LostMouseCapture(object sender, MouseEventArgs e) => EndDrag("captura perdida");
 
     private void OrbButton_Click(object sender, RoutedEventArgs e) => HandleOrbTap();
 
