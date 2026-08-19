@@ -28,7 +28,7 @@ public sealed class BoundaryTests : IDisposable
         await this.harness.Autonomy.LearnAsync(
             "mision", "*", AutonomyLevel.Preguntar, "Las misiones las abro yo");
 
-        var reply = await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        var reply = await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
 
         Assert.False(reply.Ok);
         Assert.Contains("necesita que lo autorices", reply.Text, StringComparison.Ordinal);
@@ -52,7 +52,7 @@ public sealed class BoundaryTests : IDisposable
     {
         // Cancelar con motivo escribe DOS cosas y consultaba por una sola: la línea de la bitácora
         // la escribe AdvanceAsync, o sea «mision avanzar», y entraba igual con ese permiso en Nunca.
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
         var antes = (await this.harness.Missions.ListAsync(onlyOpen: false))[0].Log.Count;
         await this.harness.Autonomy.LearnAsync("mision avanzar", "*", AutonomyLevel.Nunca);
 
@@ -80,7 +80,7 @@ public sealed class BoundaryTests : IDisposable
         // escribe con AdvanceAsync; la de cerrar escribe la nota adentro de CloseAsync, y seguía
         // consultando sólo por «mision cerrar». Dos caminos, el mismo efecto: una línea en la
         // bitácora bajo un permiso que no es el suyo.
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
         var antes = (await this.harness.Missions.ListAsync(onlyOpen: false))[0].Log.Count;
         await this.harness.Autonomy.LearnAsync("mision avanzar", "*", AutonomyLevel.Nunca);
 
@@ -105,7 +105,7 @@ public sealed class BoundaryTests : IDisposable
     {
         // El otro lado de la prueba de arriba: sin permiso prohibido, la nota tiene que entrar. Sin
         // esto, «no escribe la bitácora» pasaría también si el arreglo la hubiera roto para todos.
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
 
         var reply = await this.harness.Connector.CloseMissionAsync(
             "m1", "Salió andando en producción", cancelled: false);
@@ -134,18 +134,18 @@ public sealed class BoundaryTests : IDisposable
     [Fact]
     public async Task UnPermisoSobreUnaMisionEnParticular_NoFrenaLasDemas()
     {
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
         await this.harness.Connector.CreateMissionAsync("Revisar el banco", "Que mida bien");
-        await this.harness.Autonomy.LearnAsync("mision cerrar", "flow-bi", AutonomyLevel.Preguntar);
+        await this.harness.Autonomy.LearnAsync("mision cerrar", "tablero", AutonomyLevel.Preguntar);
 
-        var frenada = await this.harness.Connector.CloseMissionAsync("Flow-Bi", "listo");
+        var frenada = await this.harness.Connector.CloseMissionAsync("tablero", "listo");
         var libre = await this.harness.Connector.CloseMissionAsync("banco", "listo");
 
         Assert.False(frenada.Ok);
         Assert.True(libre.Ok);
 
         var abiertas = await this.harness.Missions.ListAsync();
-        Assert.Equal("Seguir Flow-Bi", Assert.Single(abiertas).Title);
+        Assert.Equal("Seguir el tablero", Assert.Single(abiertas).Title);
     }
 
     [Fact]

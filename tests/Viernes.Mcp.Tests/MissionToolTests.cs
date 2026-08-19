@@ -17,26 +17,26 @@ public sealed class MissionToolTests : IDisposable
     public async Task Crear_DejaLaMisionEnElMismoLibroQueLeeLaAplicacion()
     {
         var reply = await this.harness.Connector.CreateMissionAsync(
-            "Seguir Flow-Bi", "Avisar cuando el informe esté", "C:\\Flow-Bi");
+            "Seguir el tablero", "Avisar cuando el informe esté", "C:\\proyectos\\tablero");
 
         Assert.True(reply.Ok);
 
         var stored = Assert.Single(await this.harness.Missions.ListAsync());
-        Assert.Equal("Seguir Flow-Bi", stored.Title);
+        Assert.Equal("Seguir el tablero", stored.Title);
         Assert.Equal("Avisar cuando el informe esté", stored.Goal);
-        Assert.Equal("C:\\Flow-Bi", stored.Context);
+        Assert.Equal("C:\\proyectos\\tablero", stored.Context);
     }
 
     [Fact]
     public async Task Listar_CuentaQueFaltaYDesdeCuando()
     {
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
         await this.harness.Connector.AdvanceMissionAsync("m1", "Revisé el repo");
 
         var reply = await this.harness.Connector.ListMissionsAsync();
 
         Assert.True(reply.Ok);
-        Assert.Contains("[m1] Seguir Flow-Bi", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("[m1] Seguir el tablero", reply.Text, StringComparison.Ordinal);
         Assert.Contains("se cumple cuando: Avisar cuando esté", reply.Text, StringComparison.Ordinal);
         Assert.Contains("Revisé el repo", reply.Text, StringComparison.Ordinal);
         Assert.Contains("abierta desde", reply.Text, StringComparison.Ordinal);
@@ -45,7 +45,7 @@ public sealed class MissionToolTests : IDisposable
     [Fact]
     public async Task Preguntar_DejaLaPreguntaEsperandoAlUsuario()
     {
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
 
         var reply = await this.harness.Connector.AskInMissionAsync("m1", "¿Migro los tests o los reescribo?");
 
@@ -61,7 +61,7 @@ public sealed class MissionToolTests : IDisposable
     [Fact]
     public async Task Cerrar_Cancelada_DejaElMotivoEscrito()
     {
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
 
         var reply = await this.harness.Connector.CloseMissionAsync(
             "m1", "El cliente frenó el proyecto", cancelled: true);

@@ -34,7 +34,7 @@ public sealed class MissionBookTests : IDisposable
     public async Task LaPreguntaPendienteSobreviveAlReinicio()
     {
         var antes = new MissionBook(this.path);
-        var mission = await antes.CreateAsync("Seguir Flow-Bi", "Avisarme");
+        var mission = await antes.CreateAsync("Seguir el tablero", "Avisarme");
         await antes.AskAsync(mission.Id, "¿Migro los tests o los reescribo?");
 
         // Un libro nuevo sobre el mismo archivo es exactamente lo que pasa al reiniciar la máquina.
@@ -49,7 +49,7 @@ public sealed class MissionBookTests : IDisposable
     public async Task Responder_DestrabaYDejaConstanciaDeLoQueDijiste()
     {
         var book = new MissionBook(this.path);
-        var mission = await book.CreateAsync("Seguir Flow-Bi", "Avisarme");
+        var mission = await book.CreateAsync("Seguir el tablero", "Avisarme");
         await book.AskAsync(mission.Id, "¿Migro o reescribo?");
 
         var answered = await book.AnswerAsync(mission.Id, "Reescribilos");
@@ -70,7 +70,7 @@ public sealed class MissionBookTests : IDisposable
         var book = new MissionBook(this.path);
         var otra = await book.CreateAsync("Revisar mails", "Todos los días");
         await book.AdvanceAsync(otra.Id, "Revisados");
-        var frenada = await book.CreateAsync("Seguir Flow-Bi", "Avisarme");
+        var frenada = await book.CreateAsync("Seguir el tablero", "Avisarme");
         await book.AskAsync(frenada.Id, "¿Migro o reescribo?");
 
         var answered = await book.AnswerAsync(string.Empty, "Reescribilos");
@@ -112,7 +112,7 @@ public sealed class MissionBookTests : IDisposable
     public async Task DescribeOpen_NombraLaPreguntaSinContestar()
     {
         var book = new MissionBook(this.path);
-        var mission = await book.CreateAsync("Seguir Flow-Bi", "Avisarme");
+        var mission = await book.CreateAsync("Seguir el tablero", "Avisarme");
         await book.AskAsync(mission.Id, "¿Migro o reescribo?");
 
         var described = await book.DescribeOpenAsync();

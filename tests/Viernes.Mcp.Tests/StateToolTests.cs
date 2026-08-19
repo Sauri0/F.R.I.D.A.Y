@@ -14,7 +14,7 @@ public sealed class StateToolTests : IDisposable
     [Fact]
     public async Task Estado_PoneAdelanteLoQueEstaEsperandoAlUsuario()
     {
-        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        await this.harness.Connector.CreateMissionAsync("Seguir el tablero", "Avisar cuando esté");
         await this.harness.Connector.AskInMissionAsync("m1", "¿Migro los tests o los reescribo?");
         this.harness.WriteSession("C:\\proyectos\\Alfa", "alfa", working: true);
 
