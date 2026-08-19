@@ -201,14 +201,33 @@ public sealed class GeminiLiveOptions
     /// que grite; acá lo peor que pasa es que el silencio de fin de turno quede en 700 en vez de en
     /// 650, y que eso impida abrir el programa sería desproporcionado.
     /// </remarks>
+    /// <param name="readVariable">De dónde salen los valores.</param>
+    /// <param name="systemInstruction">La instrucción de sistema de la sesión hablada.</param>
+    /// <param name="hasKey">
+    /// Si hay clave de Google puesta. Es lo que decide el valor por omisión del interruptor.
+    /// </param>
     public static GeminiLiveOptions FromEnvironment(
         Func<string, string?>? readVariable = null,
-        string? systemInstruction = null)
+        string? systemInstruction = null,
+        bool hasKey = false)
     {
         readVariable ??= Environment.GetEnvironmentVariable;
 
         return new GeminiLiveOptions(
-            enabled: ParseBoolean(readVariable(EnabledEnvironmentVariable), defaultValue: false),
+            // Arranca prendida si hay clave, y eso es un cambio deliberado.
+            //
+            // Estaba en false fijo. El usuario abría claves.json, pegaba su clave de Google
+            // justamente para tener la sesión hablada, guardaba, y la sesión no se usaba nunca:
+            // la traza decía «la sesión en vivo está apagada por configuración» y el interruptor
+            // ni siquiera figuraba en el archivo que se le pidió que editara. Todo el camino nuevo
+            // quedaba escrito y muerto, que es exactamente el modo de falla que este proyecto
+            // viene persiguiendo.
+            //
+            // Pegar la clave ES la decisión. Pedir dos gestos para encender una sola cosa —pegar
+            // la clave y además descubrir una variable sin documentar— no es prudencia, es una
+            // función que no existe. Quien quiera el camino de siempre teniendo clave puesta,
+            // escribe VIERNES_LIVE=false y listo.
+            enabled: ParseBoolean(readVariable(EnabledEnvironmentVariable), defaultValue: hasKey),
             model: readVariable(ModelEnvironmentVariable),
             voiceName: readVariable(VoiceEnvironmentVariable),
             systemInstruction: systemInstruction,

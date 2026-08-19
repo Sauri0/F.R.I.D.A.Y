@@ -434,8 +434,15 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// Deja la línea que llegó del runtime.
     /// </summary>
     /// <remarks>
-    /// La colección se rellena en lugar de reemplazarse para no obligar a la interfaz a rearmar la
-    /// vista entera en cada palabra: esto llega varias veces por segundo mientras alguien habla.
+    /// Se conserva la <em>instancia</em> de la colección —los enlaces no se rompen— pero el contenido
+    /// se rehace entero: <c>Clear</c> emite un Reset y después entran N altas. Lo dice así porque acá
+    /// hubo un comentario que prometía rellenar en su lugar «para no rearmar la vista en cada
+    /// palabra», y el cuerpo hacía exactamente eso que decía evitar.
+    /// <para>
+    /// Rehacerla está bien igual: son unas pocas decenas de palabras y llegan varias veces por
+    /// segundo, no cientos. Si algún día se nota, el arreglo es comparar y tocar sólo la última —que
+    /// es la única que cambia de calidad—, no cambiar el comentario.
+    /// </para>
     /// </remarks>
     private void SetDictation(IReadOnlyList<Viernes.Core.Voice.DictationWord> words, TimeSpan recovered)
     {

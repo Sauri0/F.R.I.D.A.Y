@@ -84,7 +84,12 @@ internal sealed partial class AssistantRuntime
 
         // La instrucción se arma acá y no en Core porque lleva el nombre que eligió quien instaló, y
         // ese nombre vive en las preferencias — que a esta altura ya se leyeron.
-        var options = GeminiLiveOptions.FromEnvironment(ReadLiveSetting, BuildLiveInstruction());
+        // La clave decide el valor por omisión del interruptor: pegarla en claves.json es la forma
+        // en que el usuario pide la sesión hablada, y es el único gesto que se le pidió.
+        var options = GeminiLiveOptions.FromEnvironment(
+            ReadLiveSetting,
+            BuildLiveInstruction(),
+            hasKey: !string.IsNullOrWhiteSpace(LocalCredentials.Get("GOOGLE_API_KEY")));
 
         var session = new LiveVoiceSession(
             options,

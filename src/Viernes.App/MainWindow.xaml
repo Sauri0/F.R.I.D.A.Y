@@ -42,6 +42,8 @@
         <shell:StateColorConverter x:Key="StateColor" />
         <shell:EmptyToVisibilityConverter x:Key="WhenEmpty" />
         <shell:FilledToVisibilityConverter x:Key="WhenFilled" />
+        <shell:DictationOpacityConverter x:Key="DictadoAlfa" />
+        <shell:DictationStyleConverter x:Key="DictadoEstilo" />
 
         <!--
             Jerarquía tipográfica dentro de 140 px de alto útil. Una sola línea primaria por panel:
@@ -1600,15 +1602,47 @@
                                     Background="{Binding State, Converter={StaticResource StateBrush}}" />
                         </Border>
                     </StackPanel>
+                    <!--
+                        El encabezado del tramo recuperado. Aparece sólo cuando hay algo que recuperar,
+                        que es cuando dijiste el nombre en el medio de una frase: sin él, lo que dijiste
+                        ANTES de nombrarla se lee igual que lo que le dijiste a ella, y eso se siente
+                        como espiar aunque el asistente esté haciendo exactamente lo que le pediste.
+                    -->
                     <TextBlock Margin="0,7,0,0"
                                FontFamily="{StaticResource UiFont}"
-                               FontSize="12.5"
-                               LineHeight="17"
+                               FontSize="10.5"
                                Foreground="#FFF4F4F7"
-                               TextWrapping="Wrap"
-                               MaxHeight="52"
-                               TextTrimming="CharacterEllipsis"
-                               Text="{Binding DictationText}" />
+                               Opacity="0.40"
+                               Text="{Binding RecoveredDictationLabel}"
+                               Visibility="{Binding HasRecoveredDictation, Converter={StaticResource BoolVisibility}}" />
+
+                    <!--
+                        Una palabra por celda y no un solo TextBlock: las tres calidades se deciden por
+                        palabra —lo recuperado al 40 %, lo confirmado pleno, y la última en itálica al
+                        60 % mientras se está formando— y eso no se puede pintar con un Text= suelto.
+                        El WrapPanel las acomoda como texto corrido.
+                    -->
+                    <ItemsControl Margin="0,4,0,0"
+                                  MaxHeight="52"
+                                  ItemsSource="{Binding DictationWords}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Margin="0,0,4,0"
+                                           FontFamily="{StaticResource UiFont}"
+                                           FontSize="12.5"
+                                           LineHeight="17"
+                                           Foreground="#FFF4F4F7"
+                                           Text="{Binding Text}"
+                                           Opacity="{Binding Quality, Converter={StaticResource DictadoAlfa}}"
+                                           FontStyle="{Binding Quality, Converter={StaticResource DictadoEstilo}}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
                 </StackPanel>
             </Border>
         </Grid>

@@ -2500,6 +2500,22 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         }
 
         var result = await _wakeWord.StopAsync(cancellationToken).ConfigureAwait(false);
+
+        // Parar el oído tira la frase que se estaba armando —el ensamblador hace Reset y suelta el
+        // pre-roll sin emitir nada—, así que la espera abierta por el nombre no se va a cerrar nunca
+        // sola. Bajar el pestillo acá, en el único punto por donde pasan todos, es lo que impide el
+        // peor modo de falla que tuvo este proyecto: decís «Viernes», empezás a hablar, y antes de
+        // terminar escribís en el panel o silenciás. La frase se pierde, el pestillo queda arriba, y
+        // a partir de ahí la app sigue escuchando, sigue reconociendo el nombre, y no vuelve a abrir
+        // una conversación NUNCA MÁS hasta reiniciar. Sin un renglón en la bitácora.
+        //
+        // Y el orquestador también: quedaba creyendo que escuchaba.
+        if (Interlocked.Exchange(ref _awaitingUtterance, 0) != 0)
+        {
+            _orchestrator.SetListening(false);
+            RuntimeTrace.Write("wake.espera.cortada", "se paró el oído antes de que cerrara la frase");
+        }
+
         RuntimeTrace.Write(
             "wake.pausado",
             $"ok={result.Succeeded} · estado={_wakeWord.State} · micrófono={_wakeWord.IsMicrophoneActive}");
