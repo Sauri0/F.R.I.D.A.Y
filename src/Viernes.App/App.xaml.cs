@@ -262,7 +262,20 @@ public partial class App : System.Windows.Application
             _window.WindowState = WindowState.Normal;
         }
 
-        _window.Activate();
+        // Show() sola devuelve una ventana vacía. El orbe puede haberse guardado encogiéndose hacia
+        // el borde —así se guardan el botón de esconder y el cierre de la ventana— y en ese caso la
+        // presencia sigue en cero: la ventana vuelve y no se ve nada. Ésta es la puerta que lo trae
+        // de vuelta, y también la única que consulta la pantalla completa.
+        _window.ShowWithoutStealingFocus();
+
+        // El foco sí, porque acá lo pediste desde la bandeja y esperás poder hablarle. Salvo que
+        // haya una pantalla completa adelante: ahí estás mirando otra cosa y quitarte el teclado es
+        // lo peor que puede hacer un asistente de escritorio.
+        if (!_window.IsUnderFullScreenNow())
+        {
+            _window.Activate();
+        }
+
         _ = _viewModel?.SetShellVisibilityAsync(true, CancellationToken.None);
         _trayIcon?.SetWindowVisible(true);
     }
@@ -303,6 +316,12 @@ public partial class App : System.Windows.Application
     /// Viernes pide presencia: se muestra sin robar el foco del teclado, para no interrumpir lo que
     /// el usuario esté escribiendo en otra ventana.
     /// </summary>
+    /// <remarks>
+    /// Por acá entra la palabra de activación, y por acá se colaba el peor caso: un falso positivo
+    /// del nombre durante una partida devolvía el cuerpo entero y siempre-arriba encima del juego,
+    /// donde se quedaba hasta que el juego terminara. La pantalla completa se pregunta ahora, en el
+    /// momento; no se hereda de la última vez que alguien la miró.
+    /// </remarks>
     private void ViewModelOnActivationRequested(object? sender, ShellActivationRequest request)
     {
         if (_window is null)
@@ -324,13 +343,30 @@ public partial class App : System.Windows.Application
         }
 
         HideEdgeMark();
-        MoveToCursorMonitor();
-        _window.Topmost = true;
+
+        // Se pregunta con la ventana ya visible: escondida, el vigía de la ventana suelta la
+        // condición a propósito —guardado no hay nada que esconder— y preguntar antes daría «no
+        // hay» siempre.
+        var underFullScreen = _window.IsUnderFullScreenNow();
+
+        // Nada de mudarse de monitor con una pantalla completa adelante: mueve un cuerpo que no se
+        // va a dibujar, y la mudanza necesita el bucle de cuadro, que con la ventana tapada por un
+        // juego WPF deja de disparar.
+        if (!underFullScreen)
+        {
+            MoveToCursorMonitor();
+        }
+
+        // La ventana decide qué se ve: el cuerpo entero, o la píldora y nada más. Topmost ya no se
+        // pone desde acá —lo pone ella al devolver el cuerpo—: escrito desde afuera volvía a subir
+        // al frente justo lo que EnterFullScreen había bajado para no sacar de su modo a un juego en
+        // pantalla completa exclusiva.
         _window.ShowWithoutStealingFocus();
 
         // Sólo hay llegada cuando realmente venía de estar guardado; si ya estaba a la vista, saltar
-        // desde la bandeja sería una animación mentirosa.
-        if (wasHidden)
+        // desde la bandeja sería una animación mentirosa. Y nunca con una pantalla completa
+        // adelante, donde no hay dónde aterrizar.
+        if (wasHidden && !underFullScreen)
         {
             _window.PlayArrivalFromTray();
         }

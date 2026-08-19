@@ -31,6 +31,36 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     private LiveOrbMoment _moment = LiveOrbMoment.Listening;
     private bool _waitingForReply;
     private bool _echoRun;
+
+    /// <summary>Cuánta voz lleva este tramo con el parlante ya callado.</summary>
+    /// <remarks>
+    /// Es lo único que separa el eco de alguien hablando encima de la cola de la respuesta: el eco
+    /// <em>es</em> el parlante, así que no puede sobrevivirlo, y una persona sí. Ver
+    /// <see cref="NoteUserAudio"/>.
+    /// </remarks>
+    /// <summary>
+    /// Cuánta voz con el parlante ya callado hace falta para creer que no es la cola del eco.
+    /// </summary>
+    /// <remarks>
+    /// Contra cero no alcanzaba, y ese fue el arreglo anterior. El eco no deja de existir en el
+    /// instante en que la cola llega a cero: entre el parlante y el bloque que se está clasificando
+    /// hay el búfer de captura, la latencia del driver de entrada, la propagación del cuarto, y sobre
+    /// todo la histéresis del detector —una vez adentro de una frase sigue diciendo «voz» con una
+    /// probabilidad más baja de la que hizo falta para entrar—. Un solo bloque de 20 ms de eco
+    /// residual alcanzaba para que la cola se leyera como una persona hablando, y el orbe volvía a
+    /// quedarse clavado en «Pensando…» sin que nadie hubiera hablado: el mismo síntoma que el arreglo
+    /// venía a cerrar, entrando por la puerta de al lado.
+    /// <para>
+    /// 180 ms parte los dos casos con margen: alguien que le habla encima pasa ese umbral con la
+    /// primera sílaba, y una cola de eco —que son unas pocas decenas de milisegundos por encima del
+    /// margen de la medición de la cola— no llega. No sale del fuente de los bocetos: es una
+    /// constante de esta implementación y por eso está acá, con su razón, en vez de escrita en la
+    /// comparación.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan MinimumVoiceOverEcho = TimeSpan.FromMilliseconds(180);
+
+    private TimeSpan _voiceAfterSpeaker;
     private TimeSpan _idleSilence;
     private bool _quietRaised;
     private int _drainWatch;
@@ -216,6 +246,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
 
         _speechGate.Reset();
         _echoRun = false;
+        _voiceAfterSpeaker = TimeSpan.Zero;
         _idleSilence = TimeSpan.Zero;
         _quietRaised = false;
         SetWaiting(false);
@@ -250,6 +281,13 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     /// si contara siempre, el eco de una respuesta larga dibujaría «pensando» encima de «hablando».
     /// </para>
     /// <para>
+    /// Y por eso el tramo marcado como eco se sigue mirando en vez de darse por perdido: el eco no
+    /// puede durar más que el parlante —es el parlante—, así que voz con el parlante ya callado es
+    /// alguien hablando de verdad. Eso descansa en que <see cref="ILiveAudioSink.Pending"/> no llegue
+    /// a cero antes de tiempo; <c>LiveSpeakerSink</c> le suma lo que el driver tiene en la mano
+    /// justamente para eso.
+    /// </para>
+    /// <para>
     /// Lo llama un solo hilo, el del dispositivo de captura. La compuerta no lleva candado por eso;
     /// llamarlo desde varios lados a la vez le desordenaría el contador de silencio.
     /// </para>
@@ -260,6 +298,14 @@ public sealed class LiveVoiceSession : IAsyncDisposable
 
         TrackAbandonment(isVoice, blockDuration);
 
+        // Mientras el tramo marcado como eco sigue abierto se cuenta la voz que llega con el
+        // parlante ya callado. Va antes de la salida por «no hubo borde» porque el tramo son
+        // justamente todos esos bloques del medio, que es donde está la única evidencia disponible.
+        if (_echoRun && isVoice && !IsSpeakerBusy)
+        {
+            _voiceAfterSpeaker += blockDuration;
+        }
+
         if (edge == LiveSpeechEdge.None)
         {
             return;
@@ -267,26 +313,35 @@ public sealed class LiveVoiceSession : IAsyncDisposable
 
         if (edge == LiveSpeechEdge.Started)
         {
-            // Si arrancó con los parlantes sonando, esto es su propia voz volviendo por el
-            // micrófono. Se anota acá —en el borde de arranque— porque cuando llegue el borde de
-            // «terminó» ya no queda con qué distinguirlo: para entonces el parlante hace rato que se
-            // calló y el eco se lee igual que una frase de la persona.
+            // Si arrancó con los parlantes sonando, esto es —por ahora— su propia voz volviendo por
+            // el micrófono. Se anota acá, en el borde de arranque, porque es el único momento en que
+            // se sabe: cuando llegue el borde de «terminó» el parlante hace rato que se calló.
             _echoRun = IsSpeakerBusy;
+            _voiceAfterSpeaker = TimeSpan.Zero;
             SetWaiting(false);
             Refresh();
             return;
         }
 
-        if (_echoRun)
+        if (_echoRun && _voiceAfterSpeaker < MinimumVoiceOverEcho)
         {
-            // Era la cola del eco de la respuesta anterior: la compuerta necesita 700 ms de silencio
-            // para cerrar, así que este borde llega bastante después de que el parlante se calló, con
-            // el turno ya en reposo. Sin esta marca, el orbe quedaba clavado en «Pensando…» sin que
-            // nadie hubiera hablado — y encima tapaba «En vivo · decime «listo» para cortar», que es
-            // el único lugar donde se dice cómo cerrar la charla.
+            // Era la cola del eco de la respuesta anterior y nada más. La compuerta necesita 700 ms
+            // de silencio para cerrar, así que este borde llega bastante después, con el turno ya en
+            // reposo. Sin esta marca, el orbe quedaba clavado en «Pensando…» sin que nadie hubiera
+            // hablado — y encima tapaba «En vivo · decime «listo» para cortar», que es el único lugar
+            // donde se dice cómo cerrar la charla.
             _echoRun = false;
             return;
         }
+
+        // El tramo cierra como frase de alguien: o nunca fue eco, o empezó como eco y siguió con el
+        // parlante ya callado, que es hablarle encima mientras drena la respuesta. Ese segundo caso
+        // quedaba tragado entero por la marca: el servidor no manda «interrupted» —ya no está
+        // generando— así que nadie la borraba, no había SetWaiting(true), y el orbe se quedaba en «te
+        // escucho» durante toda la latencia del modelo. La prueba que había cubría el caso con
+        // interrupción del servidor, que es otro.
+        _echoRun = false;
+        _voiceAfterSpeaker = TimeSpan.Zero;
 
         if (_client.TurnState == LiveTurnState.Idle && !IsSpeakerBusy)
         {
@@ -363,6 +418,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         await _client.StopAsync().ConfigureAwait(false);
         _speechGate.Reset();
         _echoRun = false;
+        _voiceAfterSpeaker = TimeSpan.Zero;
         _idleSilence = TimeSpan.Zero;
         _quietRaised = false;
         SetWaiting(false);
@@ -424,6 +480,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         // callado y no se va a confundir con eco. Sin borrarlo acá, la marca de la respuesta que
         // acaba de cortar se llevaba puesto el «pensando» de la frase nueva.
         _echoRun = false;
+        _voiceAfterSpeaker = TimeSpan.Zero;
         Publish(LiveOrbMoment.Interrupted);
     }
 

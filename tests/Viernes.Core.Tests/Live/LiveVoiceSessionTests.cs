@@ -714,6 +714,87 @@ public sealed class LiveVoiceSessionTests
     }
 
     [Fact]
+    public async Task HablarleEncimaMientrasDrenaLaRespuesta_NoSeLeeComoEco()
+    {
+        // El caso que faltaba: la persona arranca a hablar DESPUÉS del turnComplete pero con el
+        // parlante todavía drenando. El servidor no manda «interrupted» —ya no está generando—, así
+        // que nada borraba la marca del eco: su pedido se leía como eco, no había SetWaiting(true), y
+        // el orbe se quedaba en «te escucho» durante toda la latencia del modelo. La prueba que
+        // existía cubre el caso CON interrupción del servidor, que es otro.
+        var (sesion, banco, parlantes) = ArmarConParlanteLento();
+        await using var _guard = sesion;
+        await sesion.StartAsync();
+
+        banco.Last.Deliver(AudioMessage(24_000 * 2));
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Speaking));
+
+        banco.Last.Deliver("""{"serverContent":{"turnComplete":true}}""");
+        Assert.True(await EsperarAsync(() => sesion.TurnState == LiveTurnState.Idle));
+        Assert.True(sesion.IsSpeakerBusy);
+
+        var bloque = TimeSpan.FromMilliseconds(20);
+
+        // Arranca a hablar con la cola sonando: por el borde de arranque, esto se anota como eco.
+        sesion.NoteUserAudio(isVoice: true, bloque);
+
+        // El parlante termina y ella sigue hablando. El eco no puede sobrevivir al parlante: es el
+        // parlante. Esto es una persona.
+        parlantes.Drain();
+        for (var i = 0; i < 10; i++)
+        {
+            sesion.NoteUserAudio(isVoice: true, bloque);
+        }
+
+        for (var i = 0; i < 40; i++)
+        {
+            sesion.NoteUserAudio(isVoice: false, bloque);
+        }
+
+        Assert.Equal(LiveOrbMoment.Thinking, sesion.Moment);
+    }
+
+    [Fact]
+    public async Task UnaColaDeEcoQueSobrevivePocosBloques_SigueSiendoEco()
+    {
+        // El borde de al lado del arreglo anterior. La cola del eco no termina en el mismo
+        // instante en que la cola del parlante llega a cero: entre el parlante y el bloque que se
+        // está clasificando hay el búfer de captura, la latencia del driver, la propagación del
+        // cuarto y la histéresis del detector, que una vez adentro de una frase sigue diciendo
+        // «voz» con menos probabilidad de la que hizo falta para entrar.
+        //
+        // Comparando contra cero, DOS bloques de 20 ms de eco residual alcanzaban para que esto se
+        // leyera como una persona y el orbe quedara clavado en «Pensando…» sin que nadie hubiera
+        // hablado — el mismo síntoma que el arreglo venía a cerrar, entrando por la puerta de al
+        // lado. Y no se despinta solo: se queda ahí tapando «decime «listo» para cortar» hasta que
+        // alguien hable de verdad.
+        var (sesion, banco, parlantes) = ArmarConParlanteLento();
+        await using var _guard = sesion;
+        await sesion.StartAsync();
+
+        banco.Last.Deliver(AudioMessage(24_000 * 2));
+        Assert.True(await EsperarAsync(() => sesion.Moment == LiveOrbMoment.Speaking));
+
+        banco.Last.Deliver("""{"serverContent":{"turnComplete":true}}""");
+        Assert.True(await EsperarAsync(() => sesion.TurnState == LiveTurnState.Idle));
+
+        var bloque = TimeSpan.FromMilliseconds(20);
+        sesion.NoteUserAudio(isVoice: true, bloque);
+
+        // La cola se vacía y quedan dos bloques de eco residual. Cuarenta milisegundos no son una
+        // sílaba: nadie le habló encima.
+        parlantes.Drain();
+        sesion.NoteUserAudio(isVoice: true, bloque);
+        sesion.NoteUserAudio(isVoice: true, bloque);
+
+        for (var i = 0; i < 40; i++)
+        {
+            sesion.NoteUserAudio(isVoice: false, bloque);
+        }
+
+        Assert.NotEqual(LiveOrbMoment.Thinking, sesion.Moment);
+    }
+
+    [Fact]
     public async Task AlInterrumpirla_LaVozQueSigueNoSeConfundeConSuEco()
     {
         // Hablarle encima vacía la cola en el acto, así que lo que la persona siga diciendo arranca

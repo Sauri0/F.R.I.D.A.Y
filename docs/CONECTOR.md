@@ -51,8 +51,38 @@ Para comprobar que quedó: `claude mcp list`.
 | `viernes_mision_preguntar` | Deja una pregunta que sobrevive al reinicio y aparece en el orbe |
 | `viernes_memoria_buscar` | Lo que Viernes sabe del usuario, separando lo confirmado de lo supuesto |
 | `viernes_memoria_proponer` | Deja un dato **pendiente de aprobación**. No lo aprueba |
-| `viernes_proyectos_listar` | Las sesiones de Claude Code: carpeta, rama, si trabajan o esperan, desde cuándo |
+| `viernes_proyectos_listar` | Las sesiones de Claude Code: carpeta, rama, si trabajan o esperan, desde cuándo. Se puede acotar a un proyecto |
 | `viernes_proyecto_escribir` | Hoy **no puede escribir**. Ver más abajo |
+
+## Lo que el conector ve
+
+Esto no es una lista de riesgos teóricos: es lo que sale por el tubo hacia el modelo del otro lado
+cuando llama una herramienta. Está acá porque «lectura libre» es una decisión —leer no pide
+permiso— y una decisión hay que poder leerla antes de tomarla.
+
+| Sale siempre | En qué herramienta |
+|---|---|
+| Título, objetivo, contexto, bitácora entera y pregunta pendiente de cada misión | `viernes_misiones_listar`, `viernes_estado` |
+| Todo lo que Viernes tiene anotado del usuario, confirmado y supuesto | `viernes_memoria_buscar` |
+| Cuánto va gastado hoy y en el mes, en dólares | `viernes_estado` |
+| **La ruta completa de la carpeta, la rama de git y el id de sesión de cada sesión de Claude Code de la máquina**, esté o no relacionada con lo que se está haciendo | `viernes_proyectos_listar`, `viernes_proyecto_escribir` |
+| Si cada una de esas sesiones está trabajando, esperando o quieta, y desde hace cuánto | `viernes_proyectos_listar`, `viernes_estado` |
+
+Lo de la tercera fila es lo que más sorprende y por eso está en negrita: en una corrida real salieron
+las rutas de tres proyectos distintos del usuario, ninguno de ellos aquel sobre el que se estaba
+trabajando. `viernes_estado` cuenta cuántas hay en cada estado, sin rutas ni texto.
+
+| No sale, salvo que se pida por su nombre | Cómo se pide |
+|---|---|
+| Lo último que dijo el asistente en cada sesión, hasta 600 caracteres | `viernes_proyectos_listar` con `ultimo_mensaje=true` |
+
+Eso último es contenido de conversaciones de **otros proyectos del usuario**. Salía por omisión y
+ahora no: hay que pedirlo, y cuando se pide queda en el registro de la llamada quién lo pidió. En la
+misma herramienta está `proyecto`, para mirar una carpeta en vez de toda la máquina — ver todas las
+sesiones del equipo para saber si un proyecto espera es más de lo que hace falta.
+
+Y lo que no ve, por si alguien lo da por hecho: no lee el contenido de los archivos de esos
+proyectos, no lee el chat del usuario con Viernes, y no toca las claves (ver abajo).
 
 ## Lo que no hace, y es a propósito
 
@@ -76,6 +106,12 @@ porque el próximo que agregue una herramienta va a querer «completar la API».
 Escribirle a otra sesión de Claude Code pide autorización desde el primer día sin que nadie
 configure nada: la acción se presenta ante la política como «enviar mensaje a claude code», y
 «enviar» ya está en la lista de lo que sale del equipo.
+
+Cada acción consulta por **lo que realmente va a hacer**, y no por el nombre de la herramienta que
+la disparó. Cancelar una misión con motivo escribe dos cosas —una línea en la bitácora y el cierre—,
+así que consulta las dos: «mision avanzar» para la línea y «mision cerrar» para el cierre. Con
+«mision avanzar» en Nunca, la misión se cancela igual y la línea no entra; la respuesta lo dice, en
+vez de dejar el permiso respetado en silencio, que se lee igual que ignorado.
 
 ## Escribir en el chat de Claude Code: por qué todavía no
 

@@ -35,9 +35,13 @@ public interface ILiveAudioSink
     /// nadie mira esto, el orbe vuelve a «te escucho» mientras se la sigue oyendo — la pantalla dice
     /// que escucha y en el cuarto ella sigue hablando.
     /// <para>
-    /// Es lo mismo que <c>LiveSpeakerSink.QueuedBytes</c> pero dicho en tiempo, que es la unidad en
-    /// la que se decide: los bytes dependen de la frecuencia de salida y quien pregunta no tiene por
-    /// qué saberla.
+    /// Se dice en tiempo y no en bytes porque ésa es la unidad en la que se decide: los bytes
+    /// dependen de la frecuencia de salida y quien pregunta no tiene por qué saberla. <b>Y es más
+    /// que lo que quede en la cola de quien implemente esto</b>: el audio que ya se le entregó al
+    /// dispositivo salió de esa cola y todavía no sonó, así que cuenta. <c>LiveSpeakerSink</c> suma
+    /// los dos; contestar sólo con la cola hace que esto llegue a cero antes de que se termine de
+    /// oír la última sílaba, y ahí el orbe vuelve a «te escucho» mientras en el cuarto todavía se la
+    /// escucha.
     /// </para>
     /// <para>
     /// Tiene implementación por defecto —cero— para que una salida que no encola nada, como

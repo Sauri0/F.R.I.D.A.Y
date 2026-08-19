@@ -179,7 +179,10 @@ internal sealed partial class AssistantRuntime
         var microphone = new LiveMicrophonePump(session, _voiceDetector);
         RuntimeTrace.Write("vivo.microfono.detector", microphone.DetectorInfo.Name);
 
+        var reloj = System.Diagnostics.Stopwatch.StartNew();
         var opened = await session.StartAsync(cancellationToken).ConfigureAwait(false);
+        reloj.Stop();
+        RuntimeTrace.Write("vivo.socket", $"{reloj.ElapsedMilliseconds} ms · {opened.Route}");
         if (!opened.IsLive)
         {
             RuntimeTrace.Write("vivo.no.abrio", opened.Reason);

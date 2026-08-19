@@ -40,6 +40,18 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
     private const int BufferCount = 5;
 
     /// <summary>
+    /// Cuánto audio llega a tener el driver en la mano, como mucho.
+    /// </summary>
+    /// <remarks>
+    /// Es el <c>DesiredLatency</c> con el que se abre la salida, escrito una sola vez: cien
+    /// milisegundos repartidos en cinco búferes de veinte. Todo lo que el driver ya se llevó
+    /// <b>salió de la cola y todavía no sonó</b>, y ése es exactamente el margen que
+    /// <see cref="Pending"/> se estaba comiendo.
+    /// </remarks>
+    private static readonly TimeSpan DriverLatency =
+        TimeSpan.FromMilliseconds(BufferMilliseconds * BufferCount);
+
+    /// <summary>
     /// Cuánto audio de respuesta aguanta la cola.
     /// </summary>
     /// <remarks>
@@ -58,6 +70,7 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
 
     private readonly Lock _gate = new();
     private BufferedWaveProvider? _queue;
+    private DriverTap? _tap;
     private WaveOutEvent? _output;
     private bool _started;
     private bool _disposed;
@@ -90,15 +103,44 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
     }
 
     /// <summary>
-    /// Lo mismo que <see cref="QueuedBytes"/>, dicho en tiempo.
+    /// Cuánta voz queda por oírse: lo que está en la cola más lo que el driver ya se llevó.
     /// </summary>
     /// <remarks>
     /// <see cref="QueuedBytes"/> estaba y no lo leía nadie fuera de las pruebas, así que el orbe
     /// volvía a «te escucho» con segundos de respuesta todavía adentro de esta cola. Quien decide
     /// —<c>LiveVoiceSession</c>— razona en tiempo y no en bytes, y la frecuencia de salida es asunto
     /// de acá.
+    /// <para>
+    /// <b>La cola sola no alcanza y por eso está <see cref="DriverTap"/>.</b> El proveedor va con
+    /// <c>ReadFully</c>, así que el driver se lleva búferes enteros y los rellena con silencio si
+    /// hace falta: hasta <see cref="DriverLatency"/> de audio ya salió de <c>BufferedBytes</c> y
+    /// todavía no sonó. Con eso solo, el contrato de <see cref="ILiveAudioSink.Pending"/> —cero es
+    /// «el parlante está callado»— era falso sobre el final de cada respuesta, y el orbe volvía a «te
+    /// escucho» antes de que se terminara de oír la última sílaba. Medido contra la salida real de
+    /// este equipo con medio segundo de audio encolado: llegaba a cero a los 439 ms, o sea 96 ms
+    /// antes de tiempo; con el margen contado, a los 535 ms.
+    /// </para>
+    /// <para>
+    /// El margen se cuenta desde la última vez que el driver se llevó audio <em>de verdad</em>, no
+    /// mientras la salida esté abierta: con <c>ReadFully</c> la reproducción no se detiene nunca
+    /// sola, así que sumar la latencia por estar sonando dejaría esto clavado en cien milisegundos
+    /// para siempre. Se pasa de largo por debajo de eso, que es el lado seguro: decir «todavía se
+    /// oye» un instante de más no rompe nada; decir «me callé» antes de tiempo es el bug.
+    /// </para>
     /// </remarks>
-    public TimeSpan Pending => LiveAudioFormat.OutputDurationOf(QueuedBytes);
+    public TimeSpan Pending
+    {
+        get
+        {
+            DriverTap? tap;
+            lock (_gate)
+            {
+                tap = _tap;
+            }
+
+            return LiveAudioFormat.OutputDurationOf(QueuedBytes) + (tap?.Remaining ?? TimeSpan.Zero);
+        }
+    }
 
     /// <inheritdoc />
     public ValueTask EnqueueAsync(ReadOnlyMemory<byte> pcm24k, CancellationToken cancellationToken)
@@ -154,6 +196,11 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
 
             _queue?.ClearBuffer();
 
+            // Stop tira los búferes que el driver tenía en la mano, así que el margen que llevaba
+            // contado deja de existir en el mismo instante. Sin esto, callarla dejaba a Pending
+            // diciendo que todavía se la oía durante otros cien milisegundos.
+            _tap?.Silence();
+
             try
             {
                 _output?.Stop();
@@ -187,6 +234,7 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
             output = _output;
             _output = null;
             _queue = null;
+            _tap = null;
             _started = false;
         }
 
@@ -256,13 +304,17 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
 
             var output = new WaveOutEvent
             {
-                DesiredLatency = BufferMilliseconds * BufferCount,
+                DesiredLatency = (int)DriverLatency.TotalMilliseconds,
                 NumberOfBuffers = BufferCount
             };
 
-            output.Init(queue);
+            // El driver lee por acá y no de la cola directamente: es el único lugar desde donde se
+            // ve cuándo se llevó audio de verdad, que es lo que Pending necesita saber.
+            var tap = new DriverTap(queue);
+            output.Init(tap);
 
             _queue = queue;
+            _tap = tap;
             _output = output;
             _started = false;
             return true;
@@ -270,8 +322,62 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
         catch (Exception)
         {
             _queue = null;
+            _tap = null;
             _output = null;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// El caño por el que el driver se lleva el audio, con la cuenta de hasta cuándo se sigue oyendo.
+    /// </summary>
+    /// <remarks>
+    /// No transforma nada: pasa la lectura tal cual. Está para poder anotar el instante en que el
+    /// driver se llevó muestras de verdad —las que había en la cola antes de leer— y no las de
+    /// relleno que <c>ReadFully</c> agrega cuando la cola se queda corta. Desde ese instante, lo que
+    /// se llevó tarda como mucho <see cref="DriverLatency"/> en sonar.
+    /// <para>
+    /// <c>Read</c> corre en el hilo del driver y <c>Remaining</c> se lee desde el que pregunta por
+    /// el orbe: el instante viaja en un <c>long</c> con lectura y escritura atómicas y sin candado,
+    /// porque tomar el candado de la salida adentro del hilo del driver es cómo se traba una
+    /// reproducción.
+    /// </para>
+    /// </remarks>
+    private sealed class DriverTap(BufferedWaveProvider queue) : IWaveProvider
+    {
+        private long _audibleUntil;
+
+        public WaveFormat WaveFormat => queue.WaveFormat;
+
+        /// <summary>Cuánto falta para que termine de sonar lo último que se llevó el driver.</summary>
+        public TimeSpan Remaining
+        {
+            get
+            {
+                var deadline = Volatile.Read(ref _audibleUntil);
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                return deadline <= now
+                    ? TimeSpan.Zero
+                    : System.Diagnostics.Stopwatch.GetElapsedTime(now, deadline);
+            }
+        }
+
+        /// <summary>Lo que el driver tenía se tiró: ya no queda nada por oírse.</summary>
+        public void Silence() => Volatile.Write(ref _audibleUntil, 0);
+
+        public int Read(byte[] buffer, int offset, int count)
+        {
+            var real = queue.BufferedBytes;
+            var read = queue.Read(buffer, offset, count);
+            if (real > 0)
+            {
+                Volatile.Write(
+                    ref _audibleUntil,
+                    System.Diagnostics.Stopwatch.GetTimestamp() +
+                        (long)(DriverLatency.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+            }
+
+            return read;
         }
     }
 }

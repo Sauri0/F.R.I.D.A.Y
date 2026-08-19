@@ -459,6 +459,38 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
     }
 
     /// <summary>
+    /// Carga el modelo ahora, sin esperar a la primera frase. Devuelve si quedó cargado.
+    /// </summary>
+    /// <remarks>
+    /// El push-to-talk ya adelanta la carga por su cuenta —arranca a cargar mientras la persona
+    /// habla, así los segundos de la frase pagan la espera—, pero el oído continuo no puede: entrega
+    /// el WAV entero y llama derecho a <see cref="TranscribeWaveWithSegmentsAsync"/>, con la persona
+    /// <em>ya callada</em>. Sin esto, la primera vez que alguien dice el nombre después de arrancar
+    /// se le cobra la carga entera como demora antes de que el orbe conteste. Medido en este equipo
+    /// con <c>--check-whisper</c>: <c>ggml-small.bin</c> tarda 388 ms en cargar.
+    /// <para>
+    /// Es la misma trampa que ya se pagó con el detector de voz entrenado en el camino en vivo, del
+    /// otro lado del mismo problema: cargar un modelo cuando ya hay alguien esperando.
+    /// </para>
+    /// <para>
+    /// No lanza. Si el modelo falta o está roto, el error real sale en la transcripción, que es
+    /// donde hay a quién decírselo.
+    /// </para>
+    /// </remarks>
+    public Task<bool> WarmUpAsync() => Task.Run(() =>
+    {
+        try
+        {
+            GetFactory();
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    });
+
+    /// <summary>
     /// Transcribe un WAV compatible sin tomar el micrófono. El stream sigue perteneciendo
     /// al llamador y este proveedor no lo persiste.
     /// </summary>

@@ -243,58 +243,140 @@ internal static class OrbSnapshot
     private static async Task<string> RenderMotionAsync(string outputDirectory, OrbShape shape)
     {
         var host = OpenHost(shape, out var orb, out var body);
-        var sink = (IOrbMotionSink)body;
-        var motion = default(OrbMotionSample);
-
-        void Pump(object? sender, EventArgs e) => sink.ReportMotion(motion);
-
-        CompositionTarget.Rendering += Pump;
-
         var shots = new List<(BitmapSource Image, string Caption)>();
+        var pendingHitToken = 0;
+
+        // El cierre cubre las DOS filas y no sólo la de la física. Vivía en el finally del segundo
+        // try, así que una excepción en el bucle de las doce celdas dejaba la Window abierta:
+        // medido inyectando un throw en la celda 3, Application.Current.Windows.Count daba 1 con el
+        // cierre viejo y 0 con éste. El proceso terminaba igual —App.RenderOrbAndExitAsync llama a
+        // Shutdown() en su propio finally—, así que esto no arregla un cuelgue: arregla que el
+        // banco deje la ventana de otro cuerpo viva mientras rinde el siguiente.
         try
         {
-            for (var index = 0; index < MotionFrames.Length; index++)
+            var sink = (IOrbMotionSink)body;
+            var motion = default(OrbMotionSample);
+
+            void Pump(object? sender, EventArgs e) => sink.ReportMotion(motion);
+
+            CompositionTarget.Rendering += Pump;
+            try
             {
-                var frame = MotionFrames[index];
-                body.State = AssistantVisualState.Idle;
-                body.IsLightDesktop = IsLightRow(index);
+                for (var index = 0; index < MotionFrames.Length; index++)
+                {
+                    var frame = MotionFrames[index];
+                    body.State = AssistantVisualState.Idle;
+                    body.IsLightDesktop = IsLightRow(index);
 
-                var radians = frame.Degrees * Math.PI / 180;
-                motion = new OrbMotionSample(
-                    Math.Cos(radians) * frame.Speed,
-                    Math.Sin(radians) * frame.Speed,
-                    frame.Dragging,
-                    frame.HitToken,
-                    frame.HitNormalX,
-                    frame.HitNormalY,
+                    var radians = frame.Degrees * Math.PI / 180;
+                    motion = new OrbMotionSample(
+                        Math.Cos(radians) * frame.Speed,
+                        Math.Sin(radians) * frame.Speed,
+                        frame.Dragging,
+                        frame.HitToken,
+                        frame.HitNormalX,
+                        frame.HitNormalY,
 
-                    // A fondo: la hoja tiene que mostrar el golpe más fuerte que existe, no uno
-                    // promedio. Los intermedios se leen interpolando; el tope, no.
-                    1.0);
+                        // A fondo: la hoja tiene que mostrar el golpe más fuerte que existe, no uno
+                        // promedio. Los intermedios se leen interpolando; el tope, no.
+                        1.0);
 
-                await Task.Delay(TimeSpan.FromSeconds(frame.Seconds));
-                shots.Add((Capture(host, orb), frame.Caption));
+                    await Task.Delay(TimeSpan.FromSeconds(frame.Seconds));
+                    shots.Add((Capture(host, orb), frame.Caption));
+                }
             }
-        }
-        finally
-        {
-            // Desengancharse antes de cerrar. Un manejador de Rendering que sobrevive a su ventana
-            // se sigue llamando por cada cuadro de todo el proceso.
-            CompositionTarget.Rendering -= Pump;
-        }
+            finally
+            {
+                // Desengancharse antes de cerrar. Un manejador de Rendering que sobrevive a su
+                // ventana se sigue llamando por cada cuadro de todo el proceso.
+                CompositionTarget.Rendering -= Pump;
+            }
 
-        try
-        {
-            shots.AddRange(await RunPhysicsAsync(host, orb, body, sink, shots.Count));
+            // El último token que vio el cuerpo se le pasa a la fila de la física para que ésta
+            // siga contando desde ahí. Ver el remark de RunPhysicsAsync.
+            pendingHitToken = motion.HitToken;
+            shots.AddRange(await RunPhysicsAsync(host, orb, body, sink, shots.Count, pendingHitToken));
         }
         finally
         {
             host.Close();
         }
 
+        // La quinta fila estrena un cuerpo y no reusa el de arriba, así que abre y cierra su propia
+        // ventana. Va después del cierre y no antes: dos hosts vivos a la vez son dos cuerpos
+        // dibujando sobre el mismo Rendering, y no hay nada que ganar con eso.
+        shots.AddRange(await RunRebirthAsync(shape, shots.Count, pendingHitToken));
+
         var path = Path.Combine(outputDirectory, $"orb-{shape.ToString().ToLowerInvariant()}-movimiento.png");
         SaveContactSheet(shots, path);
         return path;
+    }
+
+    /// <summary>
+    /// La fila del cuerpo recién nacido: qué hace con un golpe que ocurrió antes de que existiera.
+    /// </summary>
+    /// <remarks>
+    /// Cambiar de gota a nube crea un cuerpo nuevo, pero el <see cref="Shell.OrbMotion"/> de la
+    /// ventana es el mismo y sigue mandando el token del último choque. El cuerpo nuevo arrancaba
+    /// con el suyo en 0, la comparación daba verdadero, y ejecutaba el golpe entero —ondas, patada
+    /// de escala y todo el polvo empujado contra la normal— sin que nada hubiera chocado.
+    /// <para>
+    /// Las dos primeras celdas son la prueba de que ya no pasa: el cuerpo nace, le llega el token
+    /// viejo y tiene que salir redondo, igual que la celda «quieto» de la primera fila. Las dos
+    /// últimas son la otra mitad y sin ellas la primera no prueba nada —un cuerpo sordo también
+    /// saldría redondo—: se sube el token una vez, que ahora sí es un golpe suyo, y tiene que
+    /// acusarlo. Adoptar no es ignorar.
+    /// </para>
+    /// </remarks>
+    private static async Task<List<(BitmapSource Image, string Caption)>> RunRebirthAsync(
+        OrbShape shape,
+        int firstIndex,
+        int pendingHitToken)
+    {
+        var host = OpenHost(shape, out var orb, out var body);
+        var shots = new List<(BitmapSource Image, string Caption)>();
+
+        try
+        {
+            body.State = AssistantVisualState.Idle;
+            body.IsLightDesktop = IsLightRow(firstIndex);
+
+            var sink = (IOrbMotionSink)body;
+
+            // Quieto y con el golpe a fondo contra el borde derecho: si algo se mueve en las dos
+            // primeras celdas sale del token y de ningún otro lado.
+            var motion = new OrbMotionSample(0, 0, false, pendingHitToken, -1, 0, 1.0);
+
+            void Pump(object? sender, EventArgs e) => sink.ReportMotion(motion);
+
+            CompositionTarget.Rendering += Pump;
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(0.06));
+                shots.Add((Capture(host, orb), $"nace con golpe {pendingHitToken} viejo · 0,06 s"));
+
+                await Task.Delay(TimeSpan.FromSeconds(0.34));
+                shots.Add((Capture(host, orb), "el mismo golpe viejo · 0,40 s"));
+
+                motion = motion with { HitToken = pendingHitToken + 1 };
+
+                await Task.Delay(TimeSpan.FromSeconds(0.06));
+                shots.Add((Capture(host, orb), $"golpe {pendingHitToken + 1}, ya suyo · 0,06 s"));
+
+                await Task.Delay(TimeSpan.FromSeconds(0.34));
+                shots.Add((Capture(host, orb), "el golpe suyo · 0,40 s"));
+            }
+            finally
+            {
+                CompositionTarget.Rendering -= Pump;
+            }
+        }
+        finally
+        {
+            host.Close();
+        }
+
+        return shots;
     }
 
     /// <summary>
@@ -311,13 +393,23 @@ internal static class OrbSnapshot
     /// roce exponencial, la rapidez con la que llega depende sólo de esa distancia, así que fijarla
     /// es fijar la fuerza del golpe sin depender de cuánto haya avanzado el arrastre.
     /// </para>
+    /// <para>
+    /// El <see cref="OrbMotion"/> de acá es una fuente de tokens nueva y empieza en cero, pero el
+    /// cuerpo llega de las doce celdas sintéticas con el suyo más alto. Por eso los tokens de esta
+    /// fila se corren con <paramref name="hitTokenBase"/>: sin eso el primer <c>Sample</c> de la
+    /// física traía un token distinto del último visto, el cuerpo lo leía como un golpe —de fuerza
+    /// 0— y la fila arrancaba con un choque que nunca ocurrió. No movía las mediciones, pero era un
+    /// evento inventado en la hoja que se presenta como prueba.
+    /// </para>
     /// </remarks>
+    /// <param name="hitTokenBase">El último token de golpe que se le mandó al cuerpo antes de esta fila.</param>
     private static async Task<List<(BitmapSource Image, string Caption)>> RunPhysicsAsync(
         Window host,
         FrameworkElement orb,
         IOrbBody body,
         IOrbMotionSink sink,
-        int firstIndex)
+        int firstIndex,
+        int hitTokenBase)
     {
         body.State = AssistantVisualState.Idle;
 
@@ -356,7 +448,11 @@ internal static class OrbSnapshot
             }
 
             motion.Step(delta, bounds);
-            sink.ReportMotion(motion.Sample);
+
+            // El corrimiento del token, no la velocidad: los px/s de esta fila son los de la física
+            // y no se tocan. Ver el remark.
+            var sample = motion.Sample;
+            sink.ReportMotion(sample with { HitToken = sample.HitToken + hitTokenBase });
         }
 
         CompositionTarget.Rendering += Pump;

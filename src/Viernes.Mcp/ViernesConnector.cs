@@ -191,6 +191,14 @@ public sealed class ViernesConnector
     }
 
     /// <summary>Cierra una misión, terminada o cancelada, dejando el motivo en la bitácora.</summary>
+    /// <remarks>
+    /// Cancelar con motivo hace <b>dos</b> cosas: escribe una línea en la bitácora y después cierra.
+    /// La línea la escribe <c>AdvanceAsync</c>, o sea «mision avanzar», y acá se consultaba nada más
+    /// «mision cerrar»: con «mision avanzar = Nunca» configurado, la línea entraba igual. Cada acción
+    /// tiene que preguntar por lo que <em>realmente</em> va a hacer, y si una de las dos está
+    /// prohibida se hace la otra y se dice cuál faltó — callarlo sería el mismo permiso ignorado
+    /// otra vez, con mejores modales.
+    /// </remarks>
     public async Task<ConnectorReply> CloseMissionAsync(
         string id,
         string? reason = null,
@@ -202,6 +210,11 @@ public sealed class ViernesConnector
         {
             return ConnectorReply.Nope(refusal);
         }
+
+        var writesLog = cancelled && !string.IsNullOrWhiteSpace(reason);
+        var logRefusal = writesLog
+            ? await _boundary.WhyNotAsync(MissionAdvance, id, cancellationToken).ConfigureAwait(false)
+            : null;
 
         return await GuardDiskAsync(async () =>
         {
@@ -218,9 +231,9 @@ public sealed class ViernesConnector
 
             // Cancelar no guarda motivo por sí solo, así que primero se anota y después se cancela:
             // una misión abandonada sin decir por qué es una que el usuario va a volver a abrir.
-            if (!string.IsNullOrWhiteSpace(reason))
+            if (writesLog && logRefusal is null)
             {
-                await _missions.AdvanceAsync(id ?? string.Empty, reason, cancellationToken)
+                await _missions.AdvanceAsync(id ?? string.Empty, reason!, cancellationToken)
                     .ConfigureAwait(false);
             }
 
@@ -228,9 +241,16 @@ public sealed class ViernesConnector
                 .CancelAsync(id ?? string.Empty, cancellationToken)
                 .ConfigureAwait(false);
 
-            return dropped is null
-                ? ConnectorReply.Nope(NotFound(id))
-                : ConnectorReply.Fine($"Cancelada [{dropped.Id}] «{dropped.Title}».");
+            if (dropped is null)
+            {
+                return ConnectorReply.Nope(NotFound(id));
+            }
+
+            return ConnectorReply.Fine(
+                $"Cancelada [{dropped.Id}] «{dropped.Title}»." +
+                (logRefusal is null
+                    ? string.Empty
+                    : $" El motivo NO quedó escrito en la bitácora: {logRefusal}"));
         }).ConfigureAwait(false);
     }
 
@@ -355,20 +375,42 @@ public sealed class ViernesConnector
     // --------------------------------------------------------------- proyectos
 
     /// <summary>Las sesiones de Claude Code: si trabajan o esperan, y desde cuándo.</summary>
-    public ConnectorReply ListSessions(int maximum = 8)
+    /// <param name="maximum">Cuántas devolver, entre 1 y 20.</param>
+    /// <param name="project">
+    /// Parte del nombre de la carpeta. Sin esto salen las sesiones de <b>toda la máquina</b>, que
+    /// para la pregunta habitual —«¿este proyecto me está esperando?»— es más de lo que hace falta.
+    /// </param>
+    /// <param name="includeLastMessage">
+    /// Si sale también lo último que dijo el asistente en cada sesión, hasta
+    /// <c>ClaudeSessionWatcher.MaximumSaid</c> caracteres. <b>Va en <see langword="false"/> por
+    /// omisión y no es una preferencia de estilo</b>: es contenido de conversaciones de otros
+    /// proyectos del usuario saliendo hacia quien esté del otro lado del conector. Que haya que
+    /// pedirlo hace dos cosas: no sale sin querer, y cuando sale queda en el registro de la llamada
+    /// quién lo pidió.
+    /// </param>
+    public ConnectorReply ListSessions(
+        int maximum = 8,
+        string? project = null,
+        bool includeLastMessage = false)
     {
         var now = _time.GetLocalNow();
-        var sessions = _sessions.Recent(now, Math.Clamp(maximum, 1, 20));
+        var sessions = _sessions.Recent(
+            now,
+            Math.Clamp(maximum, 1, 20),
+            onlyProjectContaining: project);
+
         if (sessions.Count == 0)
         {
-            return ConnectorReply.Fine("No encontré ninguna sesión de Claude Code en este equipo.");
+            return ConnectorReply.Fine(string.IsNullOrWhiteSpace(project)
+                ? "No encontré ninguna sesión de Claude Code en este equipo."
+                : $"No encontré ninguna sesión de Claude Code sobre «{project}».");
         }
 
         var builder = new StringBuilder();
         foreach (var session in sessions)
         {
             builder.AppendLine();
-            builder.Append("· ").Append(ClaudeSessionWatcher.Describe(session, now));
+            builder.Append("· ").Append(ClaudeSessionWatcher.Describe(session, now, includeLastMessage));
             builder.AppendLine();
             builder.Append($"  {session.Project}");
             if (session.Branch is not null)
@@ -384,7 +426,13 @@ public sealed class ViernesConnector
             ? "Ninguna está esperando al usuario ahora."
             : $"{waiting} de {sessions.Count} están esperando que el usuario conteste.";
 
-        return ConnectorReply.Fine(header + builder);
+        var footer = includeLastMessage
+            ? string.Empty
+            : $"{Environment.NewLine}(Lo último que dijo cada sesión no sale por omisión: es " +
+              "conversación de otros proyectos del usuario. Si de verdad lo necesitás, pedí esta " +
+              "misma herramienta con ultimo_mensaje=true.)";
+
+        return ConnectorReply.Fine(header + builder + footer);
     }
 
     /// <summary>

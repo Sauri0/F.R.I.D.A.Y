@@ -117,7 +117,10 @@ public sealed class ClaudeSessionWriter
         return new SessionWriteOutcome(
             false,
             $"{WhyItCannotWrite}{Environment.NewLine}{Environment.NewLine}" +
-            $"Va para: {ClaudeSessionWatcher.Describe(target, now)}{Environment.NewLine}" +
+            // Sin lo último que dijo esa sesión: esto lo lee el modelo del otro lado del conector
+            // —es el único que llama a Deliver— y para identificar el destino alcanza con la carpeta,
+            // la rama y desde cuándo espera. El contenido de la charla ajena no hace falta acá.
+            $"Va para: {ClaudeSessionWatcher.Describe(target, now, includeLastSaid: false)}{Environment.NewLine}" +
             $"Carpeta: {target.Project}" +
             (target.Branch is null ? string.Empty : $" · rama {target.Branch}") +
             $"{Environment.NewLine}{Environment.NewLine}" +

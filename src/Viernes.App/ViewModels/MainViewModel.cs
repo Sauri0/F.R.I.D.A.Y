@@ -921,6 +921,33 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        // La línea de dictado, por la misma puerta y con la misma salida temprana. Llega palabra
+        // por palabra mientras alguien habla y no es un cambio de estado: es el mismo estado con más
+        // texto. Sin esto caía en el manejador completo, que hace StatusText = update.Status, y lo
+        // que trae es la etiqueta genérica del estado: cada hipótesis parcial pisaba
+        // «En conversación · decime «listo» para cortar» con «Escuchando…» en el globo de la bandeja
+        // y en los dos TextBlock que atan StatusText. La píldora se salvaba sola porque ata State.
+        if (update.DictationOnly)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (update.ClearDictation)
+                {
+                    SetDictation([], TimeSpan.Zero);
+                }
+                else if (update.Dictation is not null)
+                {
+                    SetDictation(update.Dictation, update.DictationRecovered ?? _recoveredDictation);
+                }
+
+                if (update.MicrophoneActive.HasValue)
+                {
+                    IsMicrophoneActive = update.MicrophoneActive.Value;
+                }
+            });
+            return;
+        }
+
         // Y el resto por la misma puerta, por la misma razón. Acá llegan también los estados de
         // fondo, que los publica un System.Threading.Timer: su callback corre en el threadpool, y
         // un Invoke bloqueante desde ahí es el cuelgue que este proyecto ya se comió dos veces.

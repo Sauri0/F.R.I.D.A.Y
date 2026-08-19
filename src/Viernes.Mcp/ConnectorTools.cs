@@ -156,8 +156,10 @@ public static class ConnectorTools
                 }),
 
             McpServerTool.Create(
-                ([Description("Cuántas sesiones devolver, entre 1 y 20.")] int maximo = 8) =>
-                    Say(connector.ListSessions(maximo)),
+                ([Description("Cuántas sesiones devolver, entre 1 y 20.")] int maximo = 8,
+                 [Description("Parte del nombre de la carpeta, para ver un solo proyecto en vez de toda la máquina.")] string? proyecto = null,
+                 [Description("Incluir lo último que dijo el asistente en cada sesión. Es conversación de otros proyectos del usuario: pedilo sólo si hace falta de verdad.")] bool ultimo_mensaje = false) =>
+                    Say(connector.ListSessions(maximo, proyecto, ultimo_mensaje)),
                 new McpServerToolCreateOptions
                 {
                     Name = "viernes_proyectos_listar",
@@ -166,7 +168,9 @@ public static class ConnectorTools
                         "Las sesiones de Claude Code del usuario en este equipo: en qué carpeta " +
                         "corren, en qué rama, si están trabajando o si terminaron y quedaron " +
                         "esperando que les contesten, y desde hace cuánto. Es de sólo lectura: se lee " +
-                        "el archivo de la sesión, no se le toca la ventana a nadie.",
+                        "el archivo de la sesión, no se le toca la ventana a nadie. Sin «proyecto» " +
+                        "salen las de TODA la máquina; acotá con «proyecto» cuando sepas cuál mirás. " +
+                        "Lo último que dijo cada sesión NO sale por omisión.",
                     ReadOnly = true,
                     OpenWorld = false
                 }),

@@ -118,6 +118,9 @@ internal partial class LiquidOrb : UserControl, IOrbBody, IOrbMotionSink
     /// <summary>El último golpe que este cuerpo llegó a acusar. Ver <see cref="OrbMotionSample"/>.</summary>
     private int _hitToken;
 
+    /// <summary>Si ya llegó algún cuadro de movimiento. Ver <see cref="ReportMotion"/>.</summary>
+    private bool _motionSeen;
+
     /// <summary>Si en el cuadro anterior el usuario lo tenía agarrado. Soltarlo es un evento.</summary>
     private bool _wasDragging;
 
@@ -325,7 +328,22 @@ internal partial class LiquidOrb : UserControl, IOrbBody, IOrbMotionSink
     }
 
     /// <inheritdoc />
-    public void ReportMotion(in OrbMotionSample motion) => _windowMotion = motion;
+    public void ReportMotion(in OrbMotionSample motion)
+    {
+        // El primer cuadro adopta el token del golpe sin ejecutarlo. Un cuerpo recién creado nace
+        // con _hitToken en 0, y si el usuario cambia de nube a gota después de haber tirado el orbe
+        // contra un borde el Sample sigue trayendo el token de ese choque: 1 != 0 daba verdadero y
+        // la gota nacía con la onda, la patada de escala y dos gotas salpicando contra una normal
+        // que nadie tocó. Un golpe que pasó antes de que este cuerpo existiera no es suyo. Es lo
+        // mismo que hace Channel con TransitionToken al asignársele: se adopta lo que ya venía.
+        if (!_motionSeen)
+        {
+            _motionSeen = true;
+            _hitToken = motion.HitToken;
+        }
+
+        _windowMotion = motion;
+    }
 
     /// <summary>
     /// Lo que el movimiento de la ventana le hace al cuerpo una vez por cuadro.

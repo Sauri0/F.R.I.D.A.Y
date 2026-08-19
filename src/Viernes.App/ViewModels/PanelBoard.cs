@@ -40,7 +40,7 @@ internal sealed class PanelBoard : ObservableObject
     public PanelBoard(Action requestClose)
     {
         _requestClose = requestClose;
-        AnswerCommand = new AsyncRelayCommand(AnswerAsync, CanAnswer, ReportFailure);
+        AnswerCommand = new AsyncRelayCommand(AnswerAsync, CanAnswer, ReportAnswerFailure);
     }
 
     /// <summary>Las misiones vivas.</summary>
@@ -181,8 +181,18 @@ internal sealed class PanelBoard : ObservableObject
     /// </remarks>
     public void Refresh(PanelKind kind)
     {
+        // Se cancela, pero NO se libera acá. La lectura anterior sigue viva unos milisegundos
+        // después del Cancel y el token es suyo: liberarlo desde acá era sacarle el piso a algo que
+        // todavía corre. Lo que sale de ahí es ObjectDisposedException, que NO es
+        // OperationCanceledException, así que cae en el catch general y el panel recién abierto
+        // muestra «No pude leerlo: Cannot access a disposed object…» por culpa del anterior.
+        //
+        // Medido en .NET 10, de un token cuyo origen ya fue liberado: leer cts.Token y token.WaitHandle
+        // tiran ObjectDisposedException; Register, ThrowIfCancellationRequested y Task.Delay no. Hoy
+        // nada del recorrido de PanelFeed toca WaitHandle, así que el síntoma exacto no se pudo
+        // reproducir; lo que se arregla es la propiedad del CTS, que estaba mal repartida y hace
+        // depender el resultado de qué use por dentro la próxima lectura que alguien escriba.
         _loading?.Cancel();
-        _loading?.Dispose();
         _loading = null;
         Outcome = string.Empty;
         More = string.Empty;
@@ -193,8 +203,9 @@ internal sealed class PanelBoard : ObservableObject
             return;
         }
 
-        _loading = new CancellationTokenSource();
-        _ = RefreshAsync(kind, _loading.Token);
+        var loading = new CancellationTokenSource();
+        _loading = loading;
+        _ = RefreshAsync(kind, loading);
     }
 
     /// <summary>
@@ -203,9 +214,15 @@ internal sealed class PanelBoard : ObservableObject
     /// <remarks>
     /// Sin <c>ConfigureAwait(false)</c> a propósito: arranca en el hilo de la interfaz y las
     /// continuaciones tocan <see cref="ObservableCollection{T}"/>, que sólo se puede tocar desde ahí.
+    /// <para>
+    /// Recibe el <see cref="CancellationTokenSource"/> entero y no sólo el token porque es la dueña:
+    /// lo libera en el <c>finally</c>, cuando ya nadie lo va a usar. Liberarlo del lado de
+    /// <see cref="Refresh"/> —que es donde estaba— era hacerlo con la lectura todavía en vuelo.
+    /// </para>
     /// </remarks>
-    private async Task RefreshAsync(PanelKind kind, CancellationToken cancellationToken)
+    private async Task RefreshAsync(PanelKind kind, CancellationTokenSource loading)
     {
+        var cancellationToken = loading.Token;
         try
         {
             switch (kind)
@@ -254,27 +271,74 @@ internal sealed class PanelBoard : ObservableObject
         }
         catch (Exception exception)
         {
-            ReportFailure(exception);
+            ReportFailure(kind, exception);
+        }
+        finally
+        {
+            // Sólo se descuelga si todavía es la lectura vigente: si mientras tanto entró otra,
+            // el campo ya apunta a la de ella y ponerlo en null la dejaría sin cancelar.
+            if (ReferenceEquals(_loading, loading))
+            {
+                _loading = null;
+            }
+
+            loading.Dispose();
         }
     }
 
     /// <summary>
-    /// Un panel que no pudo leer lo dice.
+    /// El panel que no pudo leer lo dice. Ese panel, no los seis.
     /// </summary>
     /// <remarks>
     /// Deliberadamente ruidoso en la pantalla y silencioso en el proceso: dejar la lista vacía sin
     /// decir nada se lee como «no hay nada», que es una afirmación distinta y puede ser falsa.
+    /// <para>
+    /// Antes escribía el mismo texto en las seis notas de una, y como sólo hay un vidrio, la que se
+    /// veía era la del panel abierto: fallaba la lectura del gasto y el panel de misiones mostraba
+    /// ese error como si fuera suyo. Un error prestado es peor que ningún error, porque manda a
+    /// mirar donde no está el problema.
+    /// </para>
     /// </remarks>
-    private void ReportFailure(Exception exception)
+    private void ReportFailure(PanelKind kind, Exception exception)
     {
         var text = $"No pude leerlo: {exception.Message}";
-        MissionsNote = text;
-        ProjectsNote = text;
-        PermissionsNote = text;
-        MemoryNote = text;
-        QuestionNote = text;
-        SpendNote = text;
+        switch (kind)
+        {
+            case PanelKind.Misiones:
+                MissionsNote = text;
+                break;
+
+            case PanelKind.Pregunta:
+                QuestionNote = text;
+                break;
+
+            case PanelKind.Proyectos:
+                ProjectsNote = text;
+                break;
+
+            case PanelKind.Autonomia:
+                PermissionsNote = text;
+                break;
+
+            case PanelKind.Aprendido:
+                MemoryNote = text;
+                break;
+
+            case PanelKind.Consumo:
+                SpendNote = text;
+                break;
+        }
     }
+
+    /// <summary>
+    /// Contestar la pregunta es escribir, no leer, y su error va donde el usuario está mirando.
+    /// </summary>
+    /// <remarks>
+    /// Antes este error entraba por la misma puerta que las lecturas y decía «No pude leerlo» en los
+    /// seis paneles a la vez, para algo que ni siquiera fue una lectura.
+    /// </remarks>
+    private void ReportAnswerFailure(Exception exception) =>
+        QuestionNote = $"No pude guardar la respuesta: {exception.Message}";
 
     /// <summary>
     /// Cuántas filas se dibujan.

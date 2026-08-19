@@ -32,6 +32,17 @@ internal sealed class OrbPresence
     /// <summary>Si ya terminó de irse y no hay nada que dibujar.</summary>
     public bool IsGone => Visibility < 0.02;
 
+    /// <summary>
+    /// Si se está yendo o ya se fue. Lo contrario es «está entero o está volviendo».
+    /// </summary>
+    /// <remarks>
+    /// No alcanza con <see cref="IsGone"/> para preguntar «¿hace falta esconderlo?»: durante el
+    /// medio segundo de la retirada el orbe todavía se ve y <c>IsGone</c> dice que no, así que quien
+    /// vigila la pantalla completa volvería a mandarlo a esconder una vez por segundo sobre algo que
+    /// ya se está escondiendo.
+    /// </remarks>
+    public bool IsLeaving => _target == 0;
+
     /// <summary>Si está entero y quieto: no hay animación en curso.</summary>
     public bool IsSettled => Math.Abs(Visibility - _target) < 0.004 && Math.Abs(_velocity) < 0.03;
 

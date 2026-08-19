@@ -1,4 +1,5 @@
 using Viernes.Core.Autonomy;
+using Viernes.Core.Missions;
 using Xunit;
 
 namespace Viernes.Mcp.Tests;
@@ -44,6 +45,32 @@ public sealed class BoundaryTests : IDisposable
         Assert.False(reply.Ok);
         Assert.Contains("nunca", reply.Text, StringComparison.OrdinalIgnoreCase);
         Assert.Empty((await this.harness.Memory.ReviewAsync()).Suggestions);
+    }
+
+    [Fact]
+    public async Task CancelarConMotivo_NoEscribeLaBitacoraSiAvanzarEstaProhibido()
+    {
+        // Cancelar con motivo escribe DOS cosas y consultaba por una sola: la línea de la bitácora
+        // la escribe AdvanceAsync, o sea «mision avanzar», y entraba igual con ese permiso en Nunca.
+        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        var antes = (await this.harness.Missions.ListAsync(onlyOpen: false))[0].Log.Count;
+        await this.harness.Autonomy.LearnAsync("mision avanzar", "*", AutonomyLevel.Nunca);
+
+        var reply = await this.harness.Connector.CloseMissionAsync(
+            "m1", "El cliente frenó el proyecto", cancelled: true);
+
+        // Cerrar sí estaba permitido, así que la misión queda cancelada; lo que no entró es la línea.
+        Assert.True(reply.Ok);
+
+        var stored = Assert.Single(await this.harness.Missions.ListAsync(onlyOpen: false));
+        Assert.Equal(MissionState.Cancelada, stored.State);
+        Assert.Equal(antes, stored.Log.Count);
+        Assert.DoesNotContain(
+            stored.Log,
+            entry => entry.Text.Contains("El cliente frenó el proyecto", StringComparison.Ordinal));
+
+        // Y no se calla que faltó: un permiso respetado en silencio se lee igual que uno ignorado.
+        Assert.Contains("NO quedó escrito en la bitácora", reply.Text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -68,7 +68,20 @@ internal sealed record AssistantRuntimeUpdate(
     /// el número cambia en cada frase y con la tele puesta no se meten diez segundos de tele
     /// adelante del pedido.
     /// </remarks>
-    TimeSpan? DictationRecovered = null);
+    TimeSpan? DictationRecovered = null,
+
+    /// <summary>
+    /// Esta publicación es sólo la línea de dictado: no trae estado ni etiqueta propios.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="State"/> y <see cref="Status"/> viajan igual porque el récord los pide, pero son
+    /// el eco del último estado publicado y no un cambio. Sin esta marca, del otro lado no hay con
+    /// qué distinguirlos: cada hipótesis parcial caía en el manejador completo, que hace
+    /// <c>StatusText = update.Status</c>, y pisaba «En conversación · decime «listo» para cortar»
+    /// con «Escuchando…» apenas alguien empezaba a hablar. El nivel del micrófono no necesita marca
+    /// porque llega en un campo propio; esto no tiene uno, así que la marca es la que hay.
+    /// </remarks>
+    bool DictationOnly = false);
 
 internal sealed record PendingConfirmation(
     string ToolCallId,

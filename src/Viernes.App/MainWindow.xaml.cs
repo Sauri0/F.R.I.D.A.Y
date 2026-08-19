@@ -974,6 +974,16 @@ public partial class MainWindow : Window
         }
 
         _travel = null;
+
+        // La mudanza se venció sin llegar. _currentMonitor se escribió al salir, apuntando al
+        // destino, así que si el orbe se quedó en el de origen hay que devolverlo a donde el orbe
+        // está de verdad: con el monitor mal apuntado, el vigía compara el cursor contra una
+        // pantalla donde no hay nada y no vuelve a intentar la mudanza que quedó a medias.
+        if (!arrived)
+        {
+            _currentMonitor = Services.MonitorSlots.MonitorAt(_motion.Position).Key;
+        }
+
         SaveOrbPlacement();
         Diagnostics.RuntimeTrace.Write(
             "monitor.mudanza",
@@ -1016,12 +1026,52 @@ public partial class MainWindow : Window
         CheckFullScreen();
     }
 
+    /// <summary>
+    /// La condición «hay algo en pantalla completa delante del orbe», escrita en un solo lugar.
+    /// </summary>
+    /// <remarks>
+    /// El modelo de vista la publica —la píldora la necesita para no callarse— y <c>App</c> la
+    /// consulta antes de mostrar nada. Si el campo y la propiedad del modelo se escribieran por
+    /// separado, un camino podría creerle a uno y otro camino al otro, que es exactamente la clase
+    /// de desacuerdo que hace aparecer al orbe encima de un juego.
+    /// </remarks>
+    private bool FullScreenAhead
+    {
+        get => _fullScreen;
+        set
+        {
+            _fullScreen = value;
+            _viewModel.IsUnderFullScreen = value;
+        }
+    }
+
+    /// <summary>
+    /// Si hay algo en pantalla completa delante del orbe, medido ahora mismo.
+    /// </summary>
+    /// <remarks>
+    /// Existe para que <c>App</c> pueda consultarla antes de mostrar, mover o animar el orbe. Es una
+    /// condición, no un flanco: se puede preguntar en cualquier momento y siempre contesta lo que
+    /// pasa, no lo que pasaba. Vuelve a medir en vez de devolver la última lectura del vigía porque
+    /// entre tic y tic hay un segundo, y en ese segundo es donde entra un pedido de presencia.
+    /// </remarks>
+    internal bool IsUnderFullScreenNow()
+    {
+        CheckFullScreen();
+        return _fullScreen;
+    }
+
     private void CheckFullScreen()
     {
         // Guardado en la bandeja no es asunto de esto: quien lo guardó decide cuándo vuelve. Se mira
         // también la retirada en curso, que dura media pantalla y todavía informa IsVisible.
         if (!IsVisible || _hidingToTray)
         {
+            // Pero la condición se suelta, no se congela. Antes se salía por acá sin tocarla: con un
+            // video a pantalla completa, guardarse en la bandeja dejaba el flanco pegado en «hay
+            // pantalla completa», y al volver —ya sin video— el primer aviso urgente pasaba esa
+            // guarda obsoleta y a los cuatro segundos encendía el filete de 3 px contra el borde de
+            // un escritorio normal, con la aplicación supuestamente guardada.
+            DropFullScreen();
             return;
         }
 
@@ -1030,11 +1080,16 @@ public partial class MainWindow : Window
             OrbScreen());
         if (full == _fullScreen)
         {
+            if (full)
+            {
+                HoldFullScreen();
+            }
+
             UpdateSliver();
             return;
         }
 
-        _fullScreen = full;
+        FullScreenAhead = full;
 
         // Queda en la bitácora porque «Viernes desapareció» y «Viernes no se esconde» son el mismo
         // reporte visto desde los dos lados, y sin esta línea hay que adivinar cuál de los dos es.
@@ -1052,7 +1107,6 @@ public partial class MainWindow : Window
 
     private void EnterFullScreen()
     {
-        _viewModel.IsUnderFullScreen = true;
         _viewModel.ClosePanel();
 
         var centre = new Point(
@@ -1064,6 +1118,11 @@ public partial class MainWindow : Window
         // Soltar el Topmost no es cosmético: una ventana siempre-arriba encima de un juego en
         // pantalla completa exclusiva lo puede sacar de ese modo, y eso se ve como un parpadeo del
         // juego cada vez que Viernes se dibuja.
+        //
+        // El filete y la píldora contradicen esta línea a propósito y no por descuido: los dos se
+        // ponen adelante justo acá. Por qué se acepta el riesgo está escrito en UrgentSliver y en
+        // MarkUrgent; lo que no puede pasar es que alguien lea esta línea, vea la contradicción y
+        // crea que es un olvido.
         Topmost = false;
         UpdateSliver();
     }
@@ -1072,7 +1131,6 @@ public partial class MainWindow : Window
     {
         // Ya no está en pantalla completa: si había algo urgente, lo va a ver entero. El filete
         // cumplió y se apaga.
-        _viewModel.IsUnderFullScreen = false;
         _urgentPending = false;
         _pillOnly = false;
         _pillTimer?.Stop();
@@ -1085,7 +1143,81 @@ public partial class MainWindow : Window
         }
 
         _hiddenByFullScreen = false;
-        ShowWithoutStealingFocus();
+
+        // Directo al cuerpo y no por ShowWithoutStealingFocus: esa puerta vuelve a preguntar si hay
+        // pantalla completa, y acabamos de comprobar que no hay. Preguntar de nuevo desde acá sería
+        // una recursión esperando a que alguien la escriba.
+        RevealOrb();
+    }
+
+    /// <summary>
+    /// Vuelve a poner lo que la pantalla completa exige, aunque ya estuviera puesto.
+    /// </summary>
+    /// <remarks>
+    /// La pantalla completa es una condición, no un flanco, y esto es lo que la sostiene: corre en
+    /// cada barrido del vigía y no sólo al entrar. Entre tic y tic hay un segundo, y hay caminos que
+    /// devuelven el cuerpo sin pasar por <see cref="ShowWithoutStealingFocus"/> —una mudanza de
+    /// monitor que ya estaba en vuelo cuando empezó la pantalla completa llama a <c>Aparecer</c>
+    /// medio segundo después, desde su propio reloj—. Sin esto, el orbe se queda dibujado encima del
+    /// juego hasta que el juego termine, que es el peor bug que puede tener este archivo.
+    /// </remarks>
+    private void HoldFullScreen()
+    {
+        // Con la píldora puesta el cuerpo ya está tapado a mano por ApplyPresence, y el frente lo
+        // necesita justamente para que la píldora se vea. Esos cuatro segundos son la excepción.
+        if (_pillOnly)
+        {
+            return;
+        }
+
+        // Aunque ya esté suelto: es una línea que se pisa desde afuera con un Topmost = true sin
+        // querer, y lo que evita es sacar de su modo a un juego en pantalla completa exclusiva.
+        Topmost = false;
+
+        if (_presence.IsLeaving)
+        {
+            return;
+        }
+
+        var centre = new Point(
+            _motion.Position.X + ShellLayout.OrbSize / 2,
+            _motion.Position.Y + ShellLayout.OrbSize / 2);
+        _presence.Esconder(centre, CurrentWorkArea);
+        _hiddenByFullScreen = true;
+        Diagnostics.RuntimeTrace.Write(
+            "pantalla.completa",
+            "el cuerpo volvió por otro camino · se esconde de nuevo");
+    }
+
+    /// <summary>
+    /// Olvida la pantalla completa sin mostrar nada.
+    /// </summary>
+    /// <remarks>
+    /// Es lo que corresponde cuando el orbe no está en pantalla: no hay nada que esconder, nada que
+    /// anunciar, y el aviso urgente que quedara pendiente pertenece a una situación que ya no
+    /// existe. No entra por <see cref="LeaveFullScreen"/> justamente por eso: ésa termina mostrando
+    /// el orbe, y acá el usuario lo guardó a propósito.
+    /// </remarks>
+    private void DropFullScreen()
+    {
+        if (!_fullScreen && !_urgentPending && !_pillOnly && !_sliverShown)
+        {
+            return;
+        }
+
+        FullScreenAhead = false;
+        _urgentPending = false;
+        _pillOnly = false;
+        _hiddenByFullScreen = false;
+        _pillTimer?.Stop();
+        Topmost = true;
+        UpdateSliver();
+
+        // Queda en la bitácora porque es la única forma de ver desde afuera que la condición se
+        // soltó: sin esta línea, «se guardó con un video adelante» y «se guardó con el flanco pegado
+        // en true» son la misma corrida vista desde afuera, y el segundo enciende el filete de 3 px
+        // sobre un escritorio normal media hora después.
+        Diagnostics.RuntimeTrace.Write("pantalla.completa", "guardado · se suelta la condición");
     }
 
     /// <summary>
@@ -1099,21 +1231,41 @@ public partial class MainWindow : Window
     /// a la vista y no hay nada que anunciar de otra manera.
     /// </para>
     /// </remarks>
-    private void MarkUrgent()
+    private void MarkUrgent() => ShowPillOverFullScreen(pending: true);
+
+    /// <summary>
+    /// La única forma de Viernes que se permite encima de una pantalla completa: la píldora.
+    /// </summary>
+    /// <param name="pending">
+    /// Si además queda algo sin ver. Con <c>true</c>, cuando la píldora se retrae queda el filete
+    /// encendido hasta que la pantalla completa termine; con <c>false</c> no queda nada. Un
+    /// recordatorio o una confirmación esperando decisión son <c>true</c>. Que se haya oído el
+    /// nombre, no: no deja nada pendiente, y un falso positivo del nombre no puede dejar una barra
+    /// encendida contra el borde de un juego durante toda la partida.
+    /// </param>
+    private void ShowPillOverFullScreen(bool pending)
     {
         if (!_fullScreen)
         {
             return;
         }
 
-        _urgentPending = true;
+        _urgentPending |= pending;
         _pillOnly = true;
+
+        // A mano y no esperando al próximo cuadro: con el cuerpo guardado no hay nada que dibujar,
+        // WPF deja de componer y CompositionTarget.Rendering deja de dispararse —es el mismo motivo
+        // por el que los cuatro segundos van en un reloj aparte—. Encender la píldora desde el bucle
+        // sería encenderla cuando el bucle vuelva, que puede ser nunca.
+        ApplyPresence();
 
         // Vuelve a estar arriba, y sólo ahora: el orbe soltó el Topmost al esconderse, y sin
         // recuperarlo la píldora se dibuja debajo del video y no la ve nadie. Es el único momento en
         // que Viernes se pone adelante de una pantalla completa, y aun así no toma el foco.
+        Diagnostics.RuntimeTrace.Write(
+            "pantalla.completa",
+            pending ? "aviso urgente · sólo la píldora" : "pedido de presencia · sólo la píldora");
         Topmost = true;
-        Diagnostics.RuntimeTrace.Write("pantalla.completa", "aviso urgente · sólo la píldora");
 
         // Los cuatro segundos van en su propio reloj y no en el bucle de cuadro. Escondido no hay
         // nada que dibujar, WPF deja de componer y CompositionTarget.Rendering deja de dispararse:
@@ -1135,11 +1287,12 @@ public partial class MainWindow : Window
     /// Retrae la píldora al filete cuando se cumplieron los cuatro segundos.
     /// </summary>
     /// <remarks>
-    /// Vuelve a esconder la presencia, y eso no es redundante: el pedido de presencia que dispara el
-    /// aviso lo atiende también <c>App</c>, que llama a <c>ShowWithoutStealingFocus</c> y con eso el
-    /// orbe empieza a volver. Mientras dura la píldora no se nota —el cuerpo está tapado a mano—,
-    /// pero al soltar esa tapa aparecería entero encima del juego. Sin esta línea, el aviso urgente
-    /// termina haciendo justo lo que la regla prohíbe.
+    /// Vuelve a esconder la presencia y a soltar el frente en vez de confiar en que sigan como los
+    /// dejó <see cref="EnterFullScreen"/>. Es a propósito: mientras dura la píldora el cuerpo está
+    /// tapado a mano —<see cref="ApplyPresence"/> lo apaga por <c>_pillOnly</c>— y al soltar esa
+    /// tapa se dibuja lo que diga la presencia. Si algún camino la hubiera devuelto en el medio, el
+    /// aviso urgente terminaría haciendo justo lo que la regla prohíbe: el cuerpo entero encima del
+    /// juego. Es dos líneas contra un bug que se vería como que Viernes se plantó adelante.
     /// </remarks>
     private void RetractUrgentPill()
     {
@@ -1163,6 +1316,10 @@ public partial class MainWindow : Window
             Topmost = false;
         }
 
+        // Igual que al encenderla: apagar la píldora desde el bucle de cuadro sería apagarla cuando
+        // el bucle vuelva. Con el cuerpo guardado no vuelve, y la píldora quedaba puesta encima del
+        // juego para siempre.
+        ApplyPresence();
         UpdateSliver();
     }
 
@@ -1625,8 +1782,19 @@ public partial class MainWindow : Window
     /// La llegada desde la bandeja: el orbe se desprende del borde inferior derecho del monitor donde
     /// ya vive y aterriza en su lugar.
     /// </summary>
+    /// <remarks>
+    /// Con una pantalla completa adelante no hay llegada. No es sólo que no se vería: esta animación
+    /// teletransporta el orbe al borde de la pantalla y lo deja volver con el resorte, así que
+    /// correrla a ciegas lo dejaría lejos de donde estaba, y ahí es donde después aparecen la píldora
+    /// y el filete.
+    /// </remarks>
     internal void PlayArrivalFromTray()
     {
+        if (_fullScreen)
+        {
+            return;
+        }
+
         var workArea = CurrentWorkArea;
         var bounds = ShellLayout.OrbBounds(workArea);
         var target = _motion.Position;
@@ -1684,10 +1852,51 @@ public partial class MainWindow : Window
     /// Trae el orbe al frente sin activar la ventana. Viernes puede aparecer mientras el usuario
     /// escribe en otra aplicación sin robarle el teclado; sigue siendo presencia, no interrupción.
     /// </summary>
+    /// <remarks>
+    /// <b>Es la única puerta por la que se vuelve a dibujar el cuerpo desde afuera</b>, y por eso
+    /// acá vive la consulta de pantalla completa. Antes la pantalla completa era un flanco que sólo
+    /// miraba <see cref="CheckFullScreen"/>: un falso positivo de la palabra de activación durante
+    /// una partida entraba por acá, el orbe volvía entero y siempre-arriba encima del juego y se
+    /// quedaba así hasta que el juego terminara. Ahora el pedido se convierte en lo único
+    /// permitido: la píldora cuatro segundos, y después nada.
+    /// <para>
+    /// Se vuelve a medir en el momento en vez de creerle a la última lectura: el vigía mira una vez
+    /// por segundo, y para reaccionar a que el usuario entre a un juego eso alcanza. Para esto no:
+    /// quien llama acaba de hacer visible la ventana, y un segundo de cuerpo entero encima del
+    /// juego ya es el bug.
+    /// </para>
+    /// </remarks>
     internal void ShowWithoutStealingFocus()
     {
-        _presence.Aparecer();
+        // Antes de medir: CheckFullScreen se rehúsa a mirar mientras hay una retirada en curso, y
+        // acá la retirada quedó cancelada por este mismo pedido.
         _hidingToTray = false;
+        CheckFullScreen();
+
+        if (_fullScreen)
+        {
+            ShowPillOverFullScreen(pending: false);
+            return;
+        }
+
+        RevealOrb();
+    }
+
+    /// <summary>
+    /// Devuelve el cuerpo a la pantalla y la ventana al frente, sin activarla.
+    /// </summary>
+    /// <remarks>
+    /// Sin consultar la pantalla completa: los dos que entran por acá ya la consultaron —uno porque
+    /// acaba de medirla, el otro porque acaba de comprobar que se terminó—. Volver a preguntar acá
+    /// dejaría a <see cref="LeaveFullScreen"/> llamándose a sí misma por el camino largo.
+    /// </remarks>
+    private void RevealOrb()
+    {
+        // La propiedad de WPF y no sólo el SetWindowPos: EnterFullScreen la puso en false y, mientras
+        // siga así, cualquier cosa que WPF vuelva a aplicar sobre la ventana se lleva puesto el
+        // HWND_TOPMOST que dejó la llamada de abajo.
+        Topmost = true;
+        _presence.Aparecer();
 
         var handle = new WindowInteropHelper(this).Handle;
         if (handle == nint.Zero)

@@ -74,10 +74,20 @@ public sealed class ClaudeSessionWatcher
     /// produce un lazo —cada resumen genera actividad que a su vez merece resumen— y además no es
     /// lo que el usuario quiere seguir.
     /// </remarks>
+    /// <param name="now">Contra qué momento se calcula hace cuánto que no pasa nada.</param>
+    /// <param name="maximum">Cuántas devolver como mucho.</param>
+    /// <param name="excludeProjectContaining">Carpeta que no se quiere ver. Ver arriba.</param>
+    /// <param name="onlyProjectContaining">
+    /// Si se pasa, sólo las sesiones cuya carpeta contenga esto. Filtra <b>acá adentro</b> y no
+    /// después, porque el corte por <paramref name="maximum"/> se aplica sobre lo que quedó: filtrar
+    /// afuera devolvería las ocho más recientes de la máquina y recién ahí buscaría, que para un
+    /// proyecto que hace rato no se toca es no encontrarlo nunca.
+    /// </param>
     public IReadOnlyList<SessionSnapshot> Recent(
         DateTimeOffset now,
         int maximum = 8,
-        string? excludeProjectContaining = null)
+        string? excludeProjectContaining = null,
+        string? onlyProjectContaining = null)
     {
         if (!Directory.Exists(_root))
         {
@@ -102,6 +112,12 @@ public sealed class ClaudeSessionWatcher
 
             if (excludeProjectContaining is not null &&
                 snapshot.Project.Contains(excludeProjectContaining, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(onlyProjectContaining) &&
+                !snapshot.Project.Contains(onlyProjectContaining, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -212,7 +228,16 @@ public sealed class ClaudeSessionWatcher
     }
 
     /// <summary>Cuenta en una línea qué está pasando en una sesión.</summary>
-    public static string Describe(SessionSnapshot snapshot, DateTimeOffset now)
+    /// <param name="snapshot">La sesión.</param>
+    /// <param name="now">Contra qué momento se calcula hace cuánto.</param>
+    /// <param name="includeLastSaid">
+    /// Si se incluye lo último que dijo el asistente en esa sesión. Va en <see langword="true"/> por
+    /// omisión porque adentro de Viernes es lo que el usuario quiere ver de sus propios proyectos.
+    /// Lo pone en <see langword="false"/> quien esté escribiendo para <b>afuera</b>: son cientos de
+    /// caracteres de una conversación de otro proyecto, y de un vistazo a la lista entera salen los
+    /// de todos.
+    /// </param>
+    public static string Describe(SessionSnapshot snapshot, DateTimeOffset now, bool includeLastSaid = true)
     {
         var project = Path.GetFileName(snapshot.Project.TrimEnd('\\', '/'));
         var hace = Humanize(now - snapshot.LastActivity);
@@ -224,7 +249,7 @@ public sealed class ClaudeSessionWatcher
                 $"lo último hace {hace}.",
             SessionActivity.Esperando =>
                 $"En {project} terminó y te está esperando desde hace {hace}" +
-                (snapshot.LastSaid is null ? "." : $". Dijo: «{snapshot.LastSaid}»"),
+                (includeLastSaid && snapshot.LastSaid is not null ? $". Dijo: «{snapshot.LastSaid}»" : "."),
             _ => $"En {project} no pasa nada hace {hace}."
         };
     }

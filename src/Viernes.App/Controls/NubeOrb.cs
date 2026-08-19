@@ -113,13 +113,21 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     private readonly Random _flicker = new(20260817);
 
     /// <summary>
-    /// El desparramo de la salpicadura al golpear un borde y el de los resortes de estela.
+    /// El desparramo de la salpicadura al golpear un borde. Sólo eso.
     /// </summary>
     /// <remarks>
     /// Aparte del destello a propósito: esto <b>sí</b> toca la forma. El cuerpo quieto sigue siendo
     /// idéntico en cada arranque porque la semilla es fija y porque nadie lo consulta hasta que hay
     /// un golpe; mezclarlo con el destello haría que un choque corriera la secuencia del otro y dos
     /// sesiones dejarían de coincidir.
+    /// <para>
+    /// El comentario anterior decía que de acá salían también los resortes de estela. No es cierto:
+    /// ésos los arma el constructor con su propio <c>Random</c>. El problema era que los dos tenían
+    /// la misma semilla, así que emitían la misma secuencia y la salpicadura de cada partícula de
+    /// polvo repetía número por número los tiros que ya se habían usado para la rigidez de los
+    /// resortes. Dos corrientes separadas que sacan lo mismo no están separadas: ahora las semillas
+    /// también son distintas.
+    /// </para>
     /// </remarks>
     private readonly Random _splash = new(20260819);
 
@@ -174,6 +182,9 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     /// <summary>El último golpe que este cuerpo llegó a acusar. Ver <see cref="OrbMotionSample"/>.</summary>
     private int _hitToken;
 
+    /// <summary>Si ya llegó algún cuadro de movimiento. Ver <see cref="ReportMotion"/>.</summary>
+    private bool _motionSeen;
+
     /// <summary>Si en el cuadro anterior el usuario lo tenía agarrado. Soltarlo es un evento.</summary>
     private bool _wasDragging;
 
@@ -204,7 +215,13 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
         // Los resortes de estela salen de SU PROPIA secuencia y no de la de arriba. Sacarlos de la
         // misma corría todos los tiros siguientes y la nube quieta pasaba a tener otra forma: un
         // cambio que no se pidió, en la parte del dibujo que ya estaba aprobada.
-        var springs = new Random(20260819);
+        //
+        // La semilla tiene que ser distinta de la de _splash, no sólo el objeto: las dos valían
+        // 20260819 y emitían la misma secuencia, así que la salpicadura de cada partícula de polvo
+        // repetía los tiros que ya se habían gastado en la rigidez de los resortes. Estaban
+        // separadas de nombre y correlacionadas de hecho. 20260820 es la que quedaba libre —16 la
+        // forma, 17 el destello, 19 la salpicadura—; su único requisito es no repetir ninguna.
+        var springs = new Random(20260820);
 
         var coreCount = (int)Math.Round(TotalPoints * 0.19);
         var ringCount = (int)Math.Round(TotalPoints * 0.255);
@@ -340,7 +357,22 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     public void ShowMood(OrbMood mood) => _channel.RequestMood(mood);
 
     /// <inheritdoc />
-    public void ReportMotion(in OrbMotionSample motion) => _windowMotion = motion;
+    public void ReportMotion(in OrbMotionSample motion)
+    {
+        // El primer cuadro adopta el token del golpe sin ejecutarlo. Un cuerpo recién creado nace
+        // con _hitToken en 0, y si el usuario cambia de gota a nube después de haber tirado el orbe
+        // contra un borde el Sample sigue trayendo el token de ese choque: 1 != 0 daba verdadero y
+        // la nube arrancaba con ondas, patada de escala y todo el polvo empujado contra una normal
+        // que nadie tocó. Un golpe que pasó antes de que este cuerpo existiera no es suyo. Es lo
+        // mismo que hace Channel con TransitionToken al asignársele: se adopta lo que ya venía.
+        if (!_motionSeen)
+        {
+            _motionSeen = true;
+            _hitToken = motion.HitToken;
+        }
+
+        _windowMotion = motion;
+    }
 
     /// <summary>
     /// La estela: cada partícula queda atrás de la ventana y vuelve por su propio resorte.
@@ -510,6 +542,13 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
             return;
         }
 
+        // FrameSeconds es el PISO del paso, no el techo: acá se sale mientras _pending no llegue a
+        // 1/30, y lo que se integra es _pending entero. Como se entra con menos de 1/30 acumulado y
+        // se le suma un delta de hasta 0,09, el paso más largo que puede recibir Advance —y con él
+        // los resortes de RelaxSmear— es 1/30 + 0,09 ≈ 0,123 s. Con la rigidez máxima de Smear.New
+        // (28) eso da dt·ω ≈ 0,65, no el 0,18 que sale de suponer un paso fijo de 1/30. Sigue
+        // sobrando margen para Euler semi-implícito, que aguanta hasta 2, pero el que suba el tope
+        // del clamp o la rigidez tiene que hacer la cuenta con 0,123 y no con 0,033.
         Advance(_pending);
         _pending = 0;
         InvalidateVisual();

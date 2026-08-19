@@ -36,6 +36,28 @@ namespace Viernes.App.Controls;
 /// <c>WS_EX_NOACTIVATE</c>: un filete que come clics contra el borde de un juego a pantalla completa
 /// sería peor que no avisar nada.
 /// </para>
+/// <para>
+/// <b>Contradice a propósito lo que <c>MainWindow.EnterFullScreen</c> evita, y queda escrito acá para
+/// que no se descubra de nuevo dentro de seis meses.</b> Esa función suelta el <c>Topmost</c> de la
+/// ventana porque —lo dice su comentario— una ventana siempre-arriba encima de un juego en pantalla
+/// completa exclusiva lo puede sacar de ese modo. El filete es siempre-arriba y por capas
+/// (<c>AllowsTransparency</c>), y se muestra exactamente ahí. La decisión es <b>aceptar el riesgo</b>,
+/// por tres razones:
+/// </para>
+/// <list type="number">
+/// <item>Sólo existe mientras hay algo urgente sin ver. Sin eso no queda nada, que es la regla; el
+/// caso normal de una partida de tres horas es que el filete no aparezca nunca.</item>
+/// <item>Un aviso urgente que no se ve no es un aviso. Lo que está del otro lado es un recordatorio
+/// que venció o una confirmación esperando decisión, y perderla cuesta más que un parpadeo.</item>
+/// <item>Lo peor que pasa es que el juego salga de pantalla completa exclusiva: molesto, reversible,
+/// y no pierde nada. La píldora ya paga ese mismo precio cuatro segundos antes, con la ventana
+/// principal.</item>
+/// </list>
+/// <para>
+/// Si algún día hay que elegir de nuevo, la alternativa <b>no</b> es dibujarlo más suave: es no
+/// dibujarlo y avisar por el globo de la bandeja, que es lo único que no toca el orden de ventanas.
+/// Se prefirió el filete porque el globo se lo come el modo concentración y desaparece solo.
+/// </para>
 /// </remarks>
 internal sealed class UrgentSliver : Window
 {
