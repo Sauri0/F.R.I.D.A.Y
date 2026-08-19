@@ -183,10 +183,15 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// dos instancias serían dos verdades. El orbe diría «te espero» sobre una pregunta que la
     /// herramienta ya dio por contestada.
     /// <para>
-    /// El caché no se invalida nunca —<c>MissionBook</c> lee el archivo una sola vez y después
-    /// devuelve la lista que tiene—, así que compartir la instancia no es una comodidad: es lo único
-    /// que hace que el orbe vea lo que hizo la herramienta. Lo que <b>no</b> se ve es un
-    /// <c>misiones.json</c> editado por fuera con Viernes abierto; eso pide reiniciar.
+    /// Acá decía que el caché no se invalida nunca y que un <c>misiones.json</c> editado por fuera
+    /// pedía reiniciar. <b>Ya no.</b> El libro relee cuando el archivo cambió —compara fecha y
+    /// tamaño— y su compuerta es estática por ruta, así que dos instancias sobre el mismo archivo se
+    /// excluyen de verdad en vez de pisarse. El conector, que es justamente un editor de afuera,
+    /// funciona con el orbe abierto.
+    /// </para>
+    /// <para>
+    /// Compartir la instancia sigue valiendo la pena igual, y ahora por su razón real: evita una
+    /// relectura del disco por barrido del vigía, que corre cada cinco segundos.
     /// </para>
     /// </remarks>
     private readonly MissionBook _missionBook = new();

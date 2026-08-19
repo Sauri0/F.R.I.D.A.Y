@@ -74,6 +74,51 @@ public sealed class BoundaryTests : IDisposable
     }
 
     [Fact]
+    public async Task CerrarConMotivoSinCancelar_TampocoEscribeLaBitacoraSiAvanzarEstaProhibido()
+    {
+        // La misma falla por la otra puerta. El arreglo anterior cubrió la rama de cancelar, que
+        // escribe con AdvanceAsync; la de cerrar escribe la nota adentro de CloseAsync, y seguía
+        // consultando sólo por «mision cerrar». Dos caminos, el mismo efecto: una línea en la
+        // bitácora bajo un permiso que no es el suyo.
+        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+        var antes = (await this.harness.Missions.ListAsync(onlyOpen: false))[0].Log.Count;
+        await this.harness.Autonomy.LearnAsync("mision avanzar", "*", AutonomyLevel.Nunca);
+
+        var reply = await this.harness.Connector.CloseMissionAsync(
+            "m1", "Salió andando en producción", cancelled: false);
+
+        // Cerrar estaba permitido: la misión se cierra igual. Lo que no entra es el renglón.
+        Assert.True(reply.Ok);
+
+        var stored = Assert.Single(await this.harness.Missions.ListAsync(onlyOpen: false));
+        Assert.Equal(MissionState.Terminada, stored.State);
+        Assert.Equal(antes, stored.Log.Count);
+        Assert.DoesNotContain(
+            stored.Log,
+            entry => entry.Text.Contains("Salió andando en producción", StringComparison.Ordinal));
+
+        Assert.Contains("no quedó anotado", reply.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CerrarConMotivo_SiAvanzarEstaPermitido_SiDejaLaNota()
+    {
+        // El otro lado de la prueba de arriba: sin permiso prohibido, la nota tiene que entrar. Sin
+        // esto, «no escribe la bitácora» pasaría también si el arreglo la hubiera roto para todos.
+        await this.harness.Connector.CreateMissionAsync("Seguir Flow-Bi", "Avisar cuando esté");
+
+        var reply = await this.harness.Connector.CloseMissionAsync(
+            "m1", "Salió andando en producción", cancelled: false);
+
+        Assert.True(reply.Ok);
+        var stored = Assert.Single(await this.harness.Missions.ListAsync(onlyOpen: false));
+        Assert.Equal(MissionState.Terminada, stored.State);
+        Assert.Contains(
+            stored.Log,
+            entry => entry.Text.Contains("Salió andando en producción", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task EscribirEnOtraSesion_PideAutorizacionSinQueNadieConfigureNada()
     {
         this.harness.WriteSession("C:\\proyectos\\Alfa", "alfa", working: false);

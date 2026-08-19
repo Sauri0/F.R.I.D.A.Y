@@ -142,21 +142,24 @@ que cambiar un solo lugar.
 Si lo que hace falta es que al usuario le quede algo anotado, eso sí funciona:
 `viernes_mision_preguntar` deja la pregunta viva en la misión y el orbe la muestra.
 
-## Una limitación que hay que saber
+## Funciona con el orbe abierto
 
-`MissionBook` **cachea el archivo de misiones en memoria y no invalida nunca**: lo lee una vez y
-después devuelve la lista que tiene. La aplicación ya lo dice de sí misma en `AssistantRuntime`: «lo
-que no se ve es un `misiones.json` editado por fuera con Viernes abierto; eso pide reiniciar».
+Durante un tiempo no. `MissionBook` cacheaba el archivo y no invalidaba nunca, así que una misión
+creada desde Claude no aparecía en el orbe hasta reiniciar, y peor: cuando la aplicación guardaba
+cualquier otra cosa, reescribía el archivo entero con su copia vieja y **se perdía lo que había
+escrito el conector**. Esta página decía que movieras misiones con el orbe cerrado.
 
-El conector es, justamente, un editor de afuera. Con Viernes abierto:
+Ya no hace falta, y el arreglo son dos piezas:
 
-- una misión creada desde Claude no aparece en el orbe hasta reiniciar la aplicación;
-- y si la aplicación guarda después —al anotar cualquier otra cosa—, reescribe el archivo entero con
-  su copia vieja y **se pierde lo que escribió el conector**.
+- el libro **relee cuando el archivo cambió** —compara fecha y tamaño, porque dos escrituras dentro
+  del mismo tic del reloj comparten fecha—;
+- y la compuerta del archivo es **estática por ruta**, así que dos instancias sobre el mismo
+  `misiones.json` se excluyen de verdad. Con una compuerta por instancia, dos leer-modificar-escribir
+  no se ven y el último que guarda pisa entero al otro: el archivo no se corrompe —el reemplazo es
+  atómico— pero el trabajo del otro desaparece sin que nada avise.
 
-Con Viernes cerrado no pasa nada de esto. Arreglarlo es cambiar `MissionBook` —releer si el archivo
-cambió, o guardar fusionando—, que está fuera de lo que toca el conector y hay que hacerlo aparte.
-Mientras tanto: si vas a mover misiones desde Claude, hacelo con el orbe cerrado.
+Lo mismo se hizo con `autonomia.json`, donde el mismo defecto era peor: revocar un permiso desde el
+desplegable no frenaba nada en el proceso en curso y después se borraba solo.
 
 ## Probarlo a mano
 

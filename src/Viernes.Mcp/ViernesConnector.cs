@@ -211,7 +211,15 @@ public sealed class ViernesConnector
             return ConnectorReply.Nope(refusal);
         }
 
-        var writesLog = cancelled && !string.IsNullOrWhiteSpace(reason);
+        // Con motivo se escribe en la bitácora, se cancele o no: cancelar lo hace con AdvanceAsync y
+        // cerrar lo hace adentro de CloseAsync. Son dos caminos y el mismo efecto, así que los dos
+        // preguntan por «avanzar».
+        //
+        // Antes sólo preguntaba la rama de cancelar, y esa asimetría es exactamente el defecto que
+        // se vino a arreglar por la puerta de al lado: cada acción tiene que preguntar por lo que
+        // REALMENTE va a hacer, no por el nombre de la herramienta que la contiene. Con «misión
+        // avanzar = nunca», la nota de cierre entraba igual.
+        var writesLog = !string.IsNullOrWhiteSpace(reason);
         var logRefusal = writesLog
             ? await _boundary.WhyNotAsync(MissionAdvance, id, cancellationToken).ConfigureAwait(false)
             : null;
@@ -220,13 +228,21 @@ public sealed class ViernesConnector
         {
             if (!cancelled)
             {
+                // Sin permiso para escribir en la bitácora se cierra igual, pero sin la nota: el
+                // cierre lo autorizó la persona y no se le puede negar; lo que se cae es el renglón.
                 var done = await _missions
-                    .CloseAsync(id ?? string.Empty, reason, cancellationToken)
+                    .CloseAsync(id ?? string.Empty, logRefusal is null ? reason : null, cancellationToken)
                     .ConfigureAwait(false);
 
-                return done is null
-                    ? ConnectorReply.Nope(NotFound(id))
-                    : ConnectorReply.Fine($"Cerrada [{done.Id}] «{done.Title}».");
+                if (done is null)
+                {
+                    return ConnectorReply.Nope(NotFound(id));
+                }
+
+                return logRefusal is null
+                    ? ConnectorReply.Fine($"Cerrada [{done.Id}] «{done.Title}».")
+                    : ConnectorReply.Fine(
+                        $"Cerrada [{done.Id}] «{done.Title}». El motivo no quedó anotado: {logRefusal}");
             }
 
             // Cancelar no guarda motivo por sí solo, así que primero se anota y después se cancela:

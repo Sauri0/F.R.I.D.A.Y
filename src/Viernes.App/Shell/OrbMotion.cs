@@ -90,15 +90,44 @@ internal sealed class OrbMotion
     private double _hitNormalY;
     private double _hitStrength;
 
-    /// <summary>Lo que hay que contarle al cuerpo en este cuadro.</summary>
-    public OrbMotionSample Sample => new(
-        Smoothed.X,
-        Smoothed.Y,
-        IsDragging,
-        _hitToken,
-        _hitNormalX,
-        _hitNormalY,
-        _hitStrength);
+    /// <summary>Hasta cuándo el golpe sigue siendo noticia. Ver <see cref="Sample"/>.</summary>
+    private DateTime _hitFreshUntilUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Cuánto vale un golpe como noticia. Pasado eso, el token queda pero la fuerza se apaga.
+    /// </summary>
+    /// <remarks>
+    /// Un cuerpo consume el golpe en el cuadro siguiente, así que con dos cuadros a 30 fps sobra. El
+    /// punto no es el número: es que la fuerza y la normal dejen de ser estado permanente.
+    /// </remarks>
+    private static readonly TimeSpan HitFreshness = TimeSpan.FromMilliseconds(120);
+
+    /// <summary>
+    /// Lo que hay que contarle al cuerpo en este cuadro.
+    /// </summary>
+    /// <remarks>
+    /// El golpe se apaga solo pasado <see cref="HitFreshness"/>, y el token queda. Antes la fuerza y
+    /// la normal del último choque se guardaban para siempre: un cuerpo recién creado —cambiar de
+    /// gota a nube— recibía el token viejo y, si no lo adoptaba sin ejecutarlo, pegaba el respingo
+    /// entero de un choque de hace media hora. El cuerpo ya se protege de eso adoptando el token, y
+    /// esto cierra la misma puerta del otro lado: el emisor deja de ser una fuente de estado viejo
+    /// para cualquier consumidor que se agregue después y no conozca la regla.
+    /// </remarks>
+    public OrbMotionSample Sample
+    {
+        get
+        {
+            var fresh = DateTime.UtcNow <= _hitFreshUntilUtc;
+            return new OrbMotionSample(
+                Smoothed.X,
+                Smoothed.Y,
+                IsDragging,
+                _hitToken,
+                fresh ? _hitNormalX : 0,
+                fresh ? _hitNormalY : 0,
+                fresh ? _hitStrength : 0);
+        }
+    }
 
     /// <summary>Deja el orbe donde se lo pone, sin inercia ni destino pendiente.</summary>
     public void Teleport(Point position)
@@ -331,6 +360,7 @@ internal sealed class OrbMotion
         _hitNormalX = nx;
         _hitNormalY = ny;
         _hitStrength = Math.Min(1, speed / OrbMotionSample.SpeedReference);
+        _hitFreshUntilUtc = DateTime.UtcNow + HitFreshness;
     }
 
     /// <summary>

@@ -94,11 +94,26 @@ public sealed class ClaudeSessionWatcher
             return [];
         }
 
+        // Cuando se pide un proyecto, las sesiones cuyo CAMINO ya lo nombra van primero, y recién
+        // después se corta.
+        //
+        // El corte por recencia estaba antes del filtro, así que acotar a un proyecto sólo miraba
+        // las sesiones más recientes de toda la máquina: si la que se buscaba era la número
+        // veinticinco no aparecía nunca, que es justo el caso de un proyecto que hace rato no se
+        // toca —el único en el que uno pregunta «¿quedó algo esperando ahí?»—.
+        //
+        // Es un preorden y no un filtro a propósito: el nombre del proyecto que devuelve una sesión
+        // sale de adentro del archivo y no de la carpeta, así que un filtro por camino podría dejar
+        // afuera algo que sí correspondía. Ordenar no descarta nada: lo que el camino no nombra
+        // sigue entrando después, con su recencia intacta.
+        var wanted = Normalize(onlyProjectContaining);
+
         var files = Directory
             .EnumerateFiles(_root, "*.jsonl", SearchOption.AllDirectories)
             .Select(path => new FileInfo(path))
             .Where(file => file.Length > 0)
-            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .OrderByDescending(file => wanted.Length > 0 && Normalize(file.FullName).Contains(wanted, StringComparison.Ordinal))
+            .ThenByDescending(file => file.LastWriteTimeUtc)
             .Take(maximum * 3);
 
         var snapshots = new List<SessionSnapshot>();
@@ -131,6 +146,20 @@ public sealed class ClaudeSessionWatcher
 
         return snapshots;
     }
+
+    /// <summary>
+    /// Deja sólo letras y números, en minúscula, para comparar un camino contra un nombre.
+    /// </summary>
+    /// <remarks>
+    /// Claude Code guarda cada sesión en una carpeta cuyo nombre es el camino del proyecto con los
+    /// separadores cambiados por guiones: <c>N:\Viernes</c> queda como <c>N--Viernes</c>. Sacando
+    /// todo lo que no es letra ni número, «Viernes», «N:\Viernes» y «n--viernes» caen en la misma
+    /// cadena, y quien escribe el filtro no tiene que adivinar cómo se codificó.
+    /// </remarks>
+    private static string Normalize(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? string.Empty
+            : new string(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     /// <summary>Lee una sesión, o <c>null</c> si el archivo no dice nada útil.</summary>
     public SessionSnapshot? Read(string path, DateTimeOffset now)

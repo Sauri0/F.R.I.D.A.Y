@@ -362,8 +362,13 @@ internal partial class LiquidOrb : UserControl, IOrbBody, IOrbMotionSink
             _hitToken = motion.HitToken;
 
             // El golpe entra como velocidad de escala, igual que los otros impulsos: el cuerpo se
-            // achata contra el borde y vuelve solo. Y desprende dos gotas hacia adentro —contra la
-            // normal del borde—, que es la salpicadura.
+            // achata contra el borde y vuelve solo. Y desprende dos gotas HACIA EL BORDE que acaba de
+            // golpear, que es la salpicadura: el líquido sigue de largo por donde venía.
+            //
+            // La normal de OrbMotionSample apunta hacia adentro de la pantalla —+1 el borde
+            // izquierdo, −1 el derecho—, así que negarla es apuntar afuera. El comentario decía
+            // «hacia adentro» y el código hacía lo contrario; la hoja de contactos del banco lo
+            // muestra: golpe contra el borde derecho, las dos gotas salen a la derecha.
             var strength = motion.HitStrength;
             _ripples.Add(new Ripple(_clock, 0.6 * strength));
             _scaleVelocity += 0.9 * strength;

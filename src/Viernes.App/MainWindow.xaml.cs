@@ -1210,7 +1210,20 @@ public partial class MainWindow : Window
         _pillOnly = false;
         _hiddenByFullScreen = false;
         _pillTimer?.Stop();
-        Topmost = true;
+
+        // El «siempre arriba» vuelve sólo si la ventana ya no está a la vista.
+        //
+        // Guardarse en la bandeja no es instantáneo: la retirada dura medio segundo y en ese tramo
+        // IsVisible sigue en true. Subir el Topmost ahí ponía a Viernes encima de un juego en
+        // pantalla completa justo mientras el orbe se encogía, que es exactamente lo que
+        // EnterFullScreen suelta el Topmost para evitar. Es medio segundo y se acomoda solo al tic
+        // siguiente, pero medio segundo de una ventana por capas encima de un juego en exclusiva
+        // alcanza para sacarlo de ese modo.
+        if (!IsVisible)
+        {
+            Topmost = true;
+        }
+
         UpdateSliver();
 
         // Queda en la bitácora porque es la única forma de ver desde afuera que la condición se
