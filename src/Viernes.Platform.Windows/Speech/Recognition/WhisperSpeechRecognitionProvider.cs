@@ -704,7 +704,7 @@ public sealed class WhisperSpeechRecognitionProvider : ISpeechRecognitionProvide
 
     /// <summary>
     /// El modelo se carga una sola vez y queda en memoria. Antes se construía una fábrica nueva en
-    /// cada transcripción, lo que significaba leer del disco y mapear los ~466 MB del modelo, usarlo
+    /// cada transcripción, lo que significaba leer del disco y mapear los ~465 MB del modelo, usarlo
     /// para dos segundos de audio y tirarlo — en cada turno de la conversación. Era la mayor parte
     /// del silencio entre que terminabas de hablar y te contestaba.
     /// </summary>

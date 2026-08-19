@@ -165,13 +165,26 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
     /// <summary>Hasta dónde la dejó llegar el usuario con cada acción y cada persona.</summary>
     private readonly AutonomyPolicy? _autonomy;
     private readonly int _maxToolIterations;
-    private readonly string _systemPrompt;
+
+    /// <summary>
+    /// Si el prompt es el de fábrica, y por lo tanto el nombre que dice la primera línea lo puso
+    /// esta clase.
+    /// </summary>
+    /// <remarks>
+    /// Es lo que habilita <see cref="TryRenameAsync"/>: en un prompt escrito a mano el nombre puede
+    /// estar en cualquier parte, o no estar, y sustituirlo sería pisar lo que escribió otro.
+    /// </remarks>
+    private readonly bool _promptIsDefault;
+
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly Lock _stateGate = new();
     private readonly List<ConversationMessage> _history = [];
     private readonly Dictionary<string, PendingToolCall> _pendingCalls = new(StringComparer.Ordinal);
     private readonly List<TurnStep> _steps = [];
     private AssistantState _currentState = AssistantState.Idle;
+
+    /// <summary>El contrato con el modelo. Cambia si le cambian el nombre al asistente.</summary>
+    private string _systemPrompt;
 
     public ConversationOrchestrator(
         IChatCompletionClient chatClient,
@@ -196,10 +209,56 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         _toolExecutor = toolExecutor ?? throw new ArgumentNullException(nameof(toolExecutor));
         _actionMemory = actionMemory;
         _maxToolIterations = options?.MaxToolIterations ?? ViernesOptions.DefaultToolIterations;
-        _systemPrompt = string.IsNullOrWhiteSpace(systemPrompt)
+        _promptIsDefault = string.IsNullOrWhiteSpace(systemPrompt);
+        _systemPrompt = _promptIsDefault
             ? BuildDefaultPrompt(options?.ApplicationName)
-            : systemPrompt.Trim();
+            : systemPrompt!.Trim();
         _history.Add(ConversationMessage.System(_systemPrompt));
+    }
+
+    /// <summary>
+    /// Cambia el nombre con el que se presenta, sin perder lo que se venía hablando.
+    /// </summary>
+    /// <remarks>
+    /// El camino corto sería rehacer el orquestador con el nombre nuevo, que es lo que se hace al
+    /// arrancar. Pero acá adentro vive el historial de la charla, y renombrar en el medio de una
+    /// conversación no puede costar la conversación: se reemplaza el primer mensaje —el contrato con
+    /// el modelo, lo único donde entra el nombre— y todo lo demás queda en su lugar.
+    /// <para>
+    /// Devuelve <c>false</c> cuando el prompt no es el de fábrica. Ahí el nombre no lo puso esta
+    /// clase y quien llama tiene que avisar que el modelo va a seguir presentándose como antes.
+    /// </para>
+    /// </remarks>
+    public async Task<bool> TryRenameAsync(string? assistantName, CancellationToken cancellationToken = default)
+    {
+        if (!_promptIsDefault)
+        {
+            return false;
+        }
+
+        // Con el turno tomado, igual que <see cref="ClearHistory"/>: cambiar el mensaje de sistema
+        // mientras se está armando el pedido dejaría medio turno con un prompt y medio con el otro.
+        // Esperar es asincrónico porque el que llama suele ser el hilo de la interfaz, y un turno
+        // largo del modelo congelaría la ventana.
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _systemPrompt = BuildDefaultPrompt(assistantName);
+            if (_history.Count > 0 && _history[0].Role == ConversationRole.System)
+            {
+                _history[0] = ConversationMessage.System(_systemPrompt);
+            }
+            else
+            {
+                _history.Insert(0, ConversationMessage.System(_systemPrompt));
+            }
+
+            return true;
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
     }
 
     public AssistantState CurrentState

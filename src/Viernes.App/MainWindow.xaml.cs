@@ -288,6 +288,10 @@ public partial class MainWindow : Window
         menu.Opened += (_, _) => RefreshFollowItems();
 
         AddSeparator(menu);
+
+        // El nombre no es decoración: es la palabra con la que se lo despierta. Se pidió que se
+        // pueda cambiar «tanto ahí como en las opciones del agente».
+        AddSimpleItem(menu, "Cómo me llamo…", ShowAssistantNameDialog);
         AddSimpleItem(menu, "Guardarse en la bandeja", HideToTray);
 
         OrbDragSurface.ContextMenu = menu;
@@ -296,6 +300,10 @@ public partial class MainWindow : Window
 
     private MenuItem? _followItem;
     private MenuItem? _stayPutItem;
+
+    /// <summary>Abre la ventanita del nombre, con el orbe como dueño para que quede encima.</summary>
+    private void ShowAssistantNameDialog() =>
+        new Shell.AssistantNameDialog(_viewModel) { Owner = this }.ShowDialog();
 
     private void RefreshFollowItems()
     {

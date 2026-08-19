@@ -6,7 +6,12 @@
     Un solo archivo que hace todo: baja la aplicación, baja el modelo de voz, pregunta cómo se va a
     llamar el asistente, guarda sus claves y crea los accesos directos.
 
-    Volver a correrlo actualiza la instalación sin volver a preguntar nada.
+    Volver a correrlo actualiza la instalación: se da cuenta solo de que
+    ya hay una y pasa a modo actualización. Lo tuyo queda —nombre, claves, historial, memoria,
+    preferencias, modelo de voz— y se reemplaza la aplicación entera.
+
+    No vuelve a preguntar lo que ya está; sí pregunta lo que falte, que es ganar algo y no
+    repreguntar. «Sin volver a preguntar nada» decía este párrafo, y era falso.
 
 .NOTES
     Las claves son del usuario y ninguna viaja acá adentro. Las dos se piden en el momento, se leen
@@ -18,15 +23,27 @@
 
 [CmdletBinding()]
 param(
-    # Actualiza la aplicación sin preguntar nada. Para el acceso directo «Actualizar».
+    # Fuerza el modo actualización. Para el acceso directo «Actualizar». Sin esto igual se detecta
+    # sola una instalación previa: el modificador sólo saltea la detección.
     [switch] $Actualizar,
+
+    # Cambia el nombre y las claves sin reinstalar nada.
+    [switch] $Reconfigurar,
 
     # Instala sin preguntar, con estos valores. Para pruebas automatizadas.
     [string] $Nombre,
     [switch] $SinModelo,
 
     # Comprueba un nombre y sale sin instalar nada. Ver el bloque principal para el porqué.
-    [string] $ProbarNombre
+    [string] $ProbarNombre,
+
+    # Informa qué encontró instalado y sale sin tocar nada. Para probar la detección.
+    [switch] $ProbarDeteccion,
+
+    # Sólo para pruebas: mira otra carpeta en vez de %LOCALAPPDATA%\Viernes. La aplicación NO lee de
+    # acá, así que una instalación hecha con esto no arranca. Existe para poder probar la detección
+    # contra carpetas armadas a mano sin tocar la instalación real de quien corre las pruebas.
+    [string] $CarpetaDeDatos
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,11 +66,21 @@ $OnnxNativoUrl = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/
 
 # La carpeta de datos NO sigue al nombre elegido. Identifica al producto, no al asistente: si
 # siguiera al nombre, renombrarlo abandonaría el historial, las preferencias y el modelo de voz.
-$Datos = Join-Path $env:LOCALAPPDATA 'Viernes'
+$Datos = if ([string]::IsNullOrWhiteSpace($CarpetaDeDatos)) {
+    Join-Path $env:LOCALAPPDATA 'Viernes'
+} else {
+    $CarpetaDeDatos
+}
+
 $Aplicacion = Join-Path $Datos 'app'
 $Modelos = Join-Path $Datos 'Models\Whisper'
 $Deteccion = Join-Path $Datos 'Models\Vad'
 $Claves = Join-Path $Datos 'claves.json'
+# Las dos llevan «Ruta» adelante porque «$Version» y «$Preferencias» chocaban con los «$version» y
+# «$preferencias» locales de las funciones: PowerShell no distingue mayúsculas en los nombres de
+# variable, así que la local tapaba a la de arriba y Test-Path recibía un diccionario vacío.
+$RutaPreferencias = Join-Path $Datos 'settings.json'
+$RutaVersion = Join-Path $Datos 'version.txt'
 
 #region presentación
 
@@ -101,8 +128,8 @@ function Confirmar-Equipo {
     a otra cosa, y el usuario va a ver que su asistente se llama distinto de lo que escribió.
 
     No se pueden compartir de verdad —esto corre antes de que la aplicación exista en el disco—, así
-    que lo que las mantiene juntas es una prueba: AssistantNameRulesMatchInstallerTests corre este
-    mismo archivo con -ProbarNombre y compara veredicto y forma final contra los del código.
+    que lo que las mantiene juntas es una prueba: ReglasDelNombreTests corre este mismo archivo con
+    -ProbarNombre y compara veredicto y forma final contra AssistantIdentity, nombre por nombre.
 #>
 function Probar-Nombre([string] $candidato) {
     $limpio = if ($null -eq $candidato) { '' } else { $candidato.Trim() }
@@ -147,14 +174,20 @@ function Normalizar-Nombre([string] $candidato) {
     return $armado.ToString()
 }
 
-function Pedir-Nombre {
+<#
+    El nombre por defecto es parámetro porque al reconfigurar tiene que ser el que ya tiene.
+
+    Si acá quedara fijo en «Viernes», quien entra a cambiar sus claves y le da Enter a la pregunta
+    del nombre le estaría renombrando el asistente sin querer.
+#>
+function Pedir-Nombre([string] $porDefecto = 'Viernes') {
     Titulo '¿Cómo querés que se llame?'
     Write-Host '  Es el nombre con el que lo vas a despertar. Podés cambiarlo después.' -ForegroundColor DarkGray
     Write-Host ''
 
     while ($true) {
-        $respuesta = Read-Host '  Nombre (Enter para «Viernes»)'
-        if ([string]::IsNullOrWhiteSpace($respuesta)) { $respuesta = 'Viernes' }
+        $respuesta = Read-Host "  Nombre (Enter para «$porDefecto»)"
+        if ([string]::IsNullOrWhiteSpace($respuesta)) { $respuesta = $porDefecto }
 
         $problema = Probar-Nombre $respuesta
         if ($null -eq $problema) {
@@ -248,10 +281,25 @@ function Pedir-Clave {
         # qué comparar y deja pasar todos los turnos: existe el aparato entero, medido y con interfaz,
         # y no frena nunca. Dos dólares por día son unos dos mil turnos al precio actual —muy por
         # encima del uso normal—, así que no molesta y sí evita la sorpresa de un bucle.
-        if (-not [Environment]::GetEnvironmentVariable('VIERNES_DAILY_BUDGET', 'User')) {
-            [Environment]::SetEnvironmentVariable('VIERNES_DAILY_BUDGET', '2', 'User')
-            $env:VIERNES_DAILY_BUDGET = '2'
-            Paso 'Tope de gasto: USD 2 por día. Se cambia con la variable VIERNES_DAILY_BUDGET.'
+        #
+        # EL NOMBRE DE LA VARIABLE. Acá decía VIERNES_DAILY_BUDGET, que no la lee nadie: el guardián
+        # lee ViernesOptions.DailyBudgetEnvironmentVariable, que vale
+        # VIERNES_OPENROUTER_DAILY_BUDGET_USD. O sea que el tope se anunciaba en pantalla, se
+        # escribía en la cuenta de Windows, y no frenaba absolutamente nada. El comentario de acá
+        # arriba —«existe el aparato entero y no frena nunca»— describía el síntoma exacto y culpaba
+        # a la falta de configuración, cuando el instalador venía configurando la variable
+        # equivocada. Todas las instalaciones hechas hasta hoy quedaron sin tope.
+        $Tope = 'VIERNES_OPENROUTER_DAILY_BUDGET_USD'
+        if (-not [Environment]::GetEnvironmentVariable($Tope, 'User')) {
+            [Environment]::SetEnvironmentVariable($Tope, '2', 'User')
+            Set-Item -LiteralPath "Env:$Tope" -Value '2'
+            Paso "Tope de gasto: USD 2 por día. Se cambia con la variable $Tope."
+        }
+
+        # Y se limpia el nombre viejo si quedó de una instalación anterior, para que nadie lo
+        # encuentre y crea que sirve de algo.
+        if ([Environment]::GetEnvironmentVariable('VIERNES_DAILY_BUDGET', 'User')) {
+            [Environment]::SetEnvironmentVariable('VIERNES_DAILY_BUDGET', $null, 'User')
         }
 
         return
@@ -299,7 +347,7 @@ function Instalar-Aplicacion {
         # rebota contra el modo estricto al pedir una propiedad que esa excepción no tiene, y lo que
         # se ve es «The property 'Response' cannot be found» en vez del motivo real. El peor mensaje
         # posible es el que manda a buscar el problema donde no está.
-        $respuesta = if ($_.Exception.PSObject.Properties.Name -contains 'Response') {
+        $respuesta = if ($null -ne $_.Exception.PSObject.Properties['Response']) {
             $_.Exception.Response
         } else {
             $null
@@ -324,9 +372,8 @@ Si es tuyo, hacelo público o instalá desde el código:
         throw 'La última versión no tiene un paquete para Windows. Avisale al autor.'
     }
 
-    $instalada = Join-Path $Datos 'version.txt'
-    if ((Test-Path -LiteralPath $instalada) -and
-        ((Get-Content -LiteralPath $instalada -Raw).Trim() -eq $release.tag_name) -and
+    if ((Test-Path -LiteralPath $RutaVersion) -and
+        ((Get-Content -LiteralPath $RutaVersion -Raw).Trim() -eq $release.tag_name) -and
         (Test-Path -LiteralPath (Join-Path $Aplicacion 'Viernes.exe'))) {
         Listo "Ya tenés la última versión ($($release.tag_name))."
         return
@@ -351,7 +398,7 @@ Si es tuyo, hacelo público o instalá desde el código:
 
     if (Test-Path -LiteralPath $Aplicacion) { Remove-Item -LiteralPath $Aplicacion -Recurse -Force }
     Move-Item -LiteralPath $nueva -Destination $Aplicacion
-    Set-Content -LiteralPath $instalada -Value $release.tag_name -NoNewline
+    Set-Content -LiteralPath $RutaVersion -Value $release.tag_name -NoNewline
     Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 
     Listo "Aplicación instalada ($($release.tag_name))."
@@ -367,11 +414,11 @@ function Instalar-Modelo {
         return
     }
 
-    Write-Host '  Escucha en tu máquina, sin mandar audio a ningún lado. Son 488 MB' -ForegroundColor DarkGray
+    Write-Host '  Escucha en tu máquina, sin mandar audio a ningún lado. Son 465 MB' -ForegroundColor DarkGray
     Write-Host '  y se bajan una sola vez.' -ForegroundColor DarkGray
 
     New-Item -ItemType Directory -Path $Modelos -Force | Out-Null
-    Bajar-Archivo $ModeloUrl $destino 'el modelo de voz (488 MB)'
+    Bajar-Archivo $ModeloUrl $destino 'el modelo de voz (465 MB)'
 
     $tamaño = (Get-Item -LiteralPath $destino).Length
     if ($tamaño -lt $ModeloMinimoBytes) {
@@ -461,16 +508,62 @@ function Instalar-Deteccion {
 
 #region configuración
 
+<#
+    Lee las preferencias tal cual están, campo por campo, sin interpretar ninguno.
+
+    Acá había un «ConvertFrom-Json -AsHashtable», que no existe en Windows PowerShell 5.1 —llegó en
+    la 6—. Como la llamada estaba dentro de un try/catch que devolvía un diccionario vacío, en 5.1
+    fallaba en silencio y la reinstalación pisaba settings.json entero: se perdían la forma del orbe,
+    la posición del orbe, el micrófono silenciado y el modelo elegido. Justo lo que una actualización
+    no puede hacer. Y 5.1 es el caso normal, porque INSTALAR.cmd cae ahí cuando no hay pwsh.
+
+    Devuelve un diccionario ordenado para conservar el orden del archivo: así una actualización que
+    no cambia nada tampoco reordena el archivo del usuario.
+#>
+function Leer-Preferencias {
+    $preferencias = [ordered]@{}
+    if (-not (Test-Path -LiteralPath $RutaPreferencias)) { return $preferencias }
+
+    try {
+        $crudo = Get-Content -LiteralPath $RutaPreferencias -Raw
+        if ([string]::IsNullOrWhiteSpace($crudo)) { return $preferencias }
+
+        $objeto = $crudo | ConvertFrom-Json
+        foreach ($campo in $objeto.PSObject.Properties) {
+            $preferencias[$campo.Name] = $campo.Value
+        }
+    }
+    catch {
+        # Un settings.json roto a mano no puede frenar la instalación. Se arranca de cero, que es lo
+        # mismo que va a hacer la aplicación cuando no lo pueda leer.
+        return [ordered]@{}
+    }
+
+    return $preferencias
+}
+
+<#
+    Devuelve el nombre guardado, o $null si no hay ninguno.
+
+    Es la señal de «esta instalación ya está configurada»: sin nombre no hubo nunca una instalación
+    terminada, porque el nombre se escribe al final y es lo primero que se pregunta.
+#>
+function Leer-Nombre {
+    $preferencias = Leer-Preferencias
+    if (-not $preferencias.Contains('assistantName')) { return $null }
+
+    $nombre = $preferencias['assistantName']
+    if ($null -eq $nombre -or [string]::IsNullOrWhiteSpace([string] $nombre)) { return $null }
+
+    return [string] $nombre
+}
+
 function Guardar-Nombre([string] $nombre) {
     New-Item -ItemType Directory -Path $Datos -Force | Out-Null
-    $ruta = Join-Path $Datos 'settings.json'
 
     # Se respeta lo que ya había: quien reinstala no pierde su forma de orbe ni su micrófono
     # silenciado sólo porque cambió el nombre.
-    $preferencias = if (Test-Path -LiteralPath $ruta) {
-        try { Get-Content -LiteralPath $ruta -Raw | ConvertFrom-Json -AsHashtable }
-        catch { @{} }
-    } else { @{} }
+    $preferencias = Leer-Preferencias
 
     $preferencias['schemaVersion'] = 1
     $preferencias['assistantName'] = $nombre
@@ -479,7 +572,7 @@ function Guardar-Nombre([string] $nombre) {
     # nombre anterior y el asistente seguiría respondiendo al viejo, o a ninguno.
     $preferencias.Remove('wakeWordPhrases')
 
-    $preferencias | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ruta -Encoding UTF8
+    $preferencias | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $RutaPreferencias -Encoding UTF8
     Listo "Se va a llamar $nombre."
 }
 
@@ -545,7 +638,7 @@ function Guardar-Clave-Google([string] $clave) {
         return $false
     }
 
-    if ($archivo.PSObject.Properties.Name -contains 'GOOGLE_API_KEY') {
+    if ($null -ne $archivo.PSObject.Properties['GOOGLE_API_KEY']) {
         $archivo.GOOGLE_API_KEY = $clave
     }
     else {
@@ -572,7 +665,7 @@ function Pedir-Clave-Google {
 
     $puestas = Leer-Claves
     if ($null -ne $puestas -and
-        ($puestas.PSObject.Properties.Name -contains 'GOOGLE_API_KEY') -and
+        ($null -ne $puestas.PSObject.Properties['GOOGLE_API_KEY']) -and
         -not [string]::IsNullOrWhiteSpace($puestas.GOOGLE_API_KEY)) {
         # Volver a correr el instalador no puede pisar la clave de nadie en silencio.
         Listo 'Ya tenés una clave de Google configurada.'
@@ -641,11 +734,365 @@ function Ofrecer-Arranque {
     Listo 'Va a arrancar con Windows.'
 }
 
+<#
+    Reapunta el arranque automático si ya estaba activado.
+
+    No lo activa ni lo desactiva: eso lo eligió el usuario y no es asunto de una actualización. Lo que
+    corrige es la ruta, porque una entrada escrita por una versión vieja puede apuntar a una carpeta
+    que esta versión ya no usa, y entonces el arranque automático deja de arrancar nada sin que nadie
+    se entere hasta el próximo reinicio.
+#>
+function Sincronizar-Arranque {
+    <#
+        Contesta si el arranque con Windows YA estaba configurado, y de paso le corrige la ruta.
+
+        Devuelve un booleano porque el camino de actualizacion necesita distinguir dos cosas que no
+        son lo mismo: "lo tenia y quedo bien" de "nunca lo tuvo". En el segundo caso hay que
+        ofrecerselo —una instalacion vieja puede ser anterior a que la opcion existiera, y quien
+        nunca la vio no se entera de que esta—. Antes esta funcion no devolvia nada y el camino de
+        actualizacion no preguntaba nunca.
+    #>
+    $clave = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $entrada = Get-ItemProperty -Path $clave -Name 'Viernes' -ErrorAction SilentlyContinue
+    if ($null -eq $entrada) { return $false }
+
+    $esperado = "`"$(Join-Path $Aplicacion 'Viernes.exe')`""
+    if ($entrada.Viernes -eq $esperado) { return $true }
+
+    Set-ItemProperty -Path $clave -Name 'Viernes' -Value $esperado
+    Paso 'El arranque con Windows apuntaba a otro lado. Corregido.'
+    return $true
+}
+
+<#
+    Cierra la aplicación y espera de verdad a que muera.
+
+    Acá había un Stop-Process seguido de 600 ms de sueño, y esos 600 ms eran una apuesta: si el
+    proceso tardaba más —un equipo cargado, un disco lento, un modelo de voz todavía en memoria—, el
+    Remove-Item que viene después fallaba con «el archivo está en uso» y la actualización se caía a
+    mitad, con la carpeta nueva ya extraída al lado. Ahora se espera hasta que el proceso no esté, y
+    si no se muere se dice por qué en vez de romper contra un archivo tomado.
+
+    Antes de matarla se le pide que cierre, y no es por cortesía: Window_Closing guarda dónde quedó
+    el orbe y recién después cancela el cierre para esconderse en la bandeja. O sea que el pedido no
+    la cierra nunca —está hecho así a propósito—, pero sí hace que se guarde el último lugar del
+    orbe. Sin esa línea, actualizar le mueve el orbe a quien lo tenía donde quería. Por eso se espera
+    un ratito corto y se pasa a matar, en vez de esperar un cierre que no va a llegar.
+#>
 function Detener-Aplicacion {
-    Get-Process -Name 'Viernes' -ErrorAction SilentlyContinue | ForEach-Object {
-        $_ | Stop-Process -Force -ErrorAction SilentlyContinue
+    $procesos = @(Get-Process -Name 'Viernes' -ErrorAction SilentlyContinue)
+    if ($procesos.Count -eq 0) { return }
+
+    Paso 'Cerrando la aplicación, que está abierta...'
+
+    foreach ($proceso in $procesos) {
+        try { [void] $proceso.CloseMainWindow() } catch { }
     }
-    Start-Sleep -Milliseconds 600
+
+    Start-Sleep -Milliseconds 800
+
+    foreach ($proceso in $procesos) {
+        try {
+            if (-not $proceso.HasExited) {
+                $proceso | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            # Un proceso que se murió entre la comprobación y el intento no es un problema: el
+            # objetivo era exactamente ése.
+        }
+    }
+
+    # Windows libera los archivos un instante después de que el proceso desaparece de la lista, así
+    # que no alcanza con que Get-Process no lo vea: hay que darle ese instante o el reemplazo falla.
+    $limite = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $limite) {
+        if (@(Get-Process -Name 'Viernes' -ErrorAction SilentlyContinue).Count -eq 0) {
+            Start-Sleep -Milliseconds 400
+            return
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+
+    throw 'No pude cerrar la aplicación. Cerrala vos desde el ícono de la bandeja y volvé a correr esto.'
+}
+
+#endregion
+
+#region qué hay instalado
+
+<#
+    Mira el disco y decide si acá ya vive una instalación.
+
+    Que exista la carpeta de datos NO alcanza, y por eso no se la mira: el instalador la crea —con
+    claves.json adentro— antes de bajar un solo byte, así que una corrida que se cortó en la descarga
+    deja la carpeta hecha y nada más. Tratar eso como «ya instalado» sería saltear las preguntas de
+    alguien que nunca las contestó.
+
+    Las tres señales que sí cuentan son las que sólo aparecen cuando algo terminó:
+      · version.txt        lo escribe Instalar-Aplicacion recién después de mover la carpeta nueva
+                           en su lugar, o sea cuando la aplicación quedó entera;
+      · app\Viernes.exe    el binario, que es lo único que se reemplaza;
+      · assistantName      lo escribe el paso final de la instalación, y es lo primero que se pregunta.
+
+    Las tres presentes es una instalación terminada. Ninguna, una instalación nueva. Algunas es una
+    corrida que se cortó por la mitad, y se dice: ahí no hay que preguntar todo de nuevo, pero
+    tampoco se puede dar por sentado que está lo que falta.
+
+    El modelo de voz y el detector quedan aparte a propósito. No dicen si hay instalación —se puede
+    instalar sin ellos con -SinModelo, y una versión nueva puede necesitar uno que antes no hacía
+    falta—: son equipo que se completa siempre, en la instalación y en la actualización.
+#>
+function Ver-Instalacion {
+    $version = $null
+    if (Test-Path -LiteralPath $RutaVersion) {
+        try {
+            $leido = (Get-Content -LiteralPath $RutaVersion -Raw).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($leido)) { $version = $leido }
+        }
+        catch {
+            # Un version.txt ilegible cuenta como que no está: se va a reescribir igual.
+        }
+    }
+
+    $ejecutable = Test-Path -LiteralPath (Join-Path $Aplicacion 'Viernes.exe')
+    $nombre = Leer-Nombre
+
+    $modelo = Join-Path $Modelos $ModeloNombre
+    $tieneModelo = (Test-Path -LiteralPath $modelo) -and
+        ((Get-Item -LiteralPath $modelo).Length -ge $ModeloMinimoBytes)
+
+    $silero = Join-Path $Deteccion 'silero_vad.onnx'
+    $tieneDetector = (Test-Path -LiteralPath $silero) -and
+        ((Get-Item -LiteralPath $silero).Length -ge $SileroMinimoBytes) -and
+        (Test-Path -LiteralPath (Join-Path $Deteccion 'Microsoft.ML.OnnxRuntime.dll')) -and
+        (Test-Path -LiteralPath (Join-Path $Deteccion 'onnxruntime.dll')) -and
+        (Test-Path -LiteralPath (Join-Path $Deteccion 'onnxruntime_providers_shared.dll'))
+
+    $puestas = Leer-Claves
+    $tieneGoogle = $null -ne $puestas -and
+        ($null -ne $puestas.PSObject.Properties['GOOGLE_API_KEY']) -and
+        -not [string]::IsNullOrWhiteSpace($puestas.GOOGLE_API_KEY)
+
+    $tieneOpenRouter = -not [string]::IsNullOrWhiteSpace(
+        [Environment]::GetEnvironmentVariable('OPENROUTER_API_KEY', 'User'))
+
+    $senales = 0
+    if ($null -ne $version) { $senales++ }
+    if ($ejecutable) { $senales++ }
+    if ($null -ne $nombre) { $senales++ }
+
+    $estado = if ($senales -eq 0) { 'nueva' }
+        elseif ($senales -eq 3) { 'completa' }
+        else { 'a-medias' }
+
+    return [ordered]@{
+        Estado = $estado
+        Version = $version
+        TieneEjecutable = $ejecutable
+        Nombre = $nombre
+        TieneOpenRouter = $tieneOpenRouter
+        TieneGoogle = $tieneGoogle
+        TieneModelo = $tieneModelo
+        TieneDetector = $tieneDetector
+    }
+}
+
+<#
+    Dice qué se conserva y qué se reemplaza, antes de tocar nada.
+
+    Es corto a propósito: quien actualiza necesita una respuesta —«¿pierdo lo mío?»— y no un párrafo.
+    Lo que lo hace cierto es dónde viven las cosas: todo lo del usuario está en la carpeta de datos, y
+    lo único que la actualización borra de ahí adentro es la subcarpeta app.
+#>
+function Contar-Que-Pasa($estado) {
+    # Cada linea sale de lo que Ver-Instalacion encontro DE VERDAD, y no de lo que suele haber.
+    # Prometer «se conserva el nombre y las claves» sobre una instalacion que no tiene ninguna de las
+    # dos es la clase de mensaje que hace desconfiar de todo el resto de la pantalla, y encima justo
+    # en el momento en que el usuario esta decidiendo si dejar que le toquen la instalacion.
+    Write-Host ''
+    Write-Host '  Se conserva:' -ForegroundColor Gray
+
+    if ($null -ne $estado.Nombre) {
+        Write-Host "    · el nombre que elegiste: $($estado.Nombre)" -ForegroundColor DarkGray
+    }
+
+    $claves = @()
+    if ($estado.TieneOpenRouter) { $claves += 'la de OpenRouter' }
+    if ($estado.TieneGoogle) { $claves += 'la de Google' }
+    if ($claves.Count -gt 0) {
+        Write-Host "    · tus claves: $($claves -join ' y ')" -ForegroundColor DarkGray
+    }
+
+    Write-Host '    · el historial, la memoria y tus preferencias' -ForegroundColor DarkGray
+    Write-Host '    · donde dejaste el orbe y que forma le diste' -ForegroundColor DarkGray
+
+    if ($estado.TieneModelo) {
+        Write-Host '    · el modelo de voz y el detector, que no se vuelven a bajar' -ForegroundColor DarkGray
+    }
+
+    Write-Host '  Se reemplaza:' -ForegroundColor Gray
+    Write-Host '    · la aplicacion entera: lo visual, las funciones, todo' -ForegroundColor DarkGray
+
+    # Y lo que falta se dice tambien, porque enterarse despues de una descarga de 200 MB de que
+    # todavia hay que contestar algo es exactamente lo que este bloque existe para evitar.
+    $faltan = @()
+    if ($null -eq $estado.Nombre) { $faltan += 'el nombre' }
+    if (-not $estado.TieneOpenRouter) { $faltan += 'la clave de OpenRouter' }
+    if (-not $estado.TieneModelo) { $faltan += 'el modelo de voz' }
+    if ($faltan.Count -gt 0) {
+        Write-Host '  Falta, y te lo pregunto ahora:' -ForegroundColor Gray
+        Write-Host "    · $($faltan -join ', ')" -ForegroundColor DarkGray
+    }
+
+    Write-Host ''
+}
+
+<#
+    Completa lo que falta y no vuelve a preguntar lo que ya está.
+
+    La diferencia importa: repreguntar el nombre y las claves en cada actualización es exactamente lo
+    que hace que uno deje de actualizar. Pero callarse que falta la clave de Google es perder algo que
+    se podía ganar en una línea, así que eso sí se ofrece.
+#>
+function Completar-Lo-Que-Falta($estado) {
+    if ($null -eq $estado.Nombre) {
+        Aviso 'La instalación anterior quedó sin nombre guardado. Lo elegís ahora.'
+        $elegido = Pedir-Nombre
+        Guardar-Nombre $elegido
+        return $elegido
+    }
+
+    Paso "Sigue llamándose $($estado.Nombre). Se cambia con -Reconfigurar."
+    return $estado.Nombre
+}
+
+#endregion
+
+#region los caminos
+
+<#
+    Actualiza una instalación que ya existe.
+
+    Reemplaza la aplicación y deja el equipo completo, que son dos cosas distintas: antes acá corría
+    sólo Instalar-Aplicacion, así que una versión nueva que necesitara el detector de voz —o el
+    modelo, en un equipo instalado con -SinModelo— quedaba con el binario nuevo y sin con qué
+    escuchar, y los accesos directos seguían siendo los que hubiera dejado la versión anterior.
+#>
+function Actualizar-Instalacion($estado) {
+    Titulo 'Actualizar'
+
+    if ($estado.Estado -eq 'a-medias') {
+        Aviso 'La instalacion anterior quedo a medias. Completo lo que falte.'
+    }
+    elseif ($null -ne $estado.Version) {
+        Paso "Tenes la version $($estado.Version)."
+    }
+
+    Contar-Que-Pasa $estado
+
+    # PRIMERO SE PREGUNTA Y DESPUES SE BAJA, y no al reves.
+    #
+    # Acá el orden era Instalar-Aplicacion, el modelo, el detector, y recien despues completar lo que
+    # faltara. O sea que sobre una instalacion a medias sin nombre, o sin la clave de OpenRouter, el
+    # usuario tenia que quedarse mirando 200 MB de barra para poder contestar. Es exactamente lo que
+    # el comentario del camino de instalacion limpia dice que no hay que hacer, en el mismo archivo.
+    #
+    # Y antes de escribir settings.json hay que cerrar la aplicacion. Si esta abierta —el caso
+    # normal: arranca con Windows y vive en la bandeja— conserva su copia en memoria de las
+    # preferencias y reescribe el archivo ENTERO en cuanto tocas el mute, la forma del orbe o
+    # cualquier otra cosa del menu, arrastrando el nombre viejo. El renombre se perderia sin aviso.
+    Detener-Aplicacion
+
+    Crear-Claves
+    $elegido = Completar-Lo-Que-Falta $estado
+
+    # Solo se piden las claves que faltan. La que ya esta no se toca ni se menciona con su valor.
+    if (-not $estado.TieneOpenRouter) {
+        Aviso 'No tenes clave de OpenRouter puesta. Sin ella el asistente arranca pero no piensa.'
+        Pedir-Clave
+    }
+    else {
+        Paso 'Tu clave de OpenRouter esta puesta.'
+    }
+
+    if (-not $estado.TieneGoogle) {
+        Pedir-Clave-Google
+    }
+    else {
+        Paso 'Tu clave de Google esta puesta.'
+    }
+
+    Instalar-Aplicacion
+    if (-not $SinModelo) {
+        Instalar-Modelo
+        Instalar-Deteccion
+    }
+
+    Titulo 'Ultimos detalles'
+    Crear-Accesos $elegido
+
+    # Si ya tenia arranque automatico, se le corrige la ruta. Si NUNCA lo tuvo, se le ofrece: una
+    # instalacion vieja puede ser anterior a que esto existiera, y no preguntar nunca significa que
+    # esa gente no se entera de que la opcion existe.
+    if (-not (Sincronizar-Arranque)) {
+        Ofrecer-Arranque
+    }
+
+    Write-Host ''
+    Listo "Actualizado. $elegido quedo como estaba, con la aplicacion nueva."
+    Write-Host "   Para cambiarle el nombre desde la aplicacion: clic derecho en el orbe." -ForegroundColor DarkGray
+    Write-Host "   Para cambiarlo o cambiar las claves desde aca: INSTALAR.cmd -Reconfigurar" -ForegroundColor DarkGray
+    Write-Host ''
+}
+
+<#
+    Cambia el nombre y las claves sin bajar ni reemplazar nada.
+
+    Existe porque hasta ahora la única forma de cambiar el nombre desde afuera de la aplicación era
+    reinstalar, y reinstalar para cambiar una palabra son 500 MB y una espera. Acá no se toca el
+    disco más allá de settings.json, claves.json y los accesos directos, que se rehacen porque llevan
+    el nombre.
+#>
+function Reconfigurar-Instalacion($estado) {
+    Titulo 'Reconfigurar'
+
+    if ($estado.Estado -eq 'nueva') {
+        throw 'Aca no hay nada instalado todavia. Corre el instalador sin -Reconfigurar.'
+    }
+
+    $actual = if ($null -ne $estado.Nombre) { $estado.Nombre } else { 'Viernes' }
+    Write-Host "  Hoy se llama $actual. No se baja ni se reemplaza nada." -ForegroundColor DarkGray
+
+    # Se cierra ANTES de escribir settings.json, no despues.
+    #
+    # La aplicacion abierta tiene su propia copia de las preferencias en memoria y reescribe el
+    # archivo entero —con el nombre viejo adentro— en cuanto tocas el mute, la forma del orbe, seguir
+    # el monitor activo, oir oculto o la activacion por voz: todo eso esta en el menu de la bandeja.
+    # Asi que renombrabas por aca, tocabas cualquiera de esos, y el nombre volvia solo al anterior
+    # sin decir nada. Avisar "cerralo y volve a abrirlo" al final no cubria ese caso: para cuando el
+    # usuario lee el aviso, la aplicacion ya puede haber pisado el archivo.
+    Detener-Aplicacion
+
+    $elegido = Pedir-Nombre $actual
+    Guardar-Nombre $elegido
+
+    Pedir-Clave
+    Pedir-Clave-Google
+
+    if (Test-Path -LiteralPath (Join-Path $Aplicacion 'Viernes.exe')) {
+        Crear-Accesos $elegido
+    }
+
+    Write-Host ''
+    Listo "Listo. Ahora se llama $elegido."
+    if ($elegido -ne $actual) {
+        Paso "Lo despertas diciendo «Hola $elegido», «Che $elegido» o «Ey $elegido»."
+        Paso 'Tambien se le puede cambiar el nombre desde la aplicacion: clic derecho en el orbe.'
+    }
+
+    Write-Host ''
 }
 
 #endregion
@@ -671,6 +1118,18 @@ try {
         exit 0
     }
 
+    # Qué encontró y nada más. Ninguna clave se imprime, ni entera ni en pedazos: sólo si está.
+    if ($ProbarDeteccion) {
+        $visto = Ver-Instalacion
+        foreach ($campo in $visto.Keys) {
+            $valor = $visto[$campo]
+            if ($null -eq $valor) { $valor = '' }
+            Write-Output "$campo`t$valor"
+        }
+
+        exit 0
+    }
+
     Clear-Host
     Write-Host ''
     Write-Host '   ┌─────────────────────────────────────────────┐' -ForegroundColor Cyan
@@ -680,11 +1139,32 @@ try {
 
     Confirmar-Equipo
 
-    if ($Actualizar) {
-        Instalar-Aplicacion
-        Listo 'Actualizado.'
-        Start-Process (Join-Path $Aplicacion 'Viernes.exe')
+    $instalado = Ver-Instalacion
+
+    if ($Reconfigurar) {
+        Reconfigurar-Instalacion $instalado
         exit 0
+    }
+
+    <#
+        La detección va acá, antes de la primera pregunta.
+
+        Sin esto, correr el instalador en un equipo que ya tiene el asistente vuelve a preguntar el
+        nombre y las dos claves, y quien contesta ya las contestó. -Actualizar sigue existiendo para
+        el acceso directo, pero ahora es un atajo y no la única puerta: el camino normal —doble clic
+        en INSTALAR.cmd— llega solo a la actualización.
+
+        -Nombre queda afuera a propósito: lo usan las pruebas para instalar sin preguntar, y ahí lo
+        que se quiere es la instalación completa aunque haya restos de una anterior.
+    #>
+    if (($Actualizar -or $instalado.Estado -ne 'nueva') -and -not $Nombre) {
+        if ($instalado.Estado -eq 'nueva') {
+            Aviso 'No encontré una instalación previa. Instalo desde cero.'
+        }
+        else {
+            Actualizar-Instalacion $instalado
+            exit 0
+        }
     }
 
     $elegido = if ($Nombre) {
@@ -777,7 +1257,7 @@ catch {
     Write-Host ''
     Write-Host '  Nada quedó a medias: volvé a correr el instalador cuando quieras.' -ForegroundColor DarkGray
     Write-Host ''
-    if (-not $Nombre) { Read-Host '  Enter para cerrar' | Out-Null }
+    if (-not $Nombre -and -not $ProbarDeteccion) { Read-Host '  Enter para cerrar' | Out-Null }
     exit 1
 }
 

@@ -13,7 +13,7 @@ namespace Viernes.Core.Configuration;
 /// <para>
 /// El nombre hablado no es lo mismo que la carpeta de datos: <c>%LOCALAPPDATA%\Viernes</c> queda fija
 /// porque identifica al producto, no al asistente. Si siguiera al nombre, renombrarlo abandonaría el
-/// historial, las preferencias y los 466 MB del modelo de voz ya descargado.
+/// historial, las preferencias y los 465 MB del modelo de voz ya descargado.
 /// </para>
 /// </remarks>
 public sealed record AssistantIdentity

@@ -16,6 +16,7 @@ internal sealed class TrayIconService : IDisposable
     private readonly Forms.ToolStripMenuItem _autoStartItem;
     private readonly Forms.ToolStripMenuItem _gotaItem;
     private readonly Forms.ToolStripMenuItem _nubeItem;
+    private readonly Forms.ToolStripMenuItem _nameItem;
     private readonly Forms.ToolStripMenuItem _exitItem;
     private readonly Icon _icon;
 
@@ -33,6 +34,7 @@ internal sealed class TrayIconService : IDisposable
         Action toggleListenWhileHidden,
         Action toggleAutoStart,
         Action<string> chooseShape,
+        Action changeName,
         Action exit)
     {
         // Elegir el cuerpo es preferencia, no configuración: no cambia ninguna capacidad.
@@ -51,11 +53,16 @@ internal sealed class TrayIconService : IDisposable
             (_, _) => toggleListenWhileHidden());
         _autoStartItem = new Forms.ToolStripMenuItem("Iniciar con Windows", null, (_, _) => toggleAutoStart());
 
+        // También acá y no sólo en el menú del orbe: con el widget guardado en la bandeja, ésta es la
+        // única puerta que queda abierta.
+        _nameItem = new Forms.ToolStripMenuItem($"Cómo me llamo: {_assistantName}…", null, (_, _) => changeName());
+
         var menu = new Forms.ContextMenuStrip();
         menu.Items.AddRange([
             _showItem,
             new Forms.ToolStripSeparator(),
             shapeMenu,
+            _nameItem,
             new Forms.ToolStripSeparator(),
             _muteItem,
             _wakeWordItem,
@@ -114,6 +121,7 @@ internal sealed class TrayIconService : IDisposable
     {
         _assistantName = AssistantIdentity.Normalize(name);
         _exitItem.Text = $"Salir de {_assistantName}";
+        _nameItem.Text = $"Cómo me llamo: {_assistantName}…";
         SetStatus(_status);
     }
 

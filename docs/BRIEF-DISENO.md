@@ -116,7 +116,7 @@ se abre a la izquierda y las esquinas redondeadas se espejan). Vuelve al orbe so
   toma de micrófono no buscada. Para hablar está el nombre.
 
 ### Voz
-- Se activa con **el nombre en cualquier parte de la frase**, sin saludo y sin pausa: una ventana
+- Se activa con **dos palabras —«Hola Ana»— en cualquier parte de la frase**, sin pausa: una ventana
   rodante de 10 s guarda lo dicho antes y se manda todo junto. Lo recuperado se dibuja más apagado en
   la burbuja, con su encabezado, porque eso no se lo dijiste a ella.
 - **Sigue escuchando con el orbe oculto** y aparece solo al ser llamado.

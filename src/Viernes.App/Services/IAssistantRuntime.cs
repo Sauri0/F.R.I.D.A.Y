@@ -106,6 +106,24 @@ internal sealed record ShellActivationRequest(
     string Title,
     string Detail);
 
+/// <summary>
+/// Qué pasó al cambiarle el nombre al asistente.
+/// </summary>
+/// <remarks>
+/// Tiene tres respuestas y no dos porque hay un medio: el nombre puede quedar aplicado y sin embargo
+/// haber algo que no se pudo hacer en caliente. Ese caso se le dice al usuario en
+/// <paramref name="Warning"/> en vez de dejarlo creyendo que ya lo despierta con el nombre nuevo.
+/// </remarks>
+/// <param name="Applied">Si el nombre quedó puesto.</param>
+/// <param name="Name">El nombre que rige ahora, ya normalizado.</param>
+/// <param name="Problem">Por qué no se aplicó, en palabras que se le puedan mostrar.</param>
+/// <param name="Warning">Qué quedó sin surtir efecto hasta reiniciar, si algo quedó.</param>
+internal sealed record AssistantRenameResult(
+    bool Applied,
+    string Name,
+    string? Problem = null,
+    string? Warning = null);
+
 internal interface IAssistantRuntime : IAsyncDisposable
 {
     event EventHandler<AssistantRuntimeUpdate>? Updated;
@@ -143,6 +161,11 @@ internal interface IAssistantRuntime : IAsyncDisposable
 
     /// <summary>Cómo se llama el asistente. Lo eligió quien instaló y sale de las preferencias.</summary>
     string AssistantName { get; }
+
+    /// <summary>
+    /// Le cambia el nombre, y con él la palabra que lo despierta, sin reiniciar.
+    /// </summary>
+    Task<AssistantRenameResult> SetAssistantNameAsync(string? name, CancellationToken cancellationToken);
 
     Task InitializeAsync(CancellationToken cancellationToken);
 

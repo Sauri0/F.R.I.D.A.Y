@@ -75,9 +75,16 @@ jobs:
           -p:DebugType=none
           --output publicado
 
+      # La versión también viaja adentro del paquete, no sólo en el nombre del zip.
+      #
+      # El instalador anota en «%LOCALAPPDATA%\Viernes\version.txt» lo que instaló, y con eso le
+      # alcanza para saber si hay algo nuevo. Pero ese archivo está al lado de la carpeta y no
+      # adentro: una carpeta «app» copiada, movida o restaurada de una copia de seguridad no dice
+      # qué es. Con esto, sí — y cuesta una línea.
       - name: Empaquetar
         shell: pwsh
         run: |
+          Set-Content -Path publicado\version.txt -Value '${{ steps.etiqueta.outputs.valor }}' -NoNewline -Encoding utf8
           $nombre = "Viernes-${{ steps.etiqueta.outputs.valor }}-win-x64.zip"
           Compress-Archive -Path publicado\* -DestinationPath $nombre -CompressionLevel Optimal
           "paquete=$nombre" >> $env:GITHUB_OUTPUT
@@ -95,10 +102,18 @@ jobs:
           files: ${{ steps.empaquetar.outputs.paquete }}
           generate_release_notes: true
           body: |
-            ## Instalación
+            ## Si ya lo tenías instalado
+
+            Volvé a correr el mismo `INSTALAR.cmd` de siempre. Reemplaza la aplicación entera y no
+            toca nada tuyo: el nombre, las claves, la memoria, lo que aprendió, la papelera, dónde
+            dejaste el orbe y el modelo de voz quedan donde estaban. Se puede repetir cuantas veces
+            haga falta.
+
+            ## Si es la primera vez
 
             1. Bajá **INSTALAR.cmd** e **instalar.ps1** de la carpeta `instalador/`.
             2. Doble clic en `INSTALAR.cmd`.
-            3. Elegí cómo se va a llamar y pegá tu clave de OpenRouter.
+            3. Elegí cómo se va a llamar, pegá tu clave de OpenRouter y —si querés— la de Google,
+               que es opcional.
 
             El instalador baja este paquete solo. No hace falta instalar .NET: viene adentro.

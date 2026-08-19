@@ -102,6 +102,7 @@ public partial class App : System.Windows.Application
             ToggleListenWhileHidden,
             ToggleAutoStart,
             ChooseOrbShape,
+            ChangeAssistantName,
             RequestExit);
 
         // El freno se engancha antes de nada más: si algo falla después, el corte ya existe.
@@ -296,6 +297,34 @@ public partial class App : System.Windows.Application
             ? Controls.OrbShape.Nube
             : Controls.OrbShape.Gota;
         _ = _viewModel?.SetOrbShapeAsync(parsed, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Abre la ventanita del nombre desde la bandeja, incluso con el orbe guardado.
+    /// </summary>
+    /// <remarks>
+    /// Sin dueño cuando la ventana está oculta: <c>Owner</c> de una ventana que no se mostró nunca
+    /// lanza, y ésta es justo la puerta que se usa cuando el orbe no está a la vista. Con el orbe
+    /// visible sí se le pone dueño, para que no quede detrás.
+    /// </remarks>
+    private void ChangeAssistantName()
+    {
+        if (_viewModel is null)
+        {
+            return;
+        }
+
+        var dialog = new Shell.AssistantNameDialog(_viewModel);
+        if (_window is { IsVisible: true })
+        {
+            dialog.Owner = _window;
+        }
+        else
+        {
+            dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        }
+
+        dialog.ShowDialog();
     }
 
     private void ToggleListenWhileHidden()

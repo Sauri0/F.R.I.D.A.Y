@@ -126,6 +126,22 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     /// <summary>Cómo se llama el asistente, para los textos que lo nombran.</summary>
     public string AssistantName => _runtime.AssistantName;
 
+    /// <summary>
+    /// Le pone otro nombre. El aviso de cambio es lo que mueve la bandeja y el título de la ventana.
+    /// </summary>
+    public async Task<AssistantRenameResult> RenameAssistantAsync(
+        string? name,
+        CancellationToken cancellationToken)
+    {
+        var result = await _runtime.SetAssistantNameAsync(name, cancellationToken);
+        if (result.Applied)
+        {
+            OnPropertyChanged(nameof(AssistantName));
+        }
+
+        return result;
+    }
+
     public string MessageText
     {
         get => _messageText;

@@ -62,6 +62,9 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// <summary>Cómo se llama el asistente en esta instalación.</summary>
     private AssistantIdentity _identity = AssistantIdentity.Default;
 
+    /// <summary>Si el último renombrado dejó algo sin hacer. Ver <see cref="SetAssistantNameAsync"/>.</summary>
+    private bool _renameLeftSomethingUndone;
+
     /// <summary>Herramientas MCP ya conectadas, a la espera de que se arme el orquestador final.</summary>
     private IReadOnlyList<IAssistantTool>? _mcpTools;
 
@@ -638,6 +641,151 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
     /// <summary>Cómo se llama el asistente en esta instalación.</summary>
     public string AssistantName => _identity.Name;
+
+    /// <summary>
+    /// Le cambia el nombre y, con él, la palabra que lo despierta, sin reiniciar.
+    /// </summary>
+    /// <remarks>
+    /// El nombre toca cuatro cosas y sólo una es decoración. El prompt del sistema lo dice en la
+    /// primera línea; las frases de activación se derivan de él; la bandeja y el título lo muestran.
+    /// Guardar la preferencia y esperar al próximo arranque sería mentirle al usuario, que acaba de
+    /// elegir cómo llamarlo y va a probar a llamarlo así en el segundo siguiente.
+    /// <para>
+    /// Lo único que no se puede hacer en el lugar es el oído: <see cref="ContinuousWakeListener"/>
+    /// arma la gramática de SAPI cuando se lo construye. Por eso se lo cierra y se abre otro; el
+    /// detector de voz —lo caro— se conserva.
+    /// </para>
+    /// </remarks>
+    public async Task<AssistantRenameResult> SetAssistantNameAsync(
+        string? name,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        if (!AssistantIdentity.TryValidate(name, out var problem))
+        {
+            return new AssistantRenameResult(false, _identity.Name, problem);
+        }
+
+        var identity = new AssistantIdentity(name);
+
+        // La salida rápida sólo vale si el renombrado ANTERIOR terminó entero.
+        //
+        // Acá alcanzaba con que el nombre coincidiera, y _identity se escribía antes de saber si
+        // SaveAsync había andado. Con eso, un renombrado que fallaba a medias —el disco lleno, el
+        // archivo tomado— dejaba _identity ya cambiado, y el reintento con el mismo nombre entraba
+        // por esta puerta y contestaba «listo» sin hacer absolutamente nada. Reintentar es
+        // exactamente lo que hace quien acaba de leer que algo quedó pendiente.
+        if (string.Equals(identity.Name, _identity.Name, StringComparison.Ordinal) && !_renameLeftSomethingUndone)
+        {
+            return new AssistantRenameResult(true, identity.Name);
+        }
+
+        var previousName = _identity.Name;
+        _identity = identity;
+        _settings = _settings with { AssistantName = identity.Name };
+        var saved = await _settingsStore.SaveAsync(_settings, cancellationToken).ConfigureAwait(false);
+
+        // Las opciones llevan el nombre adentro y de ahí lo saca el prompt de fábrica. Se rehacen
+        // antes de renombrar el orquestador para que las dos cosas digan lo mismo.
+        _options = ViernesOptions.FromEnvironment(assistantName: identity.Name);
+        var promptRenamed = await _orchestrator.TryRenameAsync(identity.Name, cancellationToken)
+            .ConfigureAwait(false);
+
+        var wakeRestarted = await RestartWakeListenerAsync(cancellationToken).ConfigureAwait(false);
+        var warning = DescribeRenameLeftovers(saved.Succeeded, promptRenamed, wakeRestarted);
+
+        // Se anota que quedó algo a medias para que reintentar con el mismo nombre vuelva a
+        // intentarlo en vez de contestar que sí. Ver la guarda de arriba.
+        _renameLeftSomethingUndone = warning is not null;
+
+        RuntimeTrace.Write(
+            "nombre.cambiado",
+            $"{previousName} → {identity.Name} · guardado={saved.Succeeded} · prompt={promptRenamed} · " +
+            $"oido={wakeRestarted}");
+
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            _isWakeWordEnabled && !IsMuted
+                ? $"Ahora me llamo {identity.Name} · decí “{_wakeWord?.Phrases[0] ?? identity.WakePhrases[0]}”"
+                : $"Ahora me llamo {identity.Name}",
+            MicrophoneActive: IsAnyMicrophoneActive(),
+            WakeWordEnabled: _isWakeWordEnabled));
+
+        return new AssistantRenameResult(true, identity.Name, Problem: null, warning);
+    }
+
+    /// <summary>
+    /// Junta en una sola frase lo que quedó sin surtir efecto, o <c>null</c> si no quedó nada.
+    /// </summary>
+    private string? DescribeRenameLeftovers(bool saved, bool promptRenamed, bool wakeRestarted) =>
+        DescribeRenameLeftovers(
+            saved,
+            promptRenamed,
+            wakeRestarted,
+            liveSessionOpen: _liveSession is not null,
+            handPickedPhrases: HasHandPickedWakePhrases());
+
+    /// <summary>
+    /// Qué quedó sin hacer al renombrar, en palabras que se le puedan mostrar a quien renombró.
+    /// </summary>
+    /// <remarks>
+    /// Estática y sin estado a propósito: es lo único del renombrado que se puede probar sin
+    /// micrófono, sin disco y sin modelo, y es además lo que el usuario lee. La versión de instancia
+    /// de arriba sólo junta las cinco condiciones.
+    /// <para>
+    /// Devuelve <c>null</c> cuando no quedó nada pendiente, y de eso depende algo más que el
+    /// mensaje: <see cref="SetAssistantNameAsync"/> usa ese <c>null</c> para saber si un reintento
+    /// con el mismo nombre tiene que volver a intentarlo.
+    /// </para>
+    /// </remarks>
+    internal static string? DescribeRenameLeftovers(
+        bool saved,
+        bool promptRenamed,
+        bool wakeRestarted,
+        bool liveSessionOpen,
+        bool handPickedPhrases)
+    {
+        var pending = new List<string>(5);
+
+        if (!saved)
+        {
+            // El nombre ya rige en esta sesión, pero el archivo no se escribió: al reiniciar vuelve
+            // el anterior, y eso es lo que hay que decirle, no el error de disco.
+            pending.Add("no se pudo guardar la preferencia, así que al reiniciar vuelve el nombre anterior");
+        }
+
+        if (!promptRenamed)
+        {
+            pending.Add("el prompt del sistema lo escribió alguien a mano y sigue con el nombre viejo");
+        }
+
+        if (!wakeRestarted)
+        {
+            pending.Add("el oído no volvió a arrancar: te va a escuchar con el nombre nuevo cuando reinicies");
+        }
+
+        if (liveSessionOpen)
+        {
+            // La instrucción de la sesión hablada se manda al abrirla y no se puede reescribir con la
+            // sesión abierta. La próxima ya sale con el nombre nuevo —se arma cada vez—, ésta no.
+            pending.Add("la charla en voz que está abierta sigue con el nombre anterior hasta que se corte");
+        }
+
+        if (handPickedPhrases)
+        {
+            // Frases escritas a mano ganan sobre el nombre a propósito —así está en
+            // ViernesLocalSettings—, pero entonces renombrar no cambia con qué se lo despierta y eso
+            // hay que decirlo, o el usuario prueba el nombre nuevo y no pasa nada.
+            pending.Add("las frases de activación están puestas a mano, así que se lo sigue llamando igual");
+        }
+
+        return pending.Count == 0 ? null : string.Join("; ", pending) + ".";
+    }
+
+    private bool HasHandPickedWakePhrases() =>
+        _settings.WakeWordPhrases is { Count: > 0 } ||
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIERNES_WAKE_PHRASES"));
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
@@ -1431,7 +1579,9 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             return;
         }
 
-        RuntimeTrace.Write("proactivo", $"{observation.Key} · {observation.Message}");
+        // La clave alcanza para saber qué la disparó; el texto es una respuesta del asistente y no
+        // va a la bitácora. Ver la línea de memoria.observada, que tenía el mismo problema.
+        RuntimeTrace.Write("proactivo", observation.Key);
 
         RequestActivation(new ShellActivationRequest(
             ShellActivationReason.Reminder,
@@ -2392,7 +2542,13 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
                 var captured = await _memory
                     .ObserveAsync(fact, confidence: 0.6, cancellationToken: CancellationToken.None)
                     .ConfigureAwait(false);
-                RuntimeTrace.Write("memoria.observada", $"{captured.Status} · {fact}");
+                // El hecho NO se escribe, sólo su veredicto y su largo. Es lo que la bitácora
+                // promete de sí misma —«nunca el contenido de las respuestas»— y acá se estaba
+                // escribiendo lo más personal que maneja el asistente: algo que aprendió sobre quien
+                // lo usa, en texto plano, en un archivo que se comparte para diagnosticar. El
+                // veredicto y el largo alcanzan para saber si la observación entró y con qué tamaño,
+                // que es para lo que sirve esta línea.
+                RuntimeTrace.Write("memoria.observada", $"{captured.Status} · {fact.Length} caracteres");
             }
         }
         catch (Exception exception)
@@ -2827,18 +2983,108 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         };
 
         // El detector se arma acá y no adentro del oído para poder prestárselo a la sesión en vivo.
-        // Es la carga que se estaba pagando de nuevo en cada conversación.
-        var reloj = System.Diagnostics.Stopwatch.StartNew();
-        _voiceDetector = ContinuousWakeListener.CreateDetector(options, out var faltante);
-        reloj.Stop();
-        RuntimeTrace.Write(
-            "vad.cargado",
-            $"{_voiceDetector.Info.Name} en {reloj.ElapsedMilliseconds} ms" +
-            (faltante is null ? string.Empty : $" · {faltante}"));
+        // Es la carga que se estaba pagando de nuevo en cada conversación. Y si ya está armado se
+        // reusa: rehacer el oído para cambiarle el nombre no tiene por qué volver a cargar el modelo
+        // entrenado —que no depende del nombre— ni dejar el anterior colgado prestado a la sesión
+        // en vivo.
+        if (_voiceDetector is null)
+        {
+            var reloj = System.Diagnostics.Stopwatch.StartNew();
+            _voiceDetector = ContinuousWakeListener.CreateDetector(options, out var faltante);
+            reloj.Stop();
+            RuntimeTrace.Write(
+                "vad.cargado",
+                $"{_voiceDetector.Info.Name} en {reloj.ElapsedMilliseconds} ms" +
+                (faltante is null ? string.Empty : $" · {faltante}"));
+        }
 
         var listener = new ContinuousWakeListener(options, _voiceDetector);
         _continuousWake = listener;
         return listener;
+    }
+
+    /// <summary>
+    /// Cierra el oído y abre otro con las frases que correspondan ahora. Dice si quedó escuchando.
+    /// </summary>
+    /// <remarks>
+    /// Las frases se le fijan al oído cuando se lo construye —adentro arma con ellas la gramática de
+    /// SAPI, una sola vez—, así que cambiarle el nombre al asistente no se resuelve avisándole:
+    /// hay que cerrarlo y abrir otro. Es la única parte del renombrado que no se puede hacer en el
+    /// lugar.
+    /// <para>
+    /// Vuelve a arrancar sólo si estaba escuchando. Si estaba parado —silenciado, o con el micrófono
+    /// prestado a una conversación en curso— el que lo despierte después va a encontrar el oído
+    /// nuevo, que ya tiene el nombre nuevo.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// Rehace el oído con las frases del nombre nuevo. Contesta si quedó escuchando como estaba.
+    /// </summary>
+    /// <remarks>
+    /// Todo el cuerpo va adentro del <c>try</c>, y no sólo el arranque. Acá afuera quedaban
+    /// <c>DisposeAsync</c>, <c>BuildWakeListener</c>, <c>SubscribeWakeWord</c> y
+    /// <c>SetMutedAsync</c>: si cualquiera de ésos tiraba —el micrófono lo tomó otro, el motor de
+    /// reconocimiento no se pudo crear— la excepción se escapaba hacia
+    /// <see cref="SetAssistantNameAsync"/>, que no la atrapa, y el renombrado moría después de haber
+    /// destruido el oído viejo. O sea: la peor salida posible, sin oído y sin aviso.
+    /// <para>
+    /// Cuando algo falla se deja <c>_wakeWord</c> en lo que haya quedado y se contesta <c>false</c>,
+    /// que es lo que hace que el usuario vea «el oído no volvió» en vez de un renombrado silencioso a
+    /// medias.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> RestartWakeListenerAsync(CancellationToken cancellationToken)
+    {
+        var previous = _wakeWord;
+        var wasListening = previous?.State == WakeWordServiceState.Listening;
+
+        try
+        {
+            if (previous is not null)
+            {
+                UnsubscribeWakeWord(previous);
+                await previous.DisposeAsync().ConfigureAwait(false);
+            }
+
+            _wakeWord = BuildWakeListener();
+            SubscribeWakeWord(_wakeWord);
+            await _wakeWord.SetMutedAsync(_isMuted, cancellationToken).ConfigureAwait(false);
+
+            if (!wasListening || _isMuted || !_isWakeWordEnabled)
+            {
+                return true;
+            }
+
+            var result = await _wakeWord.StartAsync(cancellationToken).ConfigureAwait(false);
+            if (!result.Succeeded)
+            {
+                RuntimeTrace.Write(
+                    "oido.rearmado.fallo",
+                    $"{result.ErrorCode} · {result.ErrorMessage}");
+            }
+
+            return result.Succeeded;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // El micrófono lo puede haber tomado otro en el medio. Que no vuelva el oído es quedarse
+            // sin wake hasta reiniciar, no quedarse sin asistente: se informa y sigue.
+            RuntimeTrace.Write("oido.rearmado.excepcion", $"{exception.GetType().Name} · {exception.Message}");
+            return false;
+        }
+    }
+
+    private void UnsubscribeWakeWord(IWakeWordService wakeWord)
+    {
+        wakeWord.MicrophoneActivityChanged -= WakeOnMicrophoneActivityChanged;
+        wakeWord.WakeWordDetected -= WakeOnWakeWordDetected;
+        wakeWord.ServiceError -= WakeOnError;
+
+        if (wakeWord is ContinuousWakeListener continuous)
+        {
+            continuous.UtteranceCaptured -= WakeOnUtteranceCaptured;
+            continuous.AudioLevelChanged -= WakeOnAudioLevel;
+        }
     }
 
     private static bool ResolveWakeEnabled(VoiceActivationMode configuredMode)
@@ -3709,16 +3955,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
         if (_wakeWord is not null)
         {
-            _wakeWord.MicrophoneActivityChanged -= WakeOnMicrophoneActivityChanged;
-            _wakeWord.WakeWordDetected -= WakeOnWakeWordDetected;
-            _wakeWord.ServiceError -= WakeOnError;
-
-            if (_wakeWord is ContinuousWakeListener continuous)
-            {
-                continuous.UtteranceCaptured -= WakeOnUtteranceCaptured;
-                continuous.AudioLevelChanged -= WakeOnAudioLevel;
-            }
-
+            UnsubscribeWakeWord(_wakeWord);
             await _wakeWord.DisposeAsync().ConfigureAwait(false);
         }
 

@@ -67,12 +67,13 @@ Esto prueba captura/decodificación/transcripción local de extremo a extremo, p
 
 ## El oído continuo
 
-**El nombre alcanza y va donde caiga en la frase.** No hay que saludar ni esperar.
+**Se lo despierta con dos palabras —«Hola Ana», «Che Ana», «Ey Ana»— y van donde caigan en la
+frase.** No hay que esperar.
 
 Antes el micrófono se lo pasaban de mano en mano: SAPI oía el nombre, soltaba el dispositivo, se
 esperaban 220 ms a que el driver lo liberara, y recién ahí Whisper empezaba a grabar. Todo lo dicho
 **antes** del nombre no lo tenía nadie, y por eso había que decir «Hola Viernes», esperar, y recién
-después hablar.
+después hablar. Lo que se fue es la pausa, no el saludo.
 
 Ahora el micrófono lo abre una sola cosa y el audio se reparte a la vez a tres lugares:
 
@@ -80,18 +81,38 @@ Ahora el micrófono lo abre una sola cosa y el audio se reparte a la vez a tres 
 2. el reconocedor del nombre;
 3. el detector de voz.
 
-Cuando el nombre aparece en cualquier posición, se pega lo anterior adelante y se manda la frase
-entera. El recorte **no** son siempre los diez segundos: llega hasta donde arrancó esa tanda de habla,
-así que con la tele puesta no le mete diez segundos de tele adelante del pedido.
+Cuando la frase de activación aparece en cualquier posición, se pega lo anterior adelante y se manda
+todo junto. El recorte **no** son siempre los diez segundos: llega hasta donde arrancó esa tanda de
+habla, así que con la tele puesta no le mete diez segundos de tele adelante del pedido.
 
-### El falso positivo dejó de importar
+### Qué despierta, exactamente
 
-Se exigían dos palabras porque «el viernes tengo turno» disparaba con confianza 0,69 —más alta que
+La gramática del reconocedor de nombre se arma con las frases que salen del nombre elegido, y esas
+son siempre dos palabras: `AssistantIdentity.WakePhrases` devuelve «Hola X», «Che X» y «Ey X», y
+`ViernesLocalSettings.EffectiveWakePhrases` las entrega tal cual salvo que alguien haya escrito otras
+a mano. `ContinuousWakeListener` compara la transcripción del reconocedor contra esa lista y pide
+igualdad: **el nombre suelto no está en la gramática, así que no dispara**.
+
+Existe además `ContinuousWakeListenerOptions.RequireCompoundPhrase`, que `WakePhrasePolicy.Accepts`
+consulta para rechazar frases de una sola palabra. **Hoy no se puede prender**: el único lugar que
+arma esas opciones —`AssistantRuntime.BuildWakeListener`— no la toca, así que queda en `false` y no
+hay variable ni preferencia que la cambie. O sea que no es una perilla: es un campo del tipo
+esperando a que alguien lo use. El que decide, hoy, es el contenido de la lista de frases.
+
+Se anota porque estaba documentada como si se pudiera usar, y probarla lleva a un callejón.
+
+Para reponer el nombre suelto: `VIERNES_WAKE_PHRASES`.
+
+### Por qué el saludo se quedó
+
+Se exigen dos palabras porque «el viernes tengo turno» disparaba con confianza 0,69 —más alta que
 casi todas las detecciones reales, así que ningún umbral los separaba—.
 
-Al dispararse ya no contesta «¿sí?»: manda la frase al modelo, que lee «el viernes tengo turno», ve
-que no es un pedido y no hace nada. El falso positivo sigue existiendo y dejó de molestar. **El
-problema nunca fue la detección: era el saludo.**
+Lo que sí cambió es cuánto cuesta equivocarse. Al dispararse ya no contesta «¿sí?»: manda la frase al
+modelo, que lee «el viernes tengo turno», ve que no es un pedido y no hace nada. Un falso positivo
+dejó de ser una interrupción y pasó a ser un turno desperdiciado. Eso hace **barata** la palabra
+suelta, no segura: sigue costando plata y sigue abriendo el micrófono, y por eso no es lo que viene
+de fábrica.
 
 ### El detector de voz
 

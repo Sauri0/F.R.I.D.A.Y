@@ -12,57 +12,103 @@ Habla en rioplatense. Vos elegís cómo se llama.
 
 1. Bajá la carpeta [`instalador/`](instalador/) — necesitás `INSTALAR.cmd` e `instalar.ps1` juntos.
 2. Doble clic en **`INSTALAR.cmd`**.
-3. Contestá dos preguntas: cómo se va a llamar y cuál es tu clave de OpenRouter.
+3. Contestá tres cosas: cómo se va a llamar, tu clave de OpenRouter y —si querés— la de Google, que
+   es opcional y se puede dejar para después.
 
-El instalador se encarga del resto: baja la aplicación, baja el modelo de voz, crea los accesos
-directos y lo deja andando. **No hace falta instalar .NET** — viene adentro del paquete.
+El instalador se encarga del resto: baja la aplicación, baja el modelo de voz y el detector, crea los
+accesos directos y lo deja andando. **No hace falta instalar .NET** — viene adentro del paquete.
 
-Volver a correr `INSTALAR.cmd` actualiza a la última versión sin volver a preguntar nada.
+Todo queda en tu carpeta de usuario, así que no hace falta ser administrador.
 
 ### Qué necesitás
 
 | | |
 |---|---|
 | Sistema | Windows 10 o posterior, 64 bits |
-| Espacio | ~700 MB (200 la aplicación, 490 el modelo de voz) |
+| Espacio | ~700 MB (200 la aplicación, 465 el modelo de voz, 16 el detector) |
 | Micrófono | Cualquiera |
 | Clave | Una de [OpenRouter](https://openrouter.ai/keys), gratis de sacar |
+
+---
+
+## Actualizar sin perder nada
+
+**Corré el mismo `INSTALAR.cmd` de siempre.** Ése es todo el procedimiento, y se puede repetir
+cuantas veces haga falta.
+
+Lo que se reemplaza es **la aplicación entera**: lo visual, las funciones, el conector, todo lo que
+haya cambiado entre una versión y la otra.
+
+Lo tuyo no se toca. La aplicación vive en `%LOCALAPPDATA%\Viernes\app`, y una actualización pisa
+**sólo esa carpeta**. Un piso más arriba, intactos, quedan:
+
+- el nombre que le pusiste y tus preferencias — `settings.json`;
+- la clave de Google, si la pusiste — `claves.json`;
+- la memoria, lo que aprendió y los permisos que le diste — `memory.json`, `reglas.json`,
+  `aprendido.json`, `autonomia.json`;
+- las misiones, los objetivos, los recordatorios y la agenda;
+- la papelera de la que se recuperan los archivos borrados;
+- dónde dejaste el orbe y en qué pantalla — `window.json`, `monitores.json`;
+- los 465 MB del modelo de voz y el detector, que no se vuelven a bajar.
+
+La clave de OpenRouter ni siquiera está ahí: vive en las variables de entorno de tu cuenta de
+Windows, y el instalador no la pisa sin preguntar. Con la de Google hace lo mismo: si ya tenés una,
+te avisa que la tenés y sólo la reemplaza si le decís que sí.
+
+Dos detalles que se notan cuando pasa algo:
+
+- Si ya tenés la última versión, te lo dice y no baja nada.
+- Si la descarga se corta a la mitad, **la instalación anterior queda entera**. Lo nuevo se extrae al
+  lado y recién cambia de lugar cuando está completo y tiene adentro lo que tiene que tener.
+
+El nombre te lo vuelve a preguntar. Poné el mismo y sigue todo igual; poné otro y se renombra, que es
+justamente la forma de cambiárselo.
+
+Los detalles finos —qué archivo es cada cosa, cómo saber qué versión tenés, qué hacer si algo
+falla— están en [docs/INSTALACION.md](docs/INSTALACION.md).
 
 ---
 
 ## El nombre lo elegís vos
 
 El instalador pregunta cómo se va a llamar. Ese nombre entra en la primera línea de su prompt, en el
-título de la ventana, en la bandeja del sistema, y define cómo lo despertás.
+título de la ventana, en la bandeja del sistema, en el acceso directo, y define cómo lo despertás.
 
-**El nombre alcanza, y va donde caiga en la frase.** Si lo llamás Ana:
+**Lo despertás con dos palabras.** Si lo llamás Ana:
 
-> *«Ana, creame una carpeta en el escritorio»* — o *«creame una carpeta en el escritorio, Ana»*
+> *«Hola Ana»* · *«Che Ana»* · *«Ey Ana»*
 
-Sin saludo y sin pausa. El micrófono lo abre una sola cosa y el audio se reparte a la vez a una
-ventana rodante de diez segundos, al reconocedor del nombre y al detector de voz; cuando el nombre
-aparece en cualquier posición, se pega lo anterior adelante y se manda la frase entera. El recorte no
-son siempre los diez segundos: llega hasta donde arrancó esa tanda de habla, así que con la tele
-puesta no le mete diez segundos de tele adelante del pedido.
+Nunca el nombre solo, y no es capricho: está medido. Un nombre que también es una palabra de todos
+los días —el original era uno— dicho al pasar en *«el viernes tengo turno»* entraba con más confianza
+que casi todas las llamadas de verdad, así que ningún umbral separaba una cosa de la otra. *«Hola
+Ana»* no aparece sola en una conversación ajena; el nombre suelto, sí.
 
-En la burbuja vas a ver lo que dijiste **antes** de nombrarla dibujado más apagado, con el encabezado
-*«recuperado del búfer»*. Es a propósito: eso no se lo dijiste a ella.
+**Lo que no hace falta es la pausa.** El micrófono lo abre una sola cosa y el audio se reparte a
+la vez a una ventana rodante de diez segundos, al reconocedor del nombre y al detector de voz, así
+que podés nombrarla al final y lo dicho antes se manda con el pedido:
 
-<details>
-<summary>Antes hacían falta dos palabras, y por qué dejaron de hacer falta</summary>
+> *«Creame una carpeta en el escritorio, che Ana»*
 
-Durante un tiempo había que decir *«Hola Ana»* o *«Che Ana»*, nunca *«Ana»* a secas, porque con el
-nombre original la palabra suelta dicha al pasar —*«el viernes tengo turno»*— disparaba con confianza
-0,69 mientras las activaciones verdaderas puntuaban entre 0,62 y 0,68: el falso positivo puntuaba
-**más alto** que casi todos los aciertos y ningún umbral los separaba.
+El recorte no son siempre los diez segundos: llega hasta donde arrancó esa tanda de habla, así que
+con la tele puesta no le mete diez segundos de tele adelante del pedido. En la burbuja vas a ver lo
+que dijiste **antes** de nombrarla dibujado más apagado, con el encabezado *«recuperado del búfer»*.
+Es a propósito: eso no se lo dijiste a ella.
 
-Eso se resolvió por otro lado. Al dispararse ya no contesta *«¿sí?»*: manda la frase entera al
-modelo, que lee *«el viernes tengo turno»*, ve que no es un pedido y no hace nada. El falso positivo
-sigue existiendo y dejó de molestar. **El problema nunca fue la detección: era el saludo.**
+**Para cambiarle el nombre: clic derecho sobre el orbe → «Cómo me llamo…».** Mientras escribís te
+muestra cómo va a quedar y con qué frases lo vas a despertar. Al aceptar cambia todo de una vez y sin
+reiniciar, incluidas esas frases: si pasa de Ana a Nina, deja de contestar a *«Hola Ana»* y contesta
+a *«Hola Nina»*. Si algo no se puede cambiar en caliente —el oído no volvió a arrancar, hay una charla
+hablada abierta— te lo dice en vez de dejarte creer que sí.
 
-</details>
+También se puede desde la bandeja, que es la única puerta cuando el orbe está guardado, o desde el
+instalador con `INSTALAR.cmd -Reconfigurar`.
 
-Para cambiarlo después, volvé a correr el instalador.
+No perdés nada al renombrar: la carpeta de datos se llama siempre igual porque identifica al
+producto, no al asistente.
+
+Si preferís despertarlo con otra cosa, la variable `VIERNES_WAKE_PHRASES` reemplaza las tres frases
+por las tuyas —hasta ocho, separadas por punto y coma—. Ahí sí podés poner el nombre suelto, sabiendo
+lo que eso trae.
 
 ---
 
@@ -146,6 +192,10 @@ Este proyecto está en desarrollo activo y hay cosas a medias. Las conocidas, si
 - **Las misiones, los permisos aprendidos y los objetivos están escritos y nunca se ejercitaron.**
   Se comprueba mirando la carpeta de datos: `misiones.json`, `autonomia.json` y `objetivos.json` no
   existen. El código está probado; el uso no.
+- **Cambiarle el nombre sin volver a correr el instalador todavía no se puede.** El menú del botón
+  derecho del orbe abre paneles, elige si te sigue entre pantallas y lo guarda en la bandeja; el de
+  la bandeja silencia, elige la forma y lo arranca con Windows. Ninguno de los dos tiene dónde
+  renombrarlo, y debería.
 - **Escribir en un chat de Claude Code no se puede**, y está documentado por qué: el `.jsonl` de la
   sesión es el registro que escribe el proceso vivo y no un buzón, `claude -p --resume` arranca otro
   proceso en vez de hablarle a la que espera, y el CLI no trae ningún comando para eso. La

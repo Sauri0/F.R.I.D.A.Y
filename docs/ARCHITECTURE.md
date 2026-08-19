@@ -147,9 +147,15 @@ Hasta esta versión la clase sólo leía recordatorios y `AgendaItem` no tenía 
 | `%LOCALAPPDATA%\Viernes\servidores-mcp.json` | servidores MCP declarados | se leen al iniciar |
 | `%LOCALAPPDATA%\Viernes\papelera\` | lo que borró la tool `archivo` | recuperable con `accion=recuperar` |
 | `%LOCALAPPDATA%\Viernes\usage-ledger.json` | fecha, rol, modelo, tokens y costo sin contenido | conectado al flujo remoto fast |
+| `%LOCALAPPDATA%\Viernes\monitores.json` | en qué pantalla estaba el orbe | conectado al shell |
 | `%LOCALAPPDATA%\Viernes\Models\Whisper\*.bin` | modelo STT local | selector implementado; instalación explícita |
+| `%LOCALAPPDATA%\Viernes\Models\Vad\` | detector de voz entrenado y su runtime | cargado por reflexión, con heurística de respaldo |
 
 Las escrituras de datos, settings y memoria usan archivo temporal + reemplazo. Ninguno de estos documentos tiene un campo de API key.
+
+Aparte, en la misma carpeta y fuera de esa tabla: `claves.json` —el único archivo que puede contener una credencial, la de Google, y que el instalador edita en vez de reescribir—, `version.txt` con la etiqueta instalada, y `app\`, que es donde vive la aplicación.
+
+**Esa separación es la que hace que actualizar no cueste nada.** El instalador reemplaza `app\` entera y no abre ningún otro archivo de la carpeta: el nombre, la memoria, lo aprendido, los permisos, la papelera y los 465 MB del modelo de voz sobreviven a cualquier cantidad de actualizaciones. Ver [INSTALACION.md](INSTALACION.md).
 
 ## Puntos de extensión
 
