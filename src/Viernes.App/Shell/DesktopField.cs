@@ -118,6 +118,22 @@ internal sealed class DesktopField
         var right = home.Right;
         var bottom = home.Bottom;
 
+        // Se le pregunta al vecino con la coordenada RECORTADA, no con la cruda.
+        //
+        // El orbe puede estar fuera de su celda al preguntar: durante el arrastre nadie lo recorta,
+        // y el resorte se pasa de los bordes a propósito. Con la coordenada cruda, un orbe apoyado
+        // contra el borde de abajo —Y por debajo de 952 en una pantalla de 1080— no pasaba la prueba
+        // de altura del vecino de al lado, así que la costura se cerraba y volvía a ser una pared
+        // justo en el cuadro en que lo tirabas hacia la otra pantalla. Medido con las dos pantallas
+        // del usuario: soltado en (-100;1000) a 1200 px/s hacia la derecha, los límites daban
+        // [-1900..-128] y el orbe terminaba 223 px a la IZQUIERDA. Con Y = 952 daban [-1900..1792] y
+        // cruzaba bien. O sea que el orbe salía disparado al revés de como lo tiraste.
+        //
+        // Recortar acá es legítimo porque ese recorte va a pasar igual una línea después, en
+        // ClampInto: se le pregunta al vecino por el punto donde el orbe REALMENTE va a estar.
+        var y = Math.Clamp(orb.Y, home.Top, home.Bottom);
+        var x = Math.Clamp(orb.X, home.Left, home.Right);
+
         foreach (var cell in _cells)
         {
             if (IsSame(cell.Work, work))
@@ -128,7 +144,7 @@ internal sealed class DesktopField
             // Vecino a la izquierda: su borde derecho es el izquierdo de éste, y a la altura del
             // orbe ese monitor todavía existe.
             if (Math.Abs(cell.Work.Right - work.Left) <= Touching &&
-                orb.Y >= cell.Orb.Top && orb.Y <= cell.Orb.Bottom)
+                y >= cell.Orb.Top && y <= cell.Orb.Bottom)
             {
                 left = Math.Min(left, cell.Orb.Left);
                 if (orb.X < home.Left)
@@ -139,7 +155,7 @@ internal sealed class DesktopField
             }
 
             if (Math.Abs(cell.Work.Left - work.Right) <= Touching &&
-                orb.Y >= cell.Orb.Top && orb.Y <= cell.Orb.Bottom)
+                y >= cell.Orb.Top && y <= cell.Orb.Bottom)
             {
                 right = Math.Max(right, cell.Orb.Right);
                 if (orb.X > home.Right)
@@ -150,7 +166,7 @@ internal sealed class DesktopField
             }
 
             if (Math.Abs(cell.Work.Bottom - work.Top) <= Touching &&
-                orb.X >= cell.Orb.Left && orb.X <= cell.Orb.Right)
+                x >= cell.Orb.Left && x <= cell.Orb.Right)
             {
                 top = Math.Min(top, cell.Orb.Top);
                 if (orb.Y < home.Top)
@@ -161,7 +177,7 @@ internal sealed class DesktopField
             }
 
             if (Math.Abs(cell.Work.Top - work.Bottom) <= Touching &&
-                orb.X >= cell.Orb.Left && orb.X <= cell.Orb.Right)
+                x >= cell.Orb.Left && x <= cell.Orb.Right)
             {
                 bottom = Math.Max(bottom, cell.Orb.Bottom);
                 if (orb.Y > home.Bottom)

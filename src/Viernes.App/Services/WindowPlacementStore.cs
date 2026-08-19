@@ -49,16 +49,22 @@ internal sealed class WindowPlacementStore
         }
     }
 
+    /// <summary>
+    /// Deja pedida la escritura y vuelve. No toca el disco.
+    /// </summary>
+    /// <remarks>
+    /// Lo llama <c>MainWindow.UpdateResting</c>, que corre dentro del bucle de cuadro. Acá había un
+    /// <c>File.WriteAllText</c> sincrónico: ver <see cref="DeferredFile"/> para lo que costaba
+    /// medido y por qué se veía como que el orbe se queda pegado al soltarlo.
+    /// </remarks>
     public void Save(Window window, double? anchorLeft = null, double? anchorTop = null)
     {
         try
         {
-            var directory = Path.GetDirectoryName(_settingsPath)!;
-            Directory.CreateDirectory(directory);
             var payload = JsonSerializer.Serialize(new WindowPlacement(
                 anchorLeft ?? window.Left,
                 anchorTop ?? window.Top));
-            File.WriteAllText(_settingsPath, payload);
+            DeferredFile.Write(_settingsPath, payload);
         }
         catch (IOException)
         {

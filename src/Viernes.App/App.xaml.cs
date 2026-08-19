@@ -485,6 +485,12 @@ public partial class App : System.Windows.Application
             _singleInstanceMutex.Dispose();
         }
 
+        // La bitácora y la posición del orbe escriben en otro hilo para no costarle cuadros a nadie,
+        // así que al cerrar puede quedarles algo sin bajar al disco. Se les da un cuarto de segundo
+        // a cada una y no más: nadie puede quedarse esperando al disco para que la aplicación cierre.
+        Services.DeferredFile.Flush(TimeSpan.FromMilliseconds(250));
+        Diagnostics.RuntimeTrace.Flush(TimeSpan.FromMilliseconds(250));
+
         base.OnExit(e);
     }
 }

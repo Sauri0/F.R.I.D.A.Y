@@ -112,12 +112,19 @@ internal sealed class MonitorSlots
         }
     }
 
+    /// <summary>
+    /// Deja pedida la escritura y vuelve. No toca el disco.
+    /// </summary>
+    /// <remarks>
+    /// Lo llama <c>MainWindow.UpdateResting</c>, que corre dentro del bucle de cuadro. Acá había un
+    /// <c>File.WriteAllText</c> sincrónico: ver <see cref="DeferredFile"/> para lo que costaba
+    /// medido y por qué se veía como que el orbe se queda pegado al soltarlo.
+    /// </remarks>
     private void Save()
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-            File.WriteAllText(_path, JsonSerializer.Serialize(_slots));
+            DeferredFile.Write(_path, JsonSerializer.Serialize(_slots));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

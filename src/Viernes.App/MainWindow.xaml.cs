@@ -91,6 +91,12 @@ public partial class MainWindow : Window
     /// <summary>Si hay un arrastre en curso. Mientras dure, la ventana tiene el mouse capturado.</summary>
     private bool _dragging;
 
+    /// <summary>Cuántos cuadros del vuelo se anotan después de soltar. Ver el bloque de OnRendering.</summary>
+    private const int FlightSamples = 24;
+
+    /// <summary>Cuadros que quedan por anotar del vuelo en curso.</summary>
+    private int _afterDrop;
+
     /// <summary>Dónde agarró el dedo, respecto de la esquina del orbe. Sin esto el orbe salta al dedo.</summary>
     private Vector _grab;
 
@@ -629,7 +635,19 @@ public partial class MainWindow : Window
         // cuadro anterior.
         if (_motion.IsDragging)
         {
-            _motion.DragTo(PointerPosition() - _grab);
+            // El objetivo se recorta; la POSICIÓN no. La diferencia es todo el arreglo.
+            //
+            // Hasta acá la rama del arrastre no recortaba nada, así que al levantar el dedo
+            // _motion.Position podía estar hasta 128 px afuera del área legal, y todo lo que la
+            // consume en el cuadro siguiente recibía un punto que no existe: Reach, ClampInto, KeyAt
+            // y el lado por el que se abre el panel. De ahí salían el salto vertical al soltar
+            // pegado a un borde y —peor— el tiro que salía para el lado contrario, porque Reach le
+            // preguntaba al monitor vecino por una altura fuera de rango y cerraba la costura.
+            //
+            // Recortar la posición hubiera sido lo obvio y hubiera estado mal: el orbe TIENE que
+            // poder pasarse del borde y volver, y ese sobrepaso es lo que lo hace pesar. Recortando
+            // el objetivo, la mano no puede pedir un lugar ilegal y el resorte conserva el suyo.
+            _motion.DragTo(Clamp(PointerPosition() - _grab, bounds));
         }
         else
         {
@@ -649,6 +667,31 @@ public partial class MainWindow : Window
 
         UpdateResting();
         WriteWindowPosition();
+
+        // Los primeros cuadros del vuelo, anotados uno por uno.
+        //
+        // Es la única forma de cerrar la mitad que falta. La bitácora del usuario ya demuestra que el
+        // envión EXISTE al soltar —ocho tiros suyos, entre 66 y 1825 px/s— y sin embargo él ve que el
+        // orbe no sale. O sea que el defecto está después de Drop(): o algo le come la velocidad, o
+        // la física avanza y la ventana no la sigue.
+        //
+        // Cada línea contesta las dos por separado. Si la velocidad cae de golpe entre el cuadro 0 y
+        // el 1, algo la pisa. Si la velocidad se mantiene y la posición avanza pero Left/Top no, el
+        // problema está entre la física y SetWindowPos. Y los límites dicen si el vuelo está
+        // rebotando contra una pared que no debería existir.
+        //
+        // Anotar ya no cuesta disco —RuntimeTrace encola y escribe en otro hilo—, así que esto se
+        // puede dejar puesto sin pagar el cuadro que costaba antes.
+        if (_afterDrop > 0)
+        {
+            _afterDrop--;
+            Diagnostics.RuntimeTrace.Write(
+                "orbe.vuelo",
+                $"n={FlightSamples - _afterDrop} · dt={dt * 1000:0.0} ms · v={_motion.Speed:0} px/s · " +
+                $"orbe=({_motion.Position.X:0};{_motion.Position.Y:0}) · " +
+                $"ventana=({Left:0};{Top:0}) · vuela={_motion.IsFlying} · " +
+                $"limites=[{bounds.Left:0}..{bounds.Right:0} x {bounds.Top:0}..{bounds.Bottom:0}]");
+        }
 
         // La costura. El cuerpo se entera de que se está moviendo acá y en ningún otro lado: de esto
         // salen el achatamiento, la inclinación hacia donde va, el polvo que queda atrás y el golpe.
@@ -744,6 +787,11 @@ public partial class MainWindow : Window
         // recorta igual, pero lo que se guardaba no era dónde quedó.
         SaveOrbPlacement();
     }
+
+    /// <summary>Un punto llevado adentro de un rectángulo, sin moverlo si ya estaba.</summary>
+    private static Point Clamp(Point point, Rect bounds) => new(
+        Math.Clamp(point.X, bounds.Left, bounds.Right),
+        Math.Clamp(point.Y, bounds.Top, bounds.Bottom));
 
     /// <summary>El escritorio medido, midiéndolo si todavía no lo estaba.</summary>
     private DesktopField Field()
@@ -1850,14 +1898,17 @@ public partial class MainWindow : Window
 
         _dragging = false;
 
-        // Se anota lo que decide el tiro, porque este arrastre se arregló tres veces razonando y las
-        // tres el usuario siguió viendo el defecto: las pruebas de OrbMotion pasaban en verde
+        // Se anota lo que decide el tiro, porque este arrastre se arregló cuatro veces razonando y
+        // las cuatro el usuario siguió viendo el defecto: las pruebas de OrbMotion pasaban en verde
         // mientras la ventana hacía otra cosa. Lo que no se mide acá adentro no se puede arreglar.
         //
-        // Son tres números y se leen juntos. El TIRO es la velocidad con la que sale. El RETRASO es
-        // cuánto venía quedándose atrás de la mano: si da casi cero, el resorte está pegado al
-        // cursor y no hay de dónde sacar un tiro —fue exactamente el defecto de la amortiguación
-        // crítica—. Y el cursor contra el objetivo dice si el bucle de cuadro llegó a leerlo.
+        // Se leen juntos. El TIRO es la velocidad con la que sale. El RETRASO es cuánto venía
+        // quedándose atrás de la mano: si da casi cero, el resorte está pegado al cursor y no hay de
+        // dónde sacar un tiro —fue exactamente el defecto de la amortiguación crítica—. Y el cursor
+        // contra el objetivo dice si el bucle de cuadro llegó a leerlo antes de que soltaras.
+        //
+        // Anotar no cuesta disco: RuntimeTrace encola y escribe en otro hilo. Cuando esta línea
+        // escribía acá mismo costaba hasta 24 ms medidos, cuatro cuadros, justo al soltar.
         var cursor = PointerPosition() - _grab;
         Diagnostics.RuntimeTrace.Write(
             "orbe.suelto",
@@ -1867,8 +1918,13 @@ public partial class MainWindow : Window
             $"orbe=({_motion.Position.X:0};{_motion.Position.Y:0})");
 
         _motion.Drop();
-        SaveOrbPlacement();
+        _afterDrop = FlightSamples;
 
+        // Acá había un SaveOrbPlacement(). Sobraba y además guardaba mal: escribe un archivo JSON en
+        // el hilo de interfaz —medido, hasta 5,6 ms— en el mismo cuadro en que soltás, y guarda la
+        // posición del DEDO, antes de que el vuelo y el imán terminen de acomodar el orbe. Lo
+        // correcto ya lo hace UpdateResting cuando el orbe se queda quieto, que es cuando se sabe
+        // dónde quedó.
         if (IsMouseCaptured)
         {
             ReleaseMouseCapture();

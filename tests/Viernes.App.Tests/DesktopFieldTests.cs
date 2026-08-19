@@ -197,4 +197,54 @@ public class DesktopFieldTests
         Assert.Equal("izquierda", field.KeyAt(new Point(-900, 400)));
         Assert.Equal("derecha", field.KeyAt(new Point(-100, 400)));
     }
+
+    /// <summary>
+    /// Apoyado contra el borde de abajo, la costura tiene que seguir abierta.
+    /// </summary>
+    /// <remarks>
+    /// Este es el defecto que hacía que un tiro hacia la otra pantalla saliera <b>para el lado
+    /// contrario</b>, y se veía como «no lo puedo tirar».
+    /// <para>
+    /// Durante el arrastre nadie recortaba la posición del orbe, así que al soltarlo podía tener una
+    /// Y por debajo del límite legal —952 en una pantalla de 1080—. Con esa Y cruda, la prueba de
+    /// «¿el vecino existe a esta altura?» no daba, la costura se cerraba y volvía a ser pared. El
+    /// orbe chocaba contra ella y rebotaba con restitución 0,46: lo tirabas a la derecha y salía a la
+    /// izquierda. Medido con la geometría del usuario, soltado a 1200 px/s hacia la derecha, terminó
+    /// 223 px a la izquierda.
+    /// </para>
+    /// <para>
+    /// Es exactamente la queja que <c>DesktopField</c> existe para arreglar —«no debería rebotar en
+    /// el borde que une las dos pantallas»— volviendo por la puerta de atrás.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(400)]      // A media altura: siempre anduvo.
+    [InlineData(1020 - OrbSize - Margin)]  // Justo en el límite legal de abajo.
+    [InlineData(1000)]     // Pasado el límite, que es donde lo deja el arrastre.
+    [InlineData(1200)]     // Bien pasado.
+    [InlineData(-50)]      // Y del otro lado también.
+    public void LaCosturaSigueAbiertaAunqueElOrbeEsteFueraDeLosLimites(double y)
+    {
+        var field = SideBySide();
+        var right = new Rect(0, 0, 1920, 1040);
+
+        var reach = field.Reach(right, new Point(200, y));
+
+        Assert.Equal(-1920 + Margin, reach.Left, 3);
+    }
+
+    /// <summary>Y el borde que no da a ninguna parte sigue siendo pared, esté donde esté el orbe.</summary>
+    [Theory]
+    [InlineData(400)]
+    [InlineData(1200)]
+    [InlineData(-50)]
+    public void ElBordeDeAfueraSigueSiendoParedAunqueElOrbeEsteFueraDeLosLimites(double y)
+    {
+        var field = SideBySide();
+        var right = new Rect(0, 0, 1920, 1040);
+
+        var reach = field.Reach(right, new Point(200, y));
+
+        Assert.Equal(1920 - OrbSize - Margin, reach.Right, 3);
+    }
 }
