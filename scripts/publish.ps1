@@ -22,6 +22,24 @@ $selfContained = if ($FrameworkDependent) { 'false' } else { 'true' }
 
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
+# IncludeNativeLibrariesForSelfExtract va en FALSE, y no es un detalle de empaquetado.
+#
+# En true, las bibliotecas nativas se meten adentro del ejecutable y se extraen a una carpeta
+# temporal al arrancar. Whisper.net no las busca ahi: busca en runtimes\win-x64\native al lado del
+# ejecutable. Resultado, medido con el mismo codigo empaquetado de las dos formas:
+#
+#   normal:                   CARGO en 489 ms
+#   monolitico, extract=true: FALLO en 17 ms - "Native Library not found in default paths"
+#   monolitico, extract=false: CARGO en 483 ms
+#
+# Diecisiete milisegundos es demasiado rapido para haber intentado leer un modelo de 465 MB: fallaba
+# antes de empezar. Y fallaba EN SILENCIO -- la precarga se traga la excepcion y solo deja
+# "ok=False" en la bitacora -- asi que el dictado local quedaba muerto en todo lo que se descargara,
+# sin que nada lo dijera.
+#
+# El costo es que el paquete lleva una carpeta runtimes al lado del ejecutable en vez de un solo
+# archivo. El instalador descomprime todo, asi que no cambia nada para quien lo usa.
+
 Push-Location $projectRoot
 try {
     dotnet publish $appProject `
@@ -31,7 +49,7 @@ try {
         --output $outputDirectory `
         --artifacts-path $buildArtifacts `
         -p:PublishSingleFile=true `
-        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:IncludeNativeLibrariesForSelfExtract=false `
         --nologo
 
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish falló con código $LASTEXITCODE." }
