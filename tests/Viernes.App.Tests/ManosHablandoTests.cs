@@ -33,40 +33,80 @@ public sealed class ManosHablandoTests
             new HttpClient(),
             new ViernesOptions(apiKey: null));
 
+    /// <summary>
+    /// Hablando declara todo lo que hay, igual que por escrito.
+    /// </summary>
+    /// <remarks>
+    /// Eran tres de cuarenta y seis. El motivo escrito era el miedo a que un esquema que el
+    /// protocolo no acepta rebotara el setup entero; se probó contra el servidor de verdad, una por
+    /// una y todas juntas, y las dieciséis integradas entran. Lo que protege ahora no es una lista
+    /// corta sino que el rechazo sea recuperable.
+    /// </remarks>
     [Fact]
-    public void LasTresHerramientasDeclaradasExistenDeVerdad()
+    public void HablandoDeclaraLoMismoQueEscribiendo()
     {
-        // Es una lista de nombres escritos a mano contra un ejecutor que se arma en otro lado: si
-        // alguna se renombra, acá la lista queda vacía en silencio y hablando vuelve a no tener
-        // manos, sin que nada falle ni se registre.
+        var orquestador = Armar();
+        var bridge = new LiveToolBridge(() => orquestador);
+
+        Assert.Equal(orquestador.ToolDefinitions.Count, bridge.Declarations.Count);
+        Assert.True(bridge.Declarations.Count > LiveToolBridge.Essential.Length);
+    }
+
+    /// <summary>
+    /// El piso al que caer existe, es más chico, y son herramientas de verdad.
+    /// </summary>
+    /// <remarks>
+    /// Devolver lo mismo que <c>Declarations</c> sería no tener piso: el reintento declararía otra
+    /// vez lo que el servidor acaba de rechazar. Y una lista de nombres escritos a mano contra un
+    /// ejecutor que se arma en otro lado se vacía sola si alguien renombra una — en silencio, y sin
+    /// que nada falle.
+    /// </remarks>
+    [Fact]
+    public void ElPisoAlQueCaerEsMasChicoYExiste()
+    {
         var bridge = new LiveToolBridge(Armar);
 
-        var nombres = bridge.Declarations.Select(definition => definition.Name).ToArray();
+        var nombres = bridge.EssentialDeclarations.Select(definition => definition.Name).ToArray();
 
-        Assert.Equal(LiveToolBridge.Allowed.Length, nombres.Length);
-        foreach (var permitida in LiveToolBridge.Allowed)
+        Assert.Equal(LiveToolBridge.Essential.Length, nombres.Length);
+        Assert.True(bridge.EssentialDeclarations.Count < bridge.Declarations.Count);
+        foreach (var esencial in LiveToolBridge.Essential)
         {
-            Assert.Contains(permitida, nombres);
+            Assert.Contains(esencial, nombres);
         }
     }
 
+    /// <summary>
+    /// El anuncio no le dice que no puede hacer algo que sí puede.
+    /// </summary>
+    /// <remarks>
+    /// Es la forma que tomó la prueba vieja, que verificaba que el anuncio nombrara a cada permitida.
+    /// Con cuarenta y seis herramientas enumerarlas es absurdo, pero el error que aquella cuidaba
+    /// sigue estando y es el peor de todos: <b>una asistente que miente sobre sí misma</b>. El texto
+    /// decía «lo que hablando NO tenés es leer o escribir archivos, buscar en tu memoria, los
+    /// servidores conectados», y las tres cosas pasaron a ser falsas.
+    /// </remarks>
     [Fact]
-    public void ElAnuncioNombraATodasLasPermitidas()
+    public void ElAnuncioNoNiegaLoQueSiPuede()
     {
-        // Las dos mitades tienen que decir lo mismo. Declarar una herramienta sin nombrarla deja al
-        // modelo creyendo que no la tiene; nombrarla sin declararla lo hace prometer algo que no
-        // puede. Las dos terminan en una asistente que miente sobre sí misma.
-        foreach (var permitida in LiveToolBridge.Allowed)
-        {
-            Assert.Contains(permitida, LiveToolBridge.Anuncio, StringComparison.Ordinal);
-        }
+        var bridge = new LiveToolBridge(Armar);
+        var tiene = bridge.Declarations.Select(definition => definition.Name).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("archivo", tiene);
+        Assert.Contains("web_search", tiene);
+
+        // Lo único que de verdad no puede hablando es mirar la pantalla, y eso sí tiene que estar
+        // dicho: si no lo dijera, intentaría hacer clic a ciegas.
+        Assert.Contains("pantalla", LiveToolBridge.Anuncio, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("NO tenés es el resto del taller", LiveToolBridge.Anuncio, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task LoQueNoEstaEnLaListaNoSeEjecutaAunqueElServidorLoPida()
+    public async Task UnNombreInventadoNoSeEjecutaAunqueElServidorLoPida()
     {
-        // La lista blanca es las dos cosas: lo que se declara y lo que se deja pasar. Confiar sólo
-        // en la declaración es confiar en que el otro lado nunca pida de más.
+        // La puerta sigue existiendo aunque ya no recorte: lo que se ejecuta es lo que el ejecutor
+        // tiene, no lo que el servidor diga. Confiar sólo en la declaración es confiar en que el
+        // otro lado nunca pida de más.
         var bridge = new LiveToolBridge(Armar);
 
         var resultado = await bridge.InvokeAsync(
@@ -74,7 +114,7 @@ public sealed class ManosHablandoTests
             CancellationToken.None);
 
         Assert.False(resultado.Succeeded);
-        Assert.Contains("por escrito", resultado.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ninguna herramienta con ese nombre", resultado.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

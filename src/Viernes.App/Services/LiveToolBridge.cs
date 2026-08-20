@@ -15,11 +15,20 @@ namespace Viernes.App.Services;
 /// treinta herramientas cargadas del otro lado. Enterarse así, en el medio de la charla y pidiendo
 /// algo, es la peor forma de enterarse.
 /// <para>
-/// <b>Van tres y no las treinta, a propósito.</b> Cada herramienta declarada es superficie que puede
-/// fallar en vivo: un esquema que el otro protocolo no acepta rebota el setup entero y la sesión se
-/// cae al camino de siempre sin que nadie entienda por qué. Estas tres cubren lo que se pide
-/// hablando —abrí esto, anotámelo, encargate de aquello— y dejan el camino armado: agregar una más
-/// es agregarla a <see cref="Allowed"/>.
+/// <b>Eran tres de cuarenta y seis, y ese recorte tenía un motivo que resultó no ser cierto.</b> El
+/// miedo escrito era que un esquema que el otro protocolo no acepta rebota el setup entero y la
+/// sesión se cae al camino de siempre sin que nadie entienda por qué. Es un miedo razonable, y
+/// nunca se había probado. Se probó contra el servidor de verdad, una por una y todas juntas: las
+/// dieciséis integradas entran. El recorte estaba de más y le costaba al usuario todo lo que sabía
+/// hacer, cada vez que le hablaba en vez de escribirle.
+/// </para>
+/// <para>
+/// <b>Pero verificar por adelantado no alcanza y no puede alcanzar</b>, porque el conjunto cambia:
+/// las herramientas de los servidores MCP tienen esquemas escritos por terceros, y mañana el usuario
+/// agrega un servidor cuyo esquema no probó nadie. Por eso lo que protege no es una lista corta sino
+/// que el rechazo sea recuperable: si el servidor no acepta el setup, el cliente lo reintenta una
+/// vez con <see cref="Essential"/> —las tres de siempre, medidas— y deja el renglón en la bitácora.
+/// Se pierden manos, no se pierde la voz.
 /// </para>
 /// <para>
 /// No ejecuta nada por su cuenta. Todo pasa por <see cref="ConversationOrchestrator.ExecuteLocalToolAsync"/>,
@@ -30,14 +39,14 @@ namespace Viernes.App.Services;
 internal sealed class LiveToolBridge : ILiveToolBridge
 {
     /// <summary>
-    /// Lo único que la sesión hablada puede pedir.
+    /// Con las que se reintenta si el servidor rechaza el setup entero.
     /// </summary>
     /// <remarks>
-    /// Es lista blanca y no lista negra: lo que no está acá no se declara <em>y</em> no se ejecuta
-    /// aunque el servidor lo pida igual. Las dos mitades hacen falta — la declaración es lo que el
-    /// modelo ve, y la ejecución es lo que realmente pasa.
+    /// Las tres que están medidas contra el servidor de verdad y que cubren lo que más se pide
+    /// hablando: abrí esto, anotámelo, encargate de aquello. No es una lista de permitidas —hablando
+    /// puede pedir todo lo que hay— sino el piso al que se cae cuando declarar todo no salió.
     /// </remarks>
-    internal static readonly string[] Allowed =
+    internal static readonly string[] Essential =
     [
         PcActionTool.ToolName,
         ReminderCreateTool.ToolName,
@@ -58,14 +67,14 @@ internal sealed class LiveToolBridge : ILiveToolBridge
     /// </para>
     /// </remarks>
     internal const string Anuncio = """
-        Hablando tenés tres manos y son de verdad: «pc_action» maneja esta computadora —abrir una
-        aplicación, traerla al frente, cerrarla, el volumen, buscar en la web—, «reminder_create»
-        anota un recordatorio con fecha y hora, y «mision» lleva los encargos que duran más que esta
-        charla. Si te piden algo que entra ahí, hacelo: no digas que no podés.
+        Hablando tenés las mismas manos que por escrito y son de verdad: manejar esta computadora
+        —abrir programas, traerlos al frente, el volumen—, leer y escribir archivos, buscar en la
+        web, anotar recordatorios y agenda, llevar encargos largos, aprender reglas, y lo que aporten
+        los servicios conectados. Si te piden algo que entra ahí, hacelo: no digas que no podés.
 
-        Lo que hablando NO tenés es el resto del taller: leer o escribir archivos, mirar la pantalla,
-        buscar en tu memoria, los servidores conectados. Si te piden algo de eso, decilo derecho y
-        ofrecé que te lo escriban por el chat, que ahí sí lo tenés todo.
+        Lo único que hablando NO podés es mirar la pantalla ni hacer clic por coordenadas: la imagen
+        no tiene por dónde volverte. Para tocar algo de una ventana usá las acciones que van por el
+        nombre del control, que ésas sí andan.
 
         Cuando uses una herramienta, contá en una frase qué pasó, y contalo según lo que la
         herramienta te contestó: si te dijo que falló, decí que falló. Nunca des por hecho algo que
@@ -112,9 +121,12 @@ internal sealed class LiveToolBridge : ILiveToolBridge
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
 
     /// <inheritdoc />
-    public IReadOnlyList<ToolDefinition> Declarations =>
+    public IReadOnlyList<ToolDefinition> Declarations => _orchestrator().ToolDefinitions;
+
+    /// <inheritdoc />
+    public IReadOnlyList<ToolDefinition> EssentialDeclarations =>
         [.. _orchestrator().ToolDefinitions.Where(
-            definition => Array.IndexOf(Allowed, definition.Name) >= 0)];
+            definition => Array.IndexOf(Essential, definition.Name) >= 0)];
 
     /// <inheritdoc />
     public async Task<LiveToolOutcome> InvokeAsync(
@@ -123,10 +135,14 @@ internal sealed class LiveToolBridge : ILiveToolBridge
     {
         ArgumentNullException.ThrowIfNull(call);
 
-        if (Array.IndexOf(Allowed, call.Name) < 0)
+        // La puerta sigue existiendo aunque ya no recorte: lo que se ejecuta es lo que el ejecutor
+        // tiene, no lo que el servidor diga. Un nombre inventado del otro lado se contesta y no se
+        // corre.
+        if (!_orchestrator().ToolDefinitions.Any(
+            definition => string.Equals(definition.Name, call.Name, StringComparison.Ordinal)))
         {
             return LiveToolOutcome.Failed(
-                "Esa herramienta no está disponible hablando. Pedímelo por escrito.");
+                "No tengo ninguna herramienta con ese nombre. Pedímelo por escrito y lo miro.");
         }
 
         if (NecesitaOjos(call))

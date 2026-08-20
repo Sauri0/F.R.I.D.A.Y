@@ -30,8 +30,14 @@ public sealed class FakeLiveToolBridge : ILiveToolBridge
     /// <summary>Lo que se declara en el setup.</summary>
     public List<ToolDefinition> Tools { get; } = [];
 
+    /// <summary>El piso al que cae si el servidor rechaza el setup. Vacío salvo que la prueba lo llene.</summary>
+    public List<ToolDefinition> Essential { get; } = [];
+
     /// <inheritdoc />
     public IReadOnlyList<ToolDefinition> Declarations => Tools;
+
+    /// <inheritdoc />
+    public IReadOnlyList<ToolDefinition> EssentialDeclarations => Essential;
 
     /// <summary>Cuántas veces la llamaron.</summary>
     public int Calls => Volatile.Read(ref _calls);

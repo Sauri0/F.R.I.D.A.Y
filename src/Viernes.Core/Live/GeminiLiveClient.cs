@@ -48,6 +48,16 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     private readonly ILiveToolBridge? _tools;
 
     /// <summary>
+    /// Si alguna vez el servidor no aceptó el setup y hay que irse con el piso de herramientas.
+    /// </summary>
+    /// <remarks>
+    /// Ver <see cref="ILiveToolBridge.EssentialDeclarations"/>. No se baja sola: si vuelve a
+    /// declarar todo en la reconexión siguiente, vuelve a rebotar, y la persona ve la voz cortarse
+    /// una vez por reconexión sin motivo aparente.
+    /// </remarks>
+    private bool _toolsRejected;
+
+    /// <summary>
     /// Las llamadas que el servidor canceló mientras corrían.
     /// </summary>
     /// <remarks>
@@ -396,6 +406,47 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     /// </remarks>
     private async Task<bool> ConnectAsync(CancellationToken cancellationToken)
     {
+        if (await IntentarConectarAsync(Herramientas(), cancellationToken).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        // Si ya se estaba yendo con el piso, no hay a dónde caer.
+        if (_tools is null || _toolsRejected || cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        // Puede haber sido cualquier cosa —la red, la clave, el servidor— y da igual: reintentar con
+        // menos herramientas cuesta una conexión y el caso que cubre no tiene ningún otro síntoma.
+        // Un esquema que este protocolo no acepta NO da un error de campo: rebota el setup entero, y
+        // desde afuera eso se ve exactamente igual que quedarse sin internet. Sin este reintento, un
+        // servidor MCP con un esquema raro deja a la asistente muda para siempre y el registro dice
+        // «no me pude conectar».
+        _toolsRejected = true;
+        RaiseHipo($"El servidor no aceptó la sesión con todas las herramientas: reintento con {_tools.EssentialDeclarations.Count}.");
+
+        return await IntentarConectarAsync(Herramientas(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Qué herramientas se declaran: todas, o el piso si alguna vez rechazaron el setup.
+    /// </summary>
+    /// <remarks>
+    /// La marca dura lo que dure el cliente y no una sola conexión, a propósito: si el rechazo lo
+    /// causa un esquema, va a volver a causarlo en cada reconexión, y reintentar dos veces por
+    /// reconexión sería pagar el doble para llegar al mismo lugar.
+    /// </remarks>
+    private IReadOnlyList<Viernes.Core.Tools.ToolDefinition>? Herramientas() =>
+        _tools is null ? null : _toolsRejected ? _tools.EssentialDeclarations : _tools.Declarations;
+
+    private void RaiseHipo(string mensaje) =>
+        Raise(Failed, new LiveFailureEventArgs(mensaje, fatal: false));
+
+    private async Task<bool> IntentarConectarAsync(
+        IReadOnlyList<Viernes.Core.Tools.ToolDefinition>? herramientas,
+        CancellationToken cancellationToken)
+    {
         var key = _apiKey();
         if (string.IsNullOrWhiteSpace(key))
         {
@@ -414,7 +465,7 @@ public sealed class GeminiLiveClient : IAsyncDisposable
             // así que lo que haya cambiado entre una charla y otra entra acá o no entra nunca.
             await transport
                 .SendAsync(
-                    LiveClientMessages.BuildSetup(_options, _resumptionHandle, _tools?.Declarations),
+                    LiveClientMessages.BuildSetup(_options, _resumptionHandle, herramientas),
                     cancellationToken)
                 .ConfigureAwait(false);
 

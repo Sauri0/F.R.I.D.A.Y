@@ -55,6 +55,23 @@ public interface ILiveToolBridge
     IReadOnlyList<ToolDefinition> Declarations { get; }
 
     /// <summary>
+    /// El piso al que caer si el servidor rechaza el setup con todas.
+    /// </summary>
+    /// <remarks>
+    /// <b>Existe porque lo que se declara no se puede verificar por adelantado.</b> Los esquemas de
+    /// las herramientas de servidores MCP los escribe un tercero, y el usuario puede agregar un
+    /// servidor nuevo cualquier día: cualquier lista que se haya probado deja de estar probada en
+    /// cuanto alguien agrega algo. Un esquema que este protocolo no acepta no da un error de campo
+    /// —rebota el setup entero— así que sin un piso conocido, un servidor MCP raro deja a la
+    /// asistente sin voz y sin que nadie entienda por qué.
+    /// <para>
+    /// Tiene que ser un subconjunto de <see cref="Declarations"/> y tiene que estar medido contra el
+    /// servidor de verdad. Devolver lo mismo que <see cref="Declarations"/> es no tener piso.
+    /// </para>
+    /// </remarks>
+    IReadOnlyList<ToolDefinition> EssentialDeclarations { get; }
+
+    /// <summary>
     /// Ejecuta una llamada y devuelve qué pasó. Nunca debería lanzar: un error se cuenta.
     /// </summary>
     Task<LiveToolOutcome> InvokeAsync(LiveFunctionCall call, CancellationToken cancellationToken);
