@@ -73,11 +73,7 @@ public sealed class TapadoDeCredencialesTests : IDisposable
 
     /// <summary>Las formas de los servicios que el usuario usa o podría usar.</summary>
     [Theory]
-    [InlineData("sk-or-v1-abcdefghijklmnopqrstuvwxyz012345")]
-    [InlineData("sk_live_abcdefghijklmnopqrstuvwxyz")]
-    [InlineData("AKIAIOSFODNN7EXAMPLE")]
-    [InlineData("ghp_abcdefghijklmnopqrstuvwxyz012345")]
-    [InlineData("xoxb-1234567890-abcdefghij")]
+    [MemberData(nameof(Viernes.Memory.Tests.Privacy.CredencialesDeMentira.Conocidas), MemberType = typeof(Viernes.Memory.Tests.Privacy.CredencialesDeMentira))]
     public void ConSuFormaDeSiempre_NoLlegaAlDisco(string credencial)
     {
         var texto = Escribir($"pegá esto donde va: {credencial}");

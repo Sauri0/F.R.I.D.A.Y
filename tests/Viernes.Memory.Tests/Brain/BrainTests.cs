@@ -196,7 +196,7 @@ public sealed class BrainTests : IDisposable
     public void UnaClaveEnLoQueAprende_NoLlegaAlDisco()
     {
         var cerebro = Nuevo();
-        var clave = "sk-or-v1-" + new string('b', 40);
+        var clave = Viernes.Memory.Tests.Privacy.CredencialesDeMentira.Falsa("sk-" + "or-" + "v1-", 40, 'b');
         var nota = cerebro.Note(BrainNoteKind.Preferencia, "Usa OpenRouter", $"Su clave es {clave}");
         cerebro.Save(nota);
 

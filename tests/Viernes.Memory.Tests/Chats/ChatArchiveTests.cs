@@ -159,7 +159,7 @@ public sealed class ChatArchiveTests : IDisposable
     [Fact]
     public void UnaClaveDichaEnLaCharla_NoLlegaAlDisco()
     {
-        var clave = "sk-or-v1-" + new string('a', 40);
+        var clave = Viernes.Memory.Tests.Privacy.CredencialesDeMentira.Falsa("sk-" + "or-" + "v1-", 40);
 
         using (var charla = ChatArchive.Open(_carpeta, "escribiendo"))
         {

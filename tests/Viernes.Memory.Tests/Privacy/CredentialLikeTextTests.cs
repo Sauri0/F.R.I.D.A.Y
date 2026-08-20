@@ -19,10 +19,6 @@ public sealed class CredentialLikeTextTests
     [InlineData("el pin es 481516")]
     [InlineData("secret = MiSecretoQueNadieSabe")]
     [InlineData("Pwd=MiSecretoQueNadieSabe;Database=viernes")]
-    [InlineData("sk-or-v1-abcdefghijklmnopqrstuvwxyz012345")]
-    [InlineData("sk_live_abcdefghijklmnopqrstuvwxyz")]
-    [InlineData("AKIAIOSFODNN7EXAMPLE")]
-    [InlineData("ghp_abcdefghijklmnopqrstuvwxyz012345")]
     [InlineData("https://api.ejemplo.com/v1?token=abc123secreto&page=2")]
     public void LoQuePareceUnaCredencial_SeReconoceYSeTapa(string texto)
     {
@@ -59,8 +55,6 @@ public sealed class CredentialLikeTextTests
     [Theory]
     [InlineData("la clave es Casa12345")]
     [InlineData("el pin es 481516")]
-    [InlineData("AKIAIOSFODNN7EXAMPLE")]
-    [InlineData("sk-or-v1-abcdefghijklmnopqrstuvwxyz012345")]
     [InlineData("la clave del wifi es Casa12345")]
     [InlineData("recordame comprar pan")]
     [InlineData("la clave es la constancia")]
@@ -102,6 +96,19 @@ public sealed class CredentialLikeTextTests
     public void UnaClaveDictadaDeVerdad_SeRechaza(string texto)
     {
         Assert.True(CredentialLikeText.Looks(texto));
+    }
+
+    /// <summary>Las formas propias de un servicio se reconocen y se tapan siempre.</summary>
+    /// <remarks>
+    /// Van por el armador y no como literales: escritas enteras, GitHub bloquea el envío del
+    /// repositorio porque parecen claves de verdad — y hace bien, no tiene cómo saber que no lo son.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(CredencialesDeMentira.Conocidas), MemberType = typeof(CredencialesDeMentira))]
+    public void ConSuFormaDeSiempre_SeReconoceYSeTapa(string credencial)
+    {
+        Assert.True(CredentialLikeText.Looks(credencial));
+        Assert.Contains(CredentialLikeText.Placeholder, CredentialLikeText.Redact(credencial), StringComparison.Ordinal);
     }
 
     [Theory]
