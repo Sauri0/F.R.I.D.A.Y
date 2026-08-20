@@ -2591,6 +2591,34 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         }
     }
 
+    /// <summary>
+    /// Reemplaza el último turno anotado por la frase entera, porque era el mismo pedido.
+    /// </summary>
+    /// <remarks>
+    /// Sólo lo usa la sesión hablada, y por una razón que el camino escrito no tiene: allá un turno
+    /// lo cierra el Enter y no hay ambigüedad, y acá lo cierra el detector de voz del servidor apenas
+    /// junta el silencio configurado. Una pausa para respirar, o una interrupción, parten en dos algo
+    /// que se dijo de corrido; anotarlo como dos turnos hace que la destilación de la charla lea dos
+    /// pedidos donde hubo uno, cada uno con media oración.
+    /// <para>
+    /// Se anota en cuanto llega el primer tramo y se corrige después, en vez de esperar a que el
+    /// pedido cierre: si la charla se cierra con la frase a medio decir, lo dicho ya está anotado.
+    /// </para>
+    /// </remarks>
+    private void AmendLastConversationTurn(string transcript)
+    {
+        lock (_confirmationGate)
+        {
+            if (_conversationTurns.Count == 0)
+            {
+                _conversationTurns.Add(transcript);
+                return;
+            }
+
+            _conversationTurns[^1] = transcript;
+        }
+    }
+
     private List<string> TakeConversationTurns()
     {
         lock (_confirmationGate)

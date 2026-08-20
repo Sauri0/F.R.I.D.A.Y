@@ -45,6 +45,17 @@ internal sealed partial class AssistantRuntime
     /// <summary>Lo que ella viene diciendo en el turno abierto.</summary>
     private readonly StringBuilder _liveSaid = new();
 
+    /// <summary>
+    /// El pedido de la persona, que puede venir partido en varios turnos del servidor.
+    /// </summary>
+    /// <remarks>
+    /// Un turno del servidor no es un pedido: el servidor cierra el turno cuando junta el silencio
+    /// configurado, así que una pausa para respirar —o una interrupción— parte en dos algo que la
+    /// persona dijo de corrido. <see cref="LiveUtterance"/> los vuelve a juntar, y los suelta sola
+    /// si la persona se fue en el medio.
+    /// </remarks>
+    private readonly LiveUtterance _liveUtterance = new();
+
     private readonly object _liveTextGate = new();
 
     private LiveSpeakerSink? _liveSink;
@@ -146,8 +157,14 @@ internal sealed partial class AssistantRuntime
 
         {LiveToolBridge.Anuncio}
 
-        Te pueden interrumpir hablándote encima, y está bien: cuando pase, callate y escuchá lo
-        nuevo. No retomes la frase anterior.
+        Te pueden interrumpir hablándote encima, y está bien: cuando pase, callate en el acto y no
+        retomes la frase tuya que venías diciendo.
+
+        Pero lo que te dicen al cortarte NO es un pedido nuevo: es la misma conversación siguiendo.
+        Sumalo a lo que te venían diciendo antes y contestá UNA sola vez, teniendo en cuenta las dos
+        partes. Lo mismo cuando una pausa te hizo creer que habían terminado y en realidad seguían
+        hablando: es una sola cosa dicha en dos tramos. Nunca contestes dos veces seguidas, una por
+        tramo, como si fueran dos personas distintas pidiéndote dos cosas.
         """;
 
     /// <summary>
@@ -422,7 +439,16 @@ internal sealed partial class AssistantRuntime
 
         RuntimeTrace.Write("vivo.momento", $"{eventArgs.Previous} → {eventArgs.Current}");
 
-        // Al salir de «te escucho» la frase de la persona quedó cerrada; al volver, la respuesta.
+        // Contestó entera y sin que la cortaran: es lo único que da por cerrado el pedido de la
+        // persona. Volver a «te escucho» desde «pensando» o desde «te corté» no cierra nada, porque
+        // en los dos casos lo que sigue es la misma frase. Ver LiveUtterance.ClosesUtterance.
+        var cierra = LiveUtterance.ClosesUtterance(eventArgs.Previous, eventArgs.Current);
+        if (cierra)
+        {
+            _liveUtterance.Close();
+        }
+
+        // Al salir de «te escucho» el tramo de la persona quedó cerrado; al volver, la respuesta.
         // Es el único momento en que una y otra se pueden leer enteras: llegan de a fragmentos.
         var heard = eventArgs.Current == LiveOrbMoment.Listening ? null : TakeLiveText(_liveHeard);
         var said = eventArgs.Current == LiveOrbMoment.Listening ? TakeLiveText(_liveSaid) : null;
@@ -433,27 +459,60 @@ internal sealed partial class AssistantRuntime
             return;
         }
 
+        // El tramo se suma al pedido abierto en vez de nacer suelto.
+        //
+        // Un turno del servidor no es un pedido. El detector de voz del servidor cierra el turno
+        // apenas junta el silencio configurado, así que una pausa para respirar parte en dos algo
+        // que se dijo de corrido — y una interrupción hace lo mismo. Anotando cada tramo aparte, una
+        // sola oración quedaba como dos turnos de la charla y la burbuja borraba la primera mitad
+        // para escribir la segunda: la persona veía cortarse lo que estaba diciendo.
+        string? whole = null;
+        var vencio = false;
         if (heard is not null)
         {
-            AddConversationTurn(heard);
+            var sumado = _liveUtterance.Add(heard);
+            whole = sumado.Text;
+            vencio = sumado.Expired is not null;
+
+            if (vencio)
+            {
+                // Sin lo que decía: sólo que se soltó y por qué. La bitácora se pega en un reporte.
+                RuntimeTrace.Write("vivo.frase.vencida", $"tras={LiveUtterance.DefaultMaxGap}");
+            }
+
+            if (sumado.Continued)
+            {
+                // Sin la frase: la bitácora es un archivo de texto que se pega en un reporte. El
+                // número de tramos alcanza para saber cuánto está cortando de más el servidor.
+                RuntimeTrace.Write("vivo.frase.unida", $"tramos={_liveUtterance.Parts}");
+                AmendLastConversationTurn(whole);
+            }
+            else
+            {
+                AddConversationTurn(whole);
+            }
         }
 
-        if (eventArgs.Current == LiveOrbMoment.Listening)
+        // Lo vencido se borra igual que lo contestado: en los dos casos lo que quedó escrito es de
+        // otra frase, y dejarlo puesto hace que la nueva se lea pegada a la vieja.
+        if (cierra || vencio)
         {
-            // Vuelve el turno a la persona: lo que quedaba escrito era el pedido anterior, ya
-            // contestado. Dejarlo puesto hace que la frase nueva se escriba a continuación de la
-            // vieja, y las dos juntas se leen como una sola.
+            // Vuelve el turno a la persona con lo anterior ya contestado: lo que quedaba escrito era
+            // el pedido viejo. Dejarlo puesto hace que la frase nueva se escriba a continuación de
+            // la vieja, y las dos juntas se leen como una sola. Mientras el pedido sigue abierto no
+            // se borra, justamente porque ahí las dos mitades SÍ son una sola.
             ClearDictation();
         }
 
         Publish(new AssistantRuntimeUpdate(
             ToVisualState(eventArgs.Current),
             LiveStatusLabel(eventArgs.Current),
-            heard ?? said,
+            whole ?? said,
             MicrophoneActive: true,
-            // La frase quedó cerrada: lo que estaba en itálica pasa a firme y se queda quieto
-            // mientras contesta.
-            Dictation: heard is null ? null : _dictation.Settle(heard),
+            // El tramo quedó cerrado: lo que estaba en itálica pasa a firme y se queda quieto
+            // mientras contesta. Va la frase entera y no el tramo, que es lo que hace que la
+            // continuación se vea agregarse en vez de reemplazar lo anterior.
+            Dictation: whole is null ? null : _dictation.Settle(whole),
             DictationRecovered: _dictation.RecoveredSpan));
     }
 
@@ -693,6 +752,11 @@ internal sealed partial class AssistantRuntime
             _liveHeard.Clear();
             _liveSaid.Clear();
         }
+
+        // El pedido abierto también. Lo llaman el arranque y el cierre de la conversación en vivo, y
+        // un pedido a medio decir que sobreviva a un cierre se le pegaría adelante a la primera
+        // frase de la charla siguiente.
+        _liveUtterance.Reset();
     }
 
     /// <summary>
