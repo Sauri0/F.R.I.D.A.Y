@@ -40,6 +40,7 @@ public static class BuiltInTools
             new RestTool(rest),
             new ProjectTool(),
             new FileSystemTool(),
+            new WebReadTool(),
             new ShellTool()
         ]);
     }
