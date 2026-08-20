@@ -179,6 +179,14 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
     /// <summary>Cuánto eco tiene medido la compuerta, y el listón que salió de esa medición.</summary>
     public (double Echo, double Bar) EchoProfile => (_echo.EchoLevel, _echo.Bar);
 
+    /// <summary>Si la compuerta tuvo que rendirse porque el parlante nunca dejó de sonar.</summary>
+    /// <remarks>
+    /// Va a la bitácora al cerrar la charla. Una compuerta rendida no se nota desde afuera —todo
+    /// sigue andando y sólo vuelve el eco— así que sin esto nadie sabría que el problema estuvo en la
+    /// salida de audio.
+    /// </remarks>
+    public bool EchoGaveUp => _echo.GaveUp;
+
     /// <summary>Por qué no pudo abrir el micrófono, si no pudo.</summary>
     public string? LastFailure { get; private set; }
 

@@ -108,6 +108,30 @@ public sealed class LiveEchoGate
     private static readonly TimeSpan MeasuringWindow = TimeSpan.FromMilliseconds(450);
 
     /// <summary>
+    /// Cuánto puede frenar seguido antes de rendirse y dejar pasar todo.
+    /// </summary>
+    /// <remarks>
+    /// <b>Una válvula, y hace falta porque esta compuerta depende de algo que no controla.</b> Se
+    /// pone cuando <c>LiveVoiceSession.IsSpeakerBusy</c> dice que el parlante suena, y eso sale de la
+    /// cola de salida más lo que el driver tiene en la mano. Si el dispositivo de audio se cae o lo
+    /// desenchufan en el medio de una respuesta, esa cola puede quedar clavada sin drenar: el
+    /// parlante figuraría sonando para siempre y la compuerta se quedaría puesta para siempre.
+    /// <para>
+    /// El resultado sería que <b>deja de oírte y nadie se entera</b>: el orbe seguiría diciendo que
+    /// escucha. Antes de que esta compuerta existiera, un parlante trabado era inofensivo —no la oías
+    /// hablar, y listo—; ahora también te dejaría mudo. Un mecanismo nuevo no puede convertir la
+    /// falla de otro en algo peor de lo que era.
+    /// </para>
+    /// <para>
+    /// Treinta segundos son mucho más de lo que dura cualquier respuesta hablada y mucho menos que
+    /// «para siempre». Pasado ese rato, la compuerta se rinde: se pierde la protección contra el eco
+    /// —que es un problema que se ve y se escucha— antes que el micrófono, que es un problema que no
+    /// se ve.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan GiveUp = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Con qué referencia arranca, antes de haber medido nada.
     /// </summary>
     /// <remarks>
@@ -185,6 +209,9 @@ public sealed class LiveEchoGate
     /// <summary>Lo que queda de la ventana de medición. Ver <see cref="MeasuringWindow"/>.</summary>
     private TimeSpan _measuring;
 
+    /// <summary>Cuánto lleva frenando seguido. Ver <see cref="GiveUp"/>.</summary>
+    private TimeSpan _holding;
+
     /// <summary>El pico que va midiendo esta ventana. Se compromete a la referencia al cerrarse.</summary>
     /// <remarks>
     /// Se acumula aparte y no sobre la referencia porque durante la ventana hay que <b>seguir
@@ -196,10 +223,20 @@ public sealed class LiveEchoGate
     private TimeSpan _run;
     private bool _open;
 
+    /// <summary>Si tuvo que rendirse porque el parlante nunca se calló. Ver <see cref="GiveUp"/>.</summary>
+    /// <remarks>
+    /// Se expone para que quede en la bitácora al cerrar la charla: una compuerta rendida no se nota
+    /// desde afuera —todo sigue andando, sólo vuelve el eco— y sin esto no habría forma de saber que
+    /// el problema estuvo en la salida de audio y no acá.
+    /// </remarks>
+    public bool GaveUp { get; private set; }
+
     /// <summary>Nivel de eco que tiene medido ahora mismo. Para la bitácora y las pruebas.</summary>
-    // Incluye lo que va midiendo la ventana en curso: si no, durante la medición este número diría
-    // la referencia de la respuesta anterior y quien lo mire desde afuera —la bitácora, una prueba—
-    // creería que la compuerta no se enteró del eco de ahora.
+    /// <remarks>
+    /// Incluye lo que va midiendo la ventana en curso: si no, durante la medición este número diría
+    /// la referencia de la respuesta anterior y quien lo mire desde afuera —la bitácora, una prueba—
+    /// creería que la compuerta no se enteró del eco de ahora.
+    /// </remarks>
     public double EchoLevel => Math.Max(_echo, _windowPeak);
 
     /// <summary>Nivel que hay que superar ahora mismo para que se la pueda interrumpir.</summary>
@@ -284,6 +321,16 @@ public sealed class LiveEchoGate
             // micrófono sube tal cual, con la misma sensibilidad de siempre.
             _run = TimeSpan.Zero;
             _open = false;
+            _holding = TimeSpan.Zero;
+            return LiveMicrophoneVerdict.Send;
+        }
+
+        _holding += blockDuration;
+        if (_holding >= GiveUp)
+        {
+            // Se rindió. Ver GiveUp: perder la protección contra el eco es mucho más barato que
+            // perder el micrófono sin que nadie se entere.
+            GaveUp = true;
             return LiveMicrophoneVerdict.Send;
         }
 

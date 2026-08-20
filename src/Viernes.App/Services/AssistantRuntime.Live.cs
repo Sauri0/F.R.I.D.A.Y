@@ -340,7 +340,10 @@ internal sealed partial class AssistantRuntime
             RuntimeTrace.Write(
                 "vivo.microfono.eco",
                 $"eco={microphone.EchoBlocks} bloques · encima={microphone.Breakthroughs} · " +
-                $"nivel={eco:0.000} listón={liston:0.000} · tarde={microphone.DroppedBlocks}");
+                $"nivel={eco:0.000} listón={liston:0.000} · tarde={microphone.DroppedBlocks}" +
+                (microphone.EchoGaveUp
+                    ? " · SE RINDIÓ: el parlante nunca se calló, así que soltó el micrófono para no dejarte mudo"
+                    : string.Empty));
 
             await microphone.DisposeAsync().ConfigureAwait(false);
         }
