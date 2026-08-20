@@ -51,9 +51,16 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     /// Si alguna vez el servidor no aceptó el setup y hay que irse con el piso de herramientas.
     /// </summary>
     /// <remarks>
-    /// Ver <see cref="ILiveToolBridge.EssentialDeclarations"/>. No se baja sola: si vuelve a
-    /// declarar todo en la reconexión siguiente, vuelve a rebotar, y la persona ve la voz cortarse
-    /// una vez por reconexión sin motivo aparente.
+    /// Ver <see cref="ILiveToolBridge.EssentialDeclarations"/>. No se baja sola, y ahora eso es
+    /// defendible: sólo se enciende cuando el setup llegó a mandarse y lo rechazaron, que es la
+    /// firma de un esquema que este protocolo no acepta — y un esquema que no acepta hoy tampoco lo
+    /// va a aceptar en la reconexión siguiente. Declarar todo otra vez sería hacerle ver a la
+    /// persona la voz cortarse una vez por reconexión, sin motivo aparente.
+    /// <para>
+    /// Antes se encendía ante <em>cualquier</em> falla de conexión, y ahí la permanencia era un
+    /// defecto: un corte de internet de dos segundos le costaba cuarenta y tres herramientas hasta
+    /// que se cerrara el programa.
+    /// </para>
     /// </remarks>
     private bool _toolsRejected;
 
@@ -406,27 +413,54 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     /// </remarks>
     private async Task<bool> ConnectAsync(CancellationToken cancellationToken)
     {
-        if (await IntentarConectarAsync(Herramientas(), cancellationToken).ConfigureAwait(false))
+        var intento = await IntentarConectarAsync(Herramientas(), cancellationToken).ConfigureAwait(false);
+        if (intento == Intento.Conectó)
         {
             return true;
         }
 
-        // Si ya se estaba yendo con el piso, no hay a dónde caer.
-        if (_tools is null || _toolsRejected || cancellationToken.IsCancellationRequested)
+        // Sólo se reintenta si el setup llegó a mandarse y lo rechazaron. Antes se reintentaba ante
+        // CUALQUIER falla —la red caída, la clave vacía, un 503— y encima se dejaba la marca puesta
+        // para toda la vida del cliente: un corte de internet de dos segundos dejaba a la asistente
+        // hablando con tres herramientas de cuarenta y seis hasta que se cerrara el programa, con el
+        // anuncio de su instrucción de sistema prometiéndole al modelo que las tenía todas.
+        //
+        // La firma de un rechazo de esquema es exactamente ésta: el transporte abrió, el setup salió,
+        // y el servidor cerró o contestó error sin llegar al setupComplete. Un problema de red no
+        // llega hasta ahí.
+        if (intento != Intento.RechazaronElSetup ||
+            _tools is null ||
+            _toolsRejected ||
+            cancellationToken.IsCancellationRequested)
         {
             return false;
         }
 
-        // Puede haber sido cualquier cosa —la red, la clave, el servidor— y da igual: reintentar con
-        // menos herramientas cuesta una conexión y el caso que cubre no tiene ningún otro síntoma.
-        // Un esquema que este protocolo no acepta NO da un error de campo: rebota el setup entero, y
-        // desde afuera eso se ve exactamente igual que quedarse sin internet. Sin este reintento, un
-        // servidor MCP con un esquema raro deja a la asistente muda para siempre y el registro dice
-        // «no me pude conectar».
         _toolsRejected = true;
         RaiseHipo($"El servidor no aceptó la sesión con todas las herramientas: reintento con {_tools.EssentialDeclarations.Count}.");
 
-        return await IntentarConectarAsync(Herramientas(), cancellationToken).ConfigureAwait(false);
+        return await IntentarConectarAsync(Herramientas(), cancellationToken).ConfigureAwait(false)
+            == Intento.Conectó;
+    }
+
+    /// <summary>
+    /// En qué quedó un intento de conexión, y hasta dónde llegó.
+    /// </summary>
+    /// <remarks>
+    /// Hasta dónde llegó es lo que importa: es lo único que distingue «el servidor no acepta estas
+    /// herramientas» de «no hay internet», que desde afuera se ven igual — en los dos casos la
+    /// sesión no abre y no hay ningún otro síntoma.
+    /// </remarks>
+    private enum Intento
+    {
+        /// <summary>Abrió y el servidor aceptó la sesión.</summary>
+        Conectó,
+
+        /// <summary>No llegó a mandar el setup: sin clave, sin red, el socket no abrió.</summary>
+        NoLlegó,
+
+        /// <summary>El setup salió y el servidor lo rechazó o cerró sin aceptarlo.</summary>
+        RechazaronElSetup
     }
 
     /// <summary>
@@ -443,7 +477,7 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     private void RaiseHipo(string mensaje) =>
         Raise(Failed, new LiveFailureEventArgs(mensaje, fatal: false));
 
-    private async Task<bool> IntentarConectarAsync(
+    private async Task<Intento> IntentarConectarAsync(
         IReadOnlyList<Viernes.Core.Tools.ToolDefinition>? herramientas,
         CancellationToken cancellationToken)
     {
@@ -451,7 +485,7 @@ public sealed class GeminiLiveClient : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(key))
         {
             LastFailure = "No hay clave de Google configurada.";
-            return false;
+            return Intento.NoLlegó;
         }
 
         var transport = _transportFactory();
@@ -479,7 +513,7 @@ public sealed class GeminiLiveClient : IAsyncDisposable
                 {
                     LastFailure = "El servidor cerró la sesión antes de aceptarla.";
                     await transport.DisposeAsync().ConfigureAwait(false);
-                    return false;
+                    return Intento.RechazaronElSetup;
                 }
 
                 var serverEvent = LiveServerEventParser.Parse(message);
@@ -487,7 +521,7 @@ public sealed class GeminiLiveClient : IAsyncDisposable
                 {
                     LastFailure = error;
                     await transport.DisposeAsync().ConfigureAwait(false);
-                    return false;
+                    return Intento.RechazaronElSetup;
                 }
 
                 if (serverEvent.SetupComplete)
@@ -506,13 +540,17 @@ public sealed class GeminiLiveClient : IAsyncDisposable
             _connected = true;
             _reconnectWhenIdle = false;
             LastFailure = null;
-            return true;
+            return Intento.Conectó;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            // Callarse no es rechazar. Un servidor que no acepta el setup lo dice: cierra con un
+            // motivo o contesta error. Quedarse esperando es lo que hace una red mala, y por eso no
+            // enciende la marca: si la encendiera, un momento de red floja costaría las herramientas
+            // de toda la sesión.
             LastFailure = "El servidor no confirmó la sesión a tiempo.";
             await transport.DisposeAsync().ConfigureAwait(false);
-            return false;
+            return Intento.NoLlegó;
         }
         catch (OperationCanceledException)
         {
@@ -525,7 +563,7 @@ public sealed class GeminiLiveClient : IAsyncDisposable
             // y más de una implementación la escribe en el texto del error.
             LastFailure = $"No pude abrir la sesión en vivo ({exception.GetType().Name}).";
             await transport.DisposeAsync().ConfigureAwait(false);
-            return false;
+            return Intento.NoLlegó;
         }
     }
 

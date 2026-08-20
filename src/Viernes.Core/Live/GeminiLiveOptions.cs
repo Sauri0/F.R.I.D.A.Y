@@ -32,6 +32,9 @@ public sealed class GeminiLiveOptions
     /// <summary>Tamaño del fragmento de audio que se sube, en milisegundos.</summary>
     public const string ChunkEnvironmentVariable = "VIERNES_LIVE_CHUNK_MS";
 
+    /// <summary>Con qué apagar la búsqueda web de la sesión hablada.</summary>
+    public const string WebSearchEnvironmentVariable = "VIERNES_LIVE_WEB_SEARCH";
+
     /// <summary>Modelo de la sesión en vivo. Lleva <c>-preview</c> y existe en la cuenta del usuario.</summary>
     public const string DefaultModel = "gemini-3.1-flash-live-preview";
 
@@ -99,7 +102,8 @@ public sealed class GeminiLiveOptions
         bool transcribeOutput = true,
         long triggerTokens = DefaultTriggerTokens,
         long targetTokens = DefaultTargetTokens,
-        TimeSpan? setupTimeout = null)
+        TimeSpan? setupTimeout = null,
+        bool webSearch = true)
     {
         Enabled = enabled;
         Model = Normalize(model) ?? DefaultModel;
@@ -121,6 +125,7 @@ public sealed class GeminiLiveOptions
         InterruptOnUserSpeech = interruptOnUserSpeech;
         TranscribeInput = transcribeInput;
         TranscribeOutput = transcribeOutput;
+        WebSearch = webSearch;
 
         if (triggerTokens is < 1_000 or > 1_000_000)
         {
@@ -170,6 +175,32 @@ public sealed class GeminiLiveOptions
     /// algo largo sin que un ruido la corte.
     /// </remarks>
     public bool InterruptOnUserSpeech { get; }
+
+    /// <summary>
+    /// Si la sesión hablada puede buscar en la web.
+    /// </summary>
+    /// <remarks>
+    /// <b>Hablando no podía buscar nada, y eso no se veía por ningún lado.</b> La búsqueda web del
+    /// proyecto la inyecta el proveedor del camino escrito; el camino hablado no pasa por ahí, va
+    /// directo a este servidor. Así que por voz contestaba de memoria, con fecha de corte, mientras
+    /// el texto que le pega sus manos al modelo le prometía que podía «buscar en la web».
+    /// <para>
+    /// <b>Medido, no supuesto.</b> Preguntarle por una noticia de esta semana, con la misma clave y
+    /// el mismo modelo, dos corridas:
+    /// <code>
+    ///   sin la herramienta: «No tengo acceso a noticias en tiempo real, así que no puedo…»
+    ///   con la herramienta: contestó la noticia
+    /// </code>
+    /// Y de paso quedó descartada la prueba fácil: mandar el setup con la herramienta y ver si
+    /// vuelve <c>setupComplete</c> no prueba nada, porque el setup <em>sin ninguna</em> también
+    /// vuelve completo. Este servidor acepta campos que no conoce. Aceptar no es activar.
+    /// </para>
+    /// <para>
+    /// Prendida por omisión, por el mismo motivo que en el camino escrito: un asistente que no puede
+    /// mirar la web contesta de memoria. Se apaga con <see cref="WebSearchEnvironmentVariable"/>.
+    /// </para>
+    /// </remarks>
+    public bool WebSearch { get; }
 
     /// <summary>Si se pide la transcripción de lo que dice la persona.</summary>
     /// <remarks>
@@ -236,6 +267,7 @@ public sealed class GeminiLiveOptions
                 DefaultSilenceDurationMs,
                 MinimumSilenceDurationMs,
                 MaximumSilenceDurationMs),
+            webSearch: ParseBoolean(readVariable(WebSearchEnvironmentVariable), defaultValue: true),
             chunkMilliseconds: ParseInt(
                 readVariable(ChunkEnvironmentVariable),
                 DefaultChunkMilliseconds,

@@ -82,12 +82,38 @@ public static class LiveClientMessages
                 writer.WriteEndObject();
             }
 
-            if (tools is { Count: > 0 })
+            // La busqueda va aparte de las funciones y en el mismo arreglo. Se escribe aunque no
+            // haya ninguna funcion declarada: sin esto, hablando no puede buscar NADA -- la busqueda
+            // web del proyecto la inyecta el proveedor del camino escrito, y este camino no pasa por
+            // ahi. Medido con la misma clave y el mismo modelo: sin la herramienta contesta «no
+            // tengo acceso a noticias en tiempo real»; con ella, contesta la noticia.
+            var declaraBusqueda = options.WebSearch;
+            var declaraFunciones = tools is { Count: > 0 };
+
+
+            if (declaraBusqueda || declaraFunciones)
             {
                 writer.WriteStartArray("tools");
+
+                if (declaraBusqueda)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteStartObject("googleSearch");
+                    writer.WriteEndObject();
+                    writer.WriteEndObject();
+                }
+
+                if (!declaraFunciones)
+                {
+                    writer.WriteEndArray();
+                }
+            }
+
+            if (declaraFunciones)
+            {
                 writer.WriteStartObject();
                 writer.WriteStartArray("functionDeclarations");
-                foreach (var tool in tools)
+                foreach (var tool in tools!)
                 {
                     writer.WriteStartObject();
                     writer.WriteString("name", tool.Name);

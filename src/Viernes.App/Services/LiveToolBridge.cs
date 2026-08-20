@@ -54,6 +54,29 @@ internal sealed class LiveToolBridge : ILiveToolBridge
     ];
 
     /// <summary>
+    /// Lo único que hablando no se declara aunque exista.
+    /// </summary>
+    /// <remarks>
+    /// <b>Un comando de PowerShell arbitrario, dictado.</b> Al abrir la mano de la sesión hablada
+    /// esto quedó al alcance de la voz sin que nadie lo decidiera, y es la única herramienta donde
+    /// equivocarse no se deshace: su propia documentación dice que es «por lejos lo más peligroso
+    /// que tiene», y sin embargo está declarada <c>Safe</c>, o sea que corre sin que nadie confirme
+    /// nada.
+    /// <para>
+    /// Por escrito la orden se tipea y se lee antes de mandarla. Hablando la escribe un
+    /// reconocedor de voz a partir de lo que le pareció oír, y del otro lado no hay ninguna forma de
+    /// confirmar: <see cref="InvokeAsync"/> ejecuta con <c>confirmationGranted: false</c> y no existe
+    /// un camino de vuelta para preguntar. Entre «puede hacer todo por voz» y «una frase mal
+    /// escuchada corre un comando», gana lo segundo.
+    /// </para>
+    /// <para>
+    /// El día que la sesión hablada sepa pedir confirmación, esto se saca de acá y se sube el riesgo
+    /// de la herramienta, que es donde tendría que haber estado siempre.
+    /// </para>
+    /// </remarks>
+    internal static readonly string[] SoloPorEscrito = [ShellTool.ToolName];
+
+    /// <summary>
     /// Cómo se le cuentan estas manos al modelo, para pegar en la instrucción de sistema.
     /// </summary>
     /// <remarks>
@@ -121,7 +144,9 @@ internal sealed class LiveToolBridge : ILiveToolBridge
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
 
     /// <inheritdoc />
-    public IReadOnlyList<ToolDefinition> Declarations => _orchestrator().ToolDefinitions;
+    public IReadOnlyList<ToolDefinition> Declarations =>
+        [.. _orchestrator().ToolDefinitions.Where(
+            definition => Array.IndexOf(SoloPorEscrito, definition.Name) < 0)];
 
     /// <inheritdoc />
     public IReadOnlyList<ToolDefinition> EssentialDeclarations =>
@@ -134,6 +159,15 @@ internal sealed class LiveToolBridge : ILiveToolBridge
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(call);
+
+        // Las dos mitades, como siempre: no alcanza con no declararlo. Si sólo se recortara la
+        // declaración, bastaría con que el servidor pidiera el nombre igual —por un resumen de
+        // sesión anterior, por un modelo que lo conoce— para que corriera.
+        if (Array.IndexOf(SoloPorEscrito, call.Name) >= 0)
+        {
+            return LiveToolOutcome.Failed(
+                "Un comando así prefiero no correrlo de oído. Escribímelo por el chat y lo hago.");
+        }
 
         // La puerta sigue existiendo aunque ya no recorte: lo que se ejecuta es lo que el ejecutor
         // tiene, no lo que el servidor diga. Un nombre inventado del otro lado se contesta y no se

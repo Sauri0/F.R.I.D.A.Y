@@ -43,13 +43,44 @@ public sealed class ManosHablandoTests
     /// corta sino que el rechazo sea recuperable.
     /// </remarks>
     [Fact]
-    public void HablandoDeclaraLoMismoQueEscribiendo()
+    public void HablandoDeclaraTodoMenosLoQueEsSoloPorEscrito()
     {
         var orquestador = Armar();
         var bridge = new LiveToolBridge(() => orquestador);
 
-        Assert.Equal(orquestador.ToolDefinitions.Count, bridge.Declarations.Count);
+        var hablando = bridge.Declarations.Select(definition => definition.Name).ToHashSet(StringComparer.Ordinal);
+        var escribiendo = orquestador.ToolDefinitions.Select(definition => definition.Name).ToHashSet(StringComparer.Ordinal);
+
+        escribiendo.ExceptWith(LiveToolBridge.SoloPorEscrito);
+        Assert.Equal(escribiendo, hablando);
         Assert.True(bridge.Declarations.Count > LiveToolBridge.Essential.Length);
+    }
+
+    /// <summary>
+    /// Un comando de PowerShell dictado no se declara ni se ejecuta.
+    /// </summary>
+    /// <remarks>
+    /// Es la única herramienta donde equivocarse no se deshace, y hablando no hay forma de confirmar
+    /// nada: el puente ejecuta con <c>confirmationGranted: false</c> y no existe un camino de vuelta
+    /// para preguntar. Por escrito la orden se tipea y se lee antes de mandarla; hablando la escribe
+    /// un reconocedor de voz a partir de lo que le pareció oír.
+    /// </remarks>
+    [Fact]
+    public async Task ElShellNoSeDeclaraNiSeEjecutaHablando()
+    {
+        var bridge = new LiveToolBridge(Armar);
+
+        Assert.DoesNotContain(
+            bridge.Declarations,
+            definition => string.Equals(definition.Name, "comando", StringComparison.Ordinal));
+
+        // Y no alcanza con no declararlo: si el servidor lo pide igual, tampoco corre.
+        var resultado = await bridge.InvokeAsync(
+            new LiveFunctionCall("c1", "comando", JsonDocument.Parse("""{"comando":"Get-Process"}""").RootElement),
+            CancellationToken.None);
+
+        Assert.False(resultado.Succeeded);
+        Assert.Contains("de oído", resultado.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

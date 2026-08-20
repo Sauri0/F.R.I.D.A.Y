@@ -179,6 +179,69 @@ public sealed class ChatArchiveTests : IDisposable
     }
 
     /// <summary>
+    /// La nota de cierre no salva del borrado a una charla en la que no se dijo nada.
+    /// </summary>
+    /// <remarks>
+    /// <b>Es la secuencia exacta del llamador, y ahí estaba el defecto.</b> Quien cierra anota
+    /// «— se cerró la charla —» y recién después llama a Close(). Mientras esa nota contó como
+    /// turno, el contador nunca valía cero y la rama que borra no corría NUNCA: en la máquina del
+    /// usuario había quedado un archivo de 114 bytes con la cabecera y ese único renglón, de una vez
+    /// que tocó el orbe y volvió a tocarlo sin decir nada.
+    /// <para>
+    /// Las pruebas de Close() estaban bien y no alcanzaban: probaban Close() aislado, nunca la
+    /// secuencia con la que se lo llama de verdad.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void LaNotaDeCierre_NoCuentaComoTurnoNiSalvaElArchivo()
+    {
+        var charla = ChatArchive.Open(_carpeta, "escribiendo");
+
+        charla.Note(ChatVoice.Nota, "— se cerró la charla —");
+        Assert.Equal(0, charla.Turns);
+
+        charla.Close();
+
+        Assert.Empty(Directory.GetFiles(_carpeta, "*.md"));
+    }
+
+    /// <summary>Con algo dicho, la nota de cierro sí se escribe y el archivo queda.</summary>
+    [Fact]
+    public void ConAlgoDicho_LaNotaDeCierreSeEscribeYElArchivoQueda()
+    {
+        var charla = ChatArchive.Open(_carpeta, "hablando");
+        charla.Note(ChatVoice.Persona, "qué hora es");
+        charla.Note(ChatVoice.Nota, "— se cerró la charla —");
+        charla.Close();
+
+        var texto = File.ReadAllText(Directory.GetFiles(_carpeta, "*.md").Single());
+
+        Assert.Equal(1, charla.Turns);
+        Assert.Contains("se cerró la charla", texto, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Soltar la charla no puede tumbar el proceso aunque el hilo escritor siga parado.
+    /// </summary>
+    /// <remarks>
+    /// Close() espera dos segundos y se rinde. Si Dispose() le desechaba la cola igual, el hilo
+    /// escritor —parado esperando— se comía una ObjectDisposedException que no atrapaba nadie, y una
+    /// excepción sin dueño en un hilo propio termina el proceso entero.
+    /// </remarks>
+    [Fact]
+    public void SoltarLaCharla_NoTumbaNada()
+    {
+        var charla = ChatArchive.Open(_carpeta, "escribiendo");
+        charla.Note(ChatVoice.Persona, "algo");
+
+        charla.Dispose();
+        charla.Dispose();
+
+        // Y anotar después de soltarla tampoco.
+        charla.Note(ChatVoice.Ella, "tarde");
+    }
+
+    /// <summary>
     /// Lee sin pelearle al hilo que escribe.
     /// </summary>
     /// <remarks>

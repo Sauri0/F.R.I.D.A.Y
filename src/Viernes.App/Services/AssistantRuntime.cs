@@ -530,11 +530,11 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             .ListAsync(PersonalMemoryKind.Explicit, cancellationToken)
             .ConfigureAwait(false);
 
-        if (items.Count == 0)
-        {
-            return null;
-        }
-
+        // El corte que estaba acá dejaba el cerebro INALCANZABLE. Era de cuando lo único que se le
+        // contaba al modelo eran los recuerdos explícitos: sin ninguno, no había nada que decir y se
+        // volvía. Cuando se sumó el cerebro debajo, ese return siguió estando, así que un usuario
+        // sin un solo recuerdo guardado a propósito —el caso normal— no recibía NADA de lo que ella
+        // hubiera aprendido sola. Todo el camino de aprender existía y no cambiaba una coma.
         var lines = items
             .OfType<ExplicitMemory>()
             .Take(20)
@@ -1300,7 +1300,19 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             // servidor lo tomaría como que alguien le habló encima, y se contestaría sola.
             if (IsLiveConversation)
             {
-                await EndConversationAsync("Seguimos por escrito", quiet: true, CancellationToken.None)
+                // Sin keepChat, esto partía la charla al medio y perdía la respuesta. La pregunta ya
+                // se anotó arriba, en SendAsync; si acá se cierra la charla, cuando vuelva la
+                // respuesta el campo ya es nulo y la respuesta se descarta sin dejar rastro. El .md
+                // terminaba con una pregunta sin contestar y la destilación salía a aprender de esa
+                // charla trunca.
+                //
+                // Y no es sólo evitar el defecto: seguir por escrito es LA MISMA conversación
+                // siguiendo en otro medio. Partirla en dos archivos sería mentir sobre lo que pasó.
+                await EndConversationAsync(
+                    "Seguimos por escrito",
+                    quiet: true,
+                    keepChat: true,
+                    CancellationToken.None)
                     .ConfigureAwait(false);
             }
 
@@ -2428,7 +2440,25 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// Cierra la conversación. Con <paramref name="quiet"/> vuelve al reposo sin dejar nada en
     /// pantalla, que es lo que corresponde cuando el cierre lo pidió el usuario.
     /// </summary>
-    public async Task EndConversationAsync(string reason, bool quiet, CancellationToken cancellationToken)
+    public Task EndConversationAsync(string reason, bool quiet, CancellationToken cancellationToken) =>
+        EndConversationAsync(reason, quiet, keepChat: false, cancellationToken);
+
+    /// <summary>
+    /// Cierra la conversación abierta.
+    /// </summary>
+    /// <param name="reason">Por qué se cierra. Va a la bitácora.</param>
+    /// <param name="quiet">Si se cierra sin decir nada.</param>
+    /// <param name="keepChat">
+    /// Si la charla escrita sigue abierta. Sólo lo pide el paso de hablar a escribir, que no es un
+    /// final sino la misma conversación cambiando de medio: cerrarla ahí perdería la respuesta que
+    /// todavía no llegó, y dejaría dos archivos donde hubo una sola charla.
+    /// </param>
+    /// <param name="cancellationToken">Para cortar la espera.</param>
+    public async Task EndConversationAsync(
+        string reason,
+        bool quiet,
+        bool keepChat,
+        CancellationToken cancellationToken)
     {
         // Cerrar vacía los turnos, sin excepción.
         //
@@ -2446,7 +2476,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         // Se cierra por TODOS los caminos de cierre y no sólo por los que destilan, que es el mismo
         // error que este método vino a arreglar con los turnos: los caminos raros —un fallo del
         // dispositivo, mute, la herramienta «descansar»— son justamente los que hay que poder releer.
-        CerrarCharla();
+        if (!keepChat)
+        {
+            CerrarCharla();
+        }
 
         if (!_conversationActive)
         {
@@ -2785,6 +2818,11 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// </remarks>
     private void AbrirCharla()
     {
+        // Cerrar la anterior primero. Pisar el campo la dejaba abierta para siempre: sin renglón de
+        // cierre, sin destilar, y con su hilo y su cola vivos hasta que muriera el proceso. Pasa de
+        // verdad — alcanza con que un camino de cierre no haya pasado por CerrarCharla.
+        CerrarCharla();
+
         try
         {
             Volatile.Write(ref _chat, ChatArchive.Open(CarpetaDeCharlas, RutaDeVoz));
@@ -2947,8 +2985,40 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         "cerebro",
         "charlas");
 
-    /// <summary>Por dónde va la charla abierta, para la cabecera del archivo.</summary>
-    private string RutaDeVoz => IsLiveConversation ? "hablando" : "escribiendo";
+    /// <summary>
+    /// Por dónde va a ir la charla, para la cabecera del archivo.
+    /// </summary>
+    /// <remarks>
+    /// Se pregunta por la ruta que <em>tomaría</em> una charla abierta ahora, y no por
+    /// <c>IsLiveConversation</c>. Esto corre al abrir, antes de que la sesión hablada exista, así
+    /// que aquella bandera todavía está en falso: la cabecera decía «escribiendo» en TODAS las
+    /// charlas, también en las habladas, y la palabra «hablando» no se escribía nunca.
+    /// <para>
+    /// <see cref="DescribeVoiceRoute"/> existe justamente para esto: contesta por dónde iría sin
+    /// abrir nada.
+    /// </para>
+    /// </remarks>
+    private string RutaDeVoz
+    {
+        get
+        {
+            if (IsLiveConversation)
+            {
+                return "hablando";
+            }
+
+            try
+            {
+                return DescribeVoiceRoute().IsLive ? "hablando" : "escribiendo";
+            }
+            catch (Exception excepcion) when (excepcion is not OperationCanceledException)
+            {
+                // Armar la sesión para preguntarle puede fallar; no poder etiquetar la cabecera no
+                // puede costar la charla entera.
+                return "escribiendo";
+            }
+        }
+    }
 
     /// <summary>
     /// Reemplaza el último turno anotado por la frase entera, porque era el mismo pedido.

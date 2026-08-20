@@ -70,7 +70,19 @@ public sealed class ChatArchive : IDisposable
     /// <summary>Dónde quedó el archivo de esta charla.</summary>
     public string Path => _path;
 
-    /// <summary>Cuántos turnos se anotaron.</summary>
+    /// <summary>
+    /// Cuántos turnos de conversación se anotaron. Las notas no cuentan.
+    /// </summary>
+    /// <remarks>
+    /// <b>Contar las notas rompía el borrado de las charlas vacías, y no en teoría.</b> Quien cierra
+    /// anota «— se cerró la charla —» <em>antes</em> de llamar a <see cref="Close"/>, así que si eso
+    /// contara como turno el contador nunca valdría cero y la rama que borra no correría jamás. En
+    /// la máquina del usuario había quedado exactamente ese archivo: 114 bytes, la cabecera y el
+    /// renglón del cierre, de una vez que tocó el orbe y volvió a tocarlo sin decir nada.
+    /// <para>
+    /// Y el nombre queda siendo cierto: una nota no es un turno. Nadie dijo nada.
+    /// </para>
+    /// </remarks>
     public int Turns => Volatile.Read(ref _turns);
 
     /// <summary>
@@ -138,7 +150,11 @@ public sealed class ChatArchive : IDisposable
         // Tapado antes de tocar el disco, no después. Una nota de memoria con una clave adentro se
         // rechaza entera y el usuario se entera; un transcripto no se puede rechazar —es lo que se
         // dijo— así que lo único que queda es que la clave no llegue a escribirse.
-        Interlocked.Increment(ref _turns);
+        if (who != ChatVoice.Nota)
+        {
+            Interlocked.Increment(ref _turns);
+        }
+
         Encolar(
             $"**{quien}** · {_time.GetLocalNow():HH:mm:ss}{Environment.NewLine}{Environment.NewLine}" +
             $"{MemoryContentPolicy.Redact(text.Trim())}{Environment.NewLine}{Environment.NewLine}");
@@ -183,11 +199,28 @@ public sealed class ChatArchive : IDisposable
         }
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// Cierra y suelta la cola, pero sólo si el hilo escritor ya terminó.
+    /// </summary>
+    /// <remarks>
+    /// <b>Soltarla siempre podía tumbar el proceso entero.</b> Si <see cref="Close"/> se rinde en su
+    /// espera —un disco lento, un antivirus mirando el archivo— el hilo escritor sigue parado en
+    /// <c>GetConsumingEnumerable</c>, y desecharle la cola desde acá le tira una
+    /// <see cref="ObjectDisposedException"/> que no atrapa nadie: el bucle sólo espera errores de
+    /// entrada/salida. Una excepción sin dueño en un hilo propio termina el proceso.
+    /// <para>
+    /// No soltarla cuesta la memoria de una cola vacía hasta que el proceso muera. Es un precio que
+    /// no se compara con el otro.
+    /// </para>
+    /// </remarks>
     public void Dispose()
     {
         Close();
-        _pending.Dispose();
+
+        if (!_writer.IsAlive)
+        {
+            _pending.Dispose();
+        }
     }
 
     private void Encolar(string texto)
@@ -210,11 +243,33 @@ public sealed class ChatArchive : IDisposable
     /// cada pocos cientos de milisegundos— y abrir el archivo una vez por tramo es pagar el costo de
     /// abrir tantas veces como tramos haya.
     /// </remarks>
+    /// <summary>Lo que haya en la cola, y nada si ya la soltaron.</summary>
+    private IEnumerable<string> Pendientes()
+    {
+        while (true)
+        {
+            string texto;
+            try
+            {
+                if (!_pending.TryTake(out texto!, Timeout.Infinite))
+                {
+                    yield break;
+                }
+            }
+            catch (Exception excepcion) when (excepcion is ObjectDisposedException or InvalidOperationException)
+            {
+                yield break;
+            }
+
+            yield return texto;
+        }
+    }
+
     private void Escribir()
     {
         var buffer = new StringBuilder();
 
-        foreach (var texto in _pending.GetConsumingEnumerable())
+        foreach (var texto in Pendientes())
         {
             buffer.Append(texto);
             while (_pending.TryTake(out var siguiente))
@@ -231,6 +286,12 @@ public sealed class ChatArchive : IDisposable
                 // Un disco lleno o una carpeta sin permiso no pueden cortar una conversación. Se
                 // pierde el renglón y se sigue: quedarse sin asistente por no poder anotar sería
                 // cambiar un problema chico por uno grande.
+            }
+            catch (ObjectDisposedException)
+            {
+                // Le soltaron la cola por abajo. Es el cinturón del arreglo de Dispose: cualquier
+                // camino que llegue acá tiene que terminar el hilo, no el proceso.
+                return;
             }
 
             buffer.Clear();

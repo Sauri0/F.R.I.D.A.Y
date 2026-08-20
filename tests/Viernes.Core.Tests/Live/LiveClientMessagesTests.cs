@@ -23,6 +23,75 @@ public sealed class LiveClientMessagesTests
         return document.RootElement.GetProperty("setup").Clone();
     }
 
+    private static ToolDefinition Herramienta(string nombre) =>
+        ToolDefinition.Create(nombre, "de mentira", new { type = "object" });
+
+    /// <summary>
+    /// Las funciones declaradas, las busque donde las busque.
+    /// </summary>
+    /// <remarks>
+    /// Por búsqueda y no por posición: desde que la sesión hablada declara también la búsqueda web,
+    /// las funciones dejaron de ser la primera entrada del arreglo. Tres pruebas que indexaban en
+    /// cero se cayeron con el cambio — bien caídas, para eso estaban— y indexar en uno las dejaría
+    /// listas para caerse otra vez con la próxima herramienta que se declare al lado.
+    /// </remarks>
+    private static JsonElement Funciones(JsonElement setup) =>
+        setup.GetProperty("tools")
+            .EnumerateArray()
+            .First(entrada => entrada.TryGetProperty("functionDeclarations", out _))
+            .GetProperty("functionDeclarations");
+
+    /// <summary>
+    /// La búsqueda se declara aunque no haya ninguna función.
+    /// </summary>
+    /// <remarks>
+    /// <b>Hablando no podía buscar nada.</b> La búsqueda web del proyecto la inyecta el proveedor
+    /// del camino escrito y este camino no pasa por ahí, así que por voz contestaba de memoria —
+    /// mientras el texto que le pega sus manos al modelo le prometía que podía «buscar en la web».
+    /// Está medido contra el servidor de verdad: sin la herramienta dice «no tengo acceso a noticias
+    /// en tiempo real»; con ella, contesta la noticia.
+    /// </remarks>
+    [Fact]
+    public void Setup_DeclaraLaBusquedaAunqueNoHayaFunciones()
+    {
+        var setup = Setup(new GeminiLiveOptions());
+
+        var tools = setup.GetProperty("tools").EnumerateArray().ToArray();
+        Assert.Single(tools);
+        Assert.True(tools[0].TryGetProperty("googleSearch", out _));
+    }
+
+    [Fact]
+    public void Setup_DeclaraLaBusquedaAlLadoDeLasFunciones()
+    {
+        var setup = Setup(new GeminiLiveOptions(), tools: [Herramienta("pc_action")]);
+
+        var tools = setup.GetProperty("tools").EnumerateArray().ToArray();
+        Assert.Equal(2, tools.Length);
+        Assert.True(tools[0].TryGetProperty("googleSearch", out _));
+
+        var funciones = tools[1].GetProperty("functionDeclarations").EnumerateArray().ToArray();
+        Assert.Equal("pc_action", Assert.Single(funciones).GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public void Setup_SinBusqueda_NoDeclaraNadaSiTampocoHayFunciones()
+    {
+        var setup = Setup(new GeminiLiveOptions(webSearch: false));
+
+        Assert.False(setup.TryGetProperty("tools", out _));
+    }
+
+    [Fact]
+    public void Setup_SinBusqueda_LasFuncionesSiguenSolas()
+    {
+        var setup = Setup(new GeminiLiveOptions(webSearch: false), tools: [Herramienta("pc_action")]);
+
+        var tools = setup.GetProperty("tools").EnumerateArray().ToArray();
+        Assert.Single(tools);
+        Assert.True(tools[0].TryGetProperty("functionDeclarations", out _));
+    }
+
     [Fact]
     public void Setup_UsaElModeloVerificadoConElPrefijoDeRecurso()
     {
@@ -207,13 +276,25 @@ public sealed class LiveClientMessagesTests
         });
 
     [Fact]
-    public void Setup_SinHerramientas_NoDeclaraNinguna()
+    public void Setup_SinNadaQueDeclarar_NoDeclaraNinguna()
     {
-        // Mandar un arreglo vacío no es lo mismo que no mandar nada, y acá la sesión sin manos tiene
-        // que seguir armando exactamente el mismo setup que armaba antes de que esto existiera.
-        var setup = Setup(new GeminiLiveOptions());
+        // Mandar un arreglo vacío no es lo mismo que no mandar nada, y una sesión sin manos y sin
+        // búsqueda tiene que armar exactamente el mismo setup que armaba antes de que esto
+        // existiera. La condición cambió cuando la búsqueda pasó a declararse sola: sin funciones ya
+        // no alcanza, hace falta que tampoco haya búsqueda.
+        var setup = Setup(new GeminiLiveOptions(webSearch: false));
 
         Assert.False(setup.TryGetProperty("tools", out _));
+    }
+
+    [Fact]
+    public void Setup_SinFuncionesPeroConBusqueda_NoDeclaraFunciones()
+    {
+        var setup = Setup(new GeminiLiveOptions());
+
+        Assert.DoesNotContain(
+            setup.GetProperty("tools").EnumerateArray(),
+            entrada => entrada.TryGetProperty("functionDeclarations", out _));
     }
 
     [Fact]
@@ -221,9 +302,7 @@ public sealed class LiveClientMessagesTests
     {
         var setup = Setup(new GeminiLiveOptions(), tools: [Herramienta()]);
 
-        var declaration = setup
-            .GetProperty("tools")[0]
-            .GetProperty("functionDeclarations")[0];
+        var declaration = Funciones(setup)[0];
 
         Assert.Equal("pc_action", declaration.GetProperty("name").GetString());
         Assert.Equal("Controla Windows.", declaration.GetProperty("description").GetString());
@@ -245,9 +324,7 @@ public sealed class LiveClientMessagesTests
         // queda sin manos sin que nadie sepa por qué.
         var setup = Setup(new GeminiLiveOptions(), tools: [Herramienta()]);
 
-        var parameters = setup
-            .GetProperty("tools")[0]
-            .GetProperty("functionDeclarations")[0]
+        var parameters = Funciones(setup)[0]
             .GetProperty("parameters");
 
         Assert.False(parameters.TryGetProperty("additionalProperties", out _));
@@ -263,9 +340,7 @@ public sealed class LiveClientMessagesTests
 
         var setup = Setup(new GeminiLiveOptions(), tools: [tool]);
 
-        var parameters = setup
-            .GetProperty("tools")[0]
-            .GetProperty("functionDeclarations")[0]
+        var parameters = Funciones(setup)[0]
             .GetProperty("parameters");
 
         Assert.False(parameters.TryGetProperty("required", out _));

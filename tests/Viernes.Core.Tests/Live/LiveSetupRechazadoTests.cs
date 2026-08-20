@@ -147,7 +147,7 @@ public sealed class LiveSetupRechazadoTests
 
         Assert.True(await client.StartAsync());
 
-        var aviso = Assert.Single(avisos.Where(a => a.Message.Contains("herramientas", StringComparison.Ordinal)));
+        var aviso = Assert.Single(avisos, a => a.Message.Contains("herramientas", StringComparison.Ordinal));
         Assert.False(aviso.Fatal);
     }
 
@@ -183,6 +183,102 @@ public sealed class LiveSetupRechazadoTests
         Assert.True(await EsperarAsync(() => banco.Count >= 3));
         var ultimo = banco.Todos[^1].SentSnapshot().First();
         Assert.DoesNotContain("archivo", ultimo, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Un corte de red NO cuesta las herramientas.
+    /// </summary>
+    /// <remarks>
+    /// <b>Es el defecto que la auditoría encontró en el arreglo anterior.</b> Se reintentaba con el
+    /// piso ante cualquier falla de conexión, y la marca no se bajaba nunca: un corte de internet de
+    /// dos segundos dejaba a la asistente hablando con tres herramientas de cuarenta y seis hasta que
+    /// se cerrara el programa — mientras el anuncio pegado en su instrucción de sistema le seguía
+    /// prometiendo al modelo que las tenía todas.
+    /// <para>
+    /// La firma de un rechazo de esquema es que el setup llegue a mandarse y el servidor cierre o
+    /// conteste error. Que el socket ni siquiera abra es otra cosa.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task SiNoAbreElSocket_NoSeCulpaALasHerramientas()
+    {
+        var banco = new NoAbreLaPrimera();
+        var manos = new FakeLiveToolBridge();
+        manos.Tools.AddRange([Herramienta("pc_action"), Herramienta("archivo")]);
+        manos.Essential.Add(Herramienta("pc_action"));
+
+        await using var client = new GeminiLiveClient(
+            new GeminiLiveOptions(enabled: true),
+            () => "clave-de-mentira",
+            new RecordingAudioSink(),
+            banco.Create,
+            tools: manos);
+
+        // El primer intento no abre: no se reintenta, y no se culpa a las herramientas.
+        Assert.False(await client.StartAsync());
+        Assert.Equal(1, banco.Count);
+
+        // Y cuando la red vuelve, sigue declarando TODAS.
+        Assert.True(await client.StartAsync());
+        var setup = banco.Todos[^1].SentSnapshot().First();
+        Assert.Contains("archivo", setup, StringComparison.Ordinal);
+    }
+
+    /// <summary>Un transporte que no abre la primera vez y sí la segunda.</summary>
+    private sealed class NoAbreLaPrimera
+    {
+        private readonly List<FakeLiveTransport> _transports = [];
+        private int _creados;
+
+        public int Count => Volatile.Read(ref _creados);
+
+        public IReadOnlyList<FakeLiveTransport> Todos
+        {
+            get
+            {
+                lock (_transports)
+                {
+                    return _transports.ToArray();
+                }
+            }
+        }
+
+        public ILiveTransport Create()
+        {
+            var cual = Interlocked.Increment(ref _creados);
+            if (cual == 1)
+            {
+                return new NoAbre();
+            }
+
+            var transport = new FakeLiveTransport();
+            lock (_transports)
+            {
+                _transports.Add(transport);
+            }
+
+            transport.Deliver("""{"setupComplete":{}}""");
+            return transport;
+        }
+    }
+
+    /// <summary>Se cae al abrir, como un socket sin red del otro lado.</summary>
+    private sealed class NoAbre : ILiveTransport
+    {
+        public bool IsOpen => false;
+
+        public Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken) =>
+            throw new System.Net.WebSockets.WebSocketException("no hay red");
+
+        public Task SendAsync(string message, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("no abrió");
+
+        public Task<string?> ReceiveAsync(CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("no abrió");
+
+        public Task CloseAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static async Task<bool> EsperarAsync(Func<bool> condicion)
