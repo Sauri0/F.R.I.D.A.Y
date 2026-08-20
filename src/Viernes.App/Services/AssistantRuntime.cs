@@ -20,6 +20,7 @@ using Viernes.Core.Voice;
 using Viernes.Memory.Models;
 using Viernes.Memory.Persistence;
 using Viernes.Platform.Windows.Actions;
+using Viernes.Platform.Windows.Processes;
 using Viernes.Platform.Windows.Speech;
 using Viernes.Platform.Windows.Speech.Recognition;
 using Viernes.Platform.Windows.Speech.WakeWord;
@@ -541,12 +542,36 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             return;
         }
 
+        // Los servidores MCP son ejecutables aparte y sobreviven a Viernes si Viernes no llega a
+        // cerrarlos: un cierre forzado, un cuelgue, apagar la máquina. En la computadora del usuario
+        // se contaron SETENTA Y SEIS procesos huérfanos del servidor de Spotify, uno por arranque,
+        // algunos de veintidós horas. Esto los ata a la vida de este proceso a nivel del sistema, así
+        // que se mueren con él aunque nadie corra ningún cierre. Ver ChildProcessJob.
+        //
+        // Se vuelve a llamar al reconectar porque una reconexión levanta un proceso nuevo, y un
+        // proceso nuevo sin adoptar es un huérfano nuevo.
+        // Sólo los ejecutables de los servidores, y no toda la descendencia: cuando el usuario le
+        // pide que abra Spotify, esa aplicación también nace descendiente de Viernes, y atarla
+        // significaría cerrársela de golpe al cerrar el asistente.
+        var ejecutables = servers.Where(server => server.Enabled).Select(server => server.Command).ToList();
+
+        provider.ConnectionChanged += (_, evento) =>
+        {
+            if (evento.State is McpConnectionState.Conectado or McpConnectionState.Recuperado)
+            {
+                ChildProcessJob.Adopt(ejecutables);
+            }
+        };
+
+        var atados = ChildProcessJob.Adopt(ejecutables);
+
         _mcpProvider = provider;
         _mcpTools = tools;
 
         RuntimeTrace.Write(
             "mcp.listo",
-            $"servidores={servers.Count(server => server.Enabled)} · herramientas={tools.Count}");
+            $"servidores={servers.Count(server => server.Enabled)} · herramientas={tools.Count} · " +
+            $"atados={atados}");
     }
 
     /// <summary>
