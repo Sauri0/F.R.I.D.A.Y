@@ -341,6 +341,14 @@ internal static class MotionBench
 
         var drawn = body is NubeOrb nube ? nube.DrawnFrames : ((LiquidOrb)body).DrawnFrames;
 
+        if (body is NubeOrb desglosada)
+        {
+            var c = desglosada.DrawCostMs;
+            System.Console.WriteLine(
+                $"    [nube {mode}] halo {c.Halo:0.00}  polvo {c.Dust:0.00}  nucleo {c.Core:0.00}  " +
+                $"anillos {c.Rings:0.00}  borde {c.Fringe:0.00}  =  {c.Total:0.00} ms");
+        }
+
         return new Pasada(
             Cuadros: deltas.Count,
             PorSegundo: deltas.Count / Math.Max(0.001, measured),

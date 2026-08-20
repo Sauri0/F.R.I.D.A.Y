@@ -823,6 +823,24 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     /// </remarks>
     internal long DrawnFrames { get; private set; }
 
+    // El desglose del costo de dibujo, suavizado. Existe para poder decir DONDE se va el tiempo en
+    // vez de suponerlo: la nube tiene cinco capas y optimizar la equivocada es trabajo perdido.
+    private double _msHalo;
+    private double _msDust;
+    private double _msCore;
+    private double _msRings;
+    private double _msFringe;
+
+    internal (double Halo, double Dust, double Core, double Rings, double Fringe, double Total) DrawCostMs =>
+        (_msHalo, _msDust, _msCore, _msRings, _msFringe,
+         _msHalo + _msDust + _msCore + _msRings + _msFringe);
+
+    private static void Anotar(ref double promedio, long desde, long hasta)
+    {
+        var ms = (hasta - desde) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        promedio = promedio <= 0 ? ms : (promedio * 0.9) + (ms * 0.1);
+    }
+
     protected override void OnRender(DrawingContext context)
     {
         var side = Math.Min(ActualWidth, ActualHeight);
@@ -936,10 +954,21 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
             alpha * (1 + (0.38 * pulse) + (0.35 * speed01) + (1.1 * soundEnergy)),
             speed01);
 
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         DrawDust(context, profile, dustColor, alpha, light, dispersion, extra, reach, sound, soundEnergy, turbulence, waveEnvelope, voice);
+        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         DrawCore(context, profile, coreColor, alpha, light, dispersion, extra, sound, turbulence, waveEnvelope, voice);
+        var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         DrawRings(context, profile, ringColor, alpha, light, dispersion, extra, sound, waveEnvelope, seconds, voice);
+        var t3 = System.Diagnostics.Stopwatch.GetTimestamp();
         DrawFringe(context, profile, dustColor, alpha, light, dispersion, extra, turbulence);
+        var t4 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        Anotar(ref _msHalo, reloj, t0);
+        Anotar(ref _msDust, t0, t1);
+        Anotar(ref _msCore, t1, t2);
+        Anotar(ref _msRings, t2, t3);
+        Anotar(ref _msFringe, t3, t4);
 
         context.Pop();
         NoteDrawCost(reloj);
