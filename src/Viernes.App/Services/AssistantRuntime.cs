@@ -17,6 +17,7 @@ using Viernes.Core.Tools;
 using Viernes.Core.Tools.BuiltIn;
 using Viernes.Core.Usage;
 using Viernes.Core.Voice;
+using Viernes.Memory.Brain;
 using Viernes.Memory.Chats;
 using Viernes.Memory.Models;
 using Viernes.Memory.Persistence;
@@ -192,6 +193,25 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
     private readonly JsonUserDataStore _dataStore = new();
     private readonly JsonPersonalMemoryStore _memory = new();
+
+    /// <summary>
+    /// Lo que sabe, en archivos de texto.
+    /// </summary>
+    /// <remarks>
+    /// Convive con <see cref="_memory"/> y no lo reemplaza <em>todavía</em>. Aquél sigue siendo el
+    /// dueño de lo que el usuario pidió recordar a propósito —lo usan la herramienta de memoria, el
+    /// conector MCP y la pantalla de revisión—; el cerebro es lo que ella destila sola de las
+    /// charlas.
+    /// <para>
+    /// Los dos miran la misma charla y hacen cosas distintas con ella, y por eso conviven: aquél
+    /// deja <em>sugerencias</em> para que el usuario apruebe o descarte en la pantalla de memoria;
+    /// éste aprende solo y se corrige solo. Si algún día el cerebro empieza a proponer, sobra uno.
+    /// </para>
+    /// </remarks>
+    private readonly Brain _brain = new(System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Viernes",
+        "cerebro"));
 
     /// <summary>
     /// Las misiones. Es la misma instancia que ve la herramienta <c>mision</c>.
@@ -520,7 +540,72 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             .Take(20)
             .Select(item => $"- {item.Content}");
 
-        return "Lo que sabés del usuario porque te lo pidió él:\n" + string.Join('\n', lines);
+        var explicito = items.Count == 0
+            ? null
+            : "Lo que sabés del usuario porque te lo pidió él:\n" + string.Join('\n', lines);
+
+        return Juntar(explicito, DescribirCerebro());
+    }
+
+    /// <summary>
+    /// Lo que aprendió solo, para el turno que viene.
+    /// </summary>
+    /// <remarks>
+    /// <b>Sin esto, aprender no cambia nada.</b> Un cerebro que se escribe y no se lee es un diario
+    /// íntimo: queda lindo en la carpeta y la asistente se comporta exactamente igual que el primer
+    /// día. Esta función es la única razón por la que destilar sirve.
+    /// <para>
+    /// Va entero mientras entre, y cuando deja de entrar pasa a ser un índice: los títulos con su
+    /// alcance, sin los cuerpos. Degradar así y no cortar por la mitad importa — con veinte notas
+    /// conviene tenerlas enteras, y con doscientas conviene saber que existen todas antes que
+    /// conocer bien las primeras treinta y ninguna de las otras.
+    /// </para>
+    /// <para>
+    /// Lo reemplazado no entra. Es evidencia para entender después por qué se equivocó, no algo
+    /// según lo cual actuar.
+    /// </para>
+    /// </remarks>
+    private string? DescribirCerebro()
+    {
+        List<BrainNote> notas;
+        try
+        {
+            notas = [.. _brain.All().Where(nota => nota.Status == BrainStatus.Vigente)];
+        }
+        catch (Exception excepcion) when (excepcion is System.IO.IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        if (notas.Count == 0)
+        {
+            return null;
+        }
+
+        var enteras = notas.Sum(nota => nota.Title.Length + nota.Body.Length + 20) <= PresupuestoDelCerebro;
+
+        var renglones = notas.Select(nota => enteras
+            ? $"- {nota.Title} ({nota.Scope}, {nota.Confidence.ToString().ToLowerInvariant()}): {nota.Body}"
+            : $"- {nota.Title} ({nota.Scope})");
+
+        return "Lo que fuiste aprendiendo de él y de esta computadora:\n" + string.Join('\n', renglones);
+    }
+
+    /// <summary>
+    /// Cuánto del cerebro entra en cada turno.
+    /// </summary>
+    /// <remarks>
+    /// Se paga en cada pedido, así que no puede crecer sin techo. Cuatro mil caracteres es del orden
+    /// de mil palabras: alcanza para varias decenas de notas enteras y sigue siendo chico al lado de
+    /// la instrucción de sistema y las herramientas.
+    /// </remarks>
+    private const int PresupuestoDelCerebro = 4000;
+
+    /// <summary>Pega los pedazos que haya, salteando los vacíos.</summary>
+    private static string? Juntar(params string?[] partes)
+    {
+        var vivos = partes.Where(parte => !string.IsNullOrWhiteSpace(parte)).ToList();
+        return vivos.Count == 0 ? null : string.Join("\n\n", vivos);
     }
 
     /// <summary>
@@ -2727,11 +2812,128 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         charla.Note(ChatVoice.Nota, "— se cerró la charla —");
         charla.Close();
 
-        if (charla.Turns > 1)
+        if (charla.Turns <= 1)
         {
-            RuntimeTrace.Write("charla.escrita", $"turnos={charla.Turns}");
+            return;
+        }
+
+        RuntimeTrace.Write("charla.escrita", $"turnos={charla.Turns}");
+
+        // Destilar es lento —es un pedido al modelo— y cerrar la charla no puede esperarlo: quien
+        // cierra puede ser el hilo de la interfaz, el del socket o el del apagado. Sale por una
+        // tarea con su propio try, que es lo que este archivo ya hace en todos los demás cierres.
+        var archivo = charla.Path;
+        _ = Task.Run(() => DestilarCharlaAsync(archivo));
+    }
+
+    /// <summary>
+    /// Lee la charla que acaba de terminar y guarda en el cerebro lo que valga la pena.
+    /// </summary>
+    /// <remarks>
+    /// <b>Es lo que convierte el archivo de charlas en aprendizaje.</b> Sin esto quedan un montón de
+    /// transcripciones y una carpeta vacía al lado.
+    /// <para>
+    /// Se le manda la charla <em>entera, con los dos lados</em>, y no sólo lo que dijo la persona. La
+    /// destilación de antes miraba únicamente los pedidos, así que no podía enterarse de nada de lo
+    /// que pasó al intentarlos: qué falló, qué había que hacer primero, qué corrigió el usuario
+    /// después de una respuesta. Eso es justamente lo reutilizable.
+    /// </para>
+    /// <para>
+    /// Y se le manda lo que ya sabe. Sin eso vuelve a aprender lo mismo cada vez y el cerebro se
+    /// llena de la misma nota escrita de veinte formas; con eso puede decir «esto reemplaza a
+    /// aquello», que es como se corrige en vez de acumular.
+    /// </para>
+    /// <para>
+    /// Todo lo que sale de acá es lo que dijo un modelo sobre una charla, así que entra con confianza
+    /// media como mucho salvo que la persona lo haya dicho derecho. Subirla porque una herramienta no
+    /// dio error es exactamente lo que la skill del usuario prohíbe, y con razón.
+    /// </para>
+    /// </remarks>
+    private async Task DestilarCharlaAsync(string chatPath)
+    {
+        if (_isDisposed || !IsCloudConfigured)
+        {
+            return;
+        }
+
+        try
+        {
+            string charla;
+            try
+            {
+                charla = await System.IO.File.ReadAllTextAsync(chatPath).ConfigureAwait(false);
+            }
+            catch (Exception excepcion) when (excepcion is System.IO.IOException or UnauthorizedAccessException)
+            {
+                RuntimeTrace.Write("cerebro.no.se.pudo.leer", excepcion.GetType().Name);
+                return;
+            }
+
+            if (charla.Length > 12_000)
+            {
+                // Lo último es lo que se destila mejor: ahí están las correcciones y el resultado.
+                charla = "…\n" + charla[^12_000..];
+            }
+
+            var yaSabe = DescribirCerebro() ?? "Todavía no sabés nada de él.";
+
+            var pedido = $$"""
+                Acabás de terminar esta conversación. Extraé lo que te sirva para la próxima vez.
+
+                {{yaSabe}}
+
+                Reglas:
+                - Como mucho TRES notas. Ninguna es una respuesta válida y es la más común.
+                - Nada efímero: un pedido puntual, una fecha, algo que ya hiciste. Sólo lo que
+                  seguiría siendo cierto dentro de un mes.
+                - No inventes: si algo no está dicho ni pasó en la charla, no va.
+                - Si algo contradice lo que ya sabías, poné el título exacto de la nota vieja en
+                  "reemplaza" en vez de escribir una nota nueva parecida.
+                - No generalices una preferencia a otros contextos sin evidencia de esos contextos.
+                - confianza "alta" sólo si él lo dijo derecho. Que algo no haya fallado no es
+                  evidencia de nada.
+
+                Contestá SÓLO un arreglo JSON, sin explicaciones y sin ```:
+                [{"tipo":"preferencia|aplicacion|procedimiento|correccion|capacidades",
+                   "titulo":"una línea corta",
+                   "alcance":"cuándo vale",
+                   "confianza":"baja|media|alta",
+                   "cuerpo":"una o dos frases",
+                   "reemplaza":"título exacto de la nota vieja, o vacío"}]
+
+                La conversación:
+                {{charla}}
+                """;
+
+            ConversationTurnResult salida;
+            Volatile.Write(ref _distilling, 1);
+            try
+            {
+                salida = await _orchestrator.ProcessAsync(pedido, CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                Volatile.Write(ref _distilling, 0);
+            }
+
+            if (salida.IsLocalMode || string.IsNullOrWhiteSpace(salida.Text))
+            {
+                return;
+            }
+
+            var evidencia = new[] { "charlas/" + System.IO.Path.GetFileName(chatPath) };
+            var guardadas = _brain.Learn(salida.Text, evidencia);
+
+            // Sin lo que aprendió: la bitácora se pega en reportes. Cuántas alcanza para saber si
+            // esto está corriendo, que es lo único que no se puede ver de otra forma.
+            RuntimeTrace.Write("cerebro.destilado", $"notas={guardadas}");
+        }
+        catch (Exception excepcion)
+        {
+            RuntimeTrace.Write("cerebro.excepcion", excepcion.GetType().Name);
         }
     }
+
 
     /// <summary>Dónde viven las charlas.</summary>
     /// <remarks>

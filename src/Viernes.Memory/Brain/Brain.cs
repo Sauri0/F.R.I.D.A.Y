@@ -113,10 +113,23 @@ public sealed class Brain
     /// El índice se rehace entero en vez de agregarle un renglón. Es más caro y es lo correcto: el
     /// usuario puede haber borrado una nota a mano —se lo invita a hacerlo— y un índice que sólo
     /// crece terminaría lleno de enlaces a archivos que ya no están.
+    /// <para>
+    /// <b>Y si esa nota ya existe en otra carpeta, se guarda donde está y no donde le tocaría.</b>
+    /// Se invita al usuario a reorganizar moviendo archivos; sin esto, la primera vez que ella
+    /// volviera a aprender algo sobre ese tema escribiría una copia en la carpeta por omisión, y
+    /// quedarían dos archivos con el mismo nombre diciendo cosas distintas — y cuál de los dos se lee
+    /// después depende del orden en que el sistema devuelva los archivos. Lo encontró una prueba que
+    /// buscaba otra cosa.
+    /// </para>
     /// </remarks>
     public void Save(BrainNote note)
     {
         ArgumentNullException.ThrowIfNull(note);
+
+        if (Ubicacion(note.Name) is { } donde && !string.Equals(donde, note.Folder, StringComparison.OrdinalIgnoreCase))
+        {
+            note = note with { Folder = donde };
+        }
 
         var destino = System.IO.Path.Combine(_root, note.RelativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destino)!);
@@ -146,6 +159,29 @@ public sealed class Brain
         Save(replacement with { Supersedes = oldName });
     }
 
+    /// <summary>En qué carpeta vive ya una nota, o nulo si todavía no existe.</summary>
+    private string? Ubicacion(string name)
+    {
+        var archivo = Archivo(name);
+        if (archivo is null)
+        {
+            return null;
+        }
+
+        var carpeta = System.IO.Path.GetRelativePath(
+            KnowledgeFolder,
+            System.IO.Path.GetDirectoryName(archivo) ?? KnowledgeFolder);
+
+        return carpeta == "." ? string.Empty : carpeta.Replace('\\', '/');
+    }
+
+    private string? Archivo(string name) =>
+        string.IsNullOrWhiteSpace(name) || !Directory.Exists(KnowledgeFolder)
+            ? null
+            : Directory
+                .EnumerateFiles(KnowledgeFolder, name + ".md", SearchOption.AllDirectories)
+                .FirstOrDefault();
+
     /// <summary>Lee una nota por su nombre, la busque donde la busque.</summary>
     public BrainNote? Read(string name)
     {
@@ -154,11 +190,7 @@ public sealed class Brain
             return null;
         }
 
-        var archivo = Directory
-            .EnumerateFiles(KnowledgeFolder, name + ".md", SearchOption.AllDirectories)
-            .FirstOrDefault();
-
-        return archivo is null ? null : Parse(archivo);
+        return Archivo(name) is { } archivo ? Parse(archivo) : null;
     }
 
     /// <summary>
