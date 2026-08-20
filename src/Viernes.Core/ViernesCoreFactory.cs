@@ -81,7 +81,13 @@ public static class ViernesCoreFactory
             rules,
             goals,
             personalContext,
-            missions);
+            missions,
+            // Faltaba, y por eso los permisos aprendidos no valían para NADA en el camino escrito.
+            // La fábrica los recibía, armaba con ellos la herramienta de permisos —o sea que el
+            // usuario podía enseñarlos— y después los tiraba: el orquestador, que es quien los mete
+            // en el pedido de cada turno, se construía con el suyo en nulo. Se enseñaba un permiso y
+            // el modelo nunca se enteraba de que existía.
+            autonomy);
     }
 
     /// <summary>

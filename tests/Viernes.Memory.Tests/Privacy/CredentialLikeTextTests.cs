@@ -15,7 +15,6 @@ namespace Viernes.Memory.Tests.Privacy;
 public sealed class CredentialLikeTextTests
 {
     [Theory]
-    [InlineData("la clave es MiSecretoQueNadieSabe")]
     [InlineData("clave: MiSecretoQueNadieSabe")]
     [InlineData("el pin es 481516")]
     [InlineData("secret = MiSecretoQueNadieSabe")]
@@ -32,24 +31,77 @@ public sealed class CredentialLikeTextTests
     }
 
     /// <summary>
-    /// Reconocer y tapar no pueden separarse.
+    /// Una clave de puras letras dictada en prosa se tapa en la charla, pero no impide guardar.
     /// </summary>
     /// <remarks>
-    /// Es la prueba que hace falta para que el arreglo dure. Si algún día alguien vuelve a escribir
-    /// una expresión aparte para una de las dos operaciones, esto se cae — que es exactamente lo que
-    /// no pasó la primera vez, porque no había nada mirándolo.
+    /// Es exactamente el borde entre los dos umbrales, y por eso está escrito como prueba y no como
+    /// comentario: en la charla no cuesta nada taparla, y negarse a guardar un recordatorio porque
+    /// dice «la clave es» seguido de una palabra larga sí cuesta.
     /// </remarks>
     [Theory]
     [InlineData("la clave es MiSecretoQueNadieSabe")]
-    [InlineData("abrime el navegador y buscá el clima")]
-    [InlineData("recordame comprar pan")]
-    [InlineData("AKIAIOSFODNN7EXAMPLE")]
-    public void ReconocerYTapar_SiempreDicenLoMismo(string texto)
+    [InlineData("la contraseña es difícilísimadeadivinar")]
+    public void DictadaSinNingunDigito_SeTapaPeroNoImpideGuardar(string texto)
     {
-        var reconoce = CredentialLikeText.Looks(texto);
-        var tapa = CredentialLikeText.Redact(texto) != texto;
+        Assert.Contains(CredentialLikeText.Placeholder, CredentialLikeText.Redact(texto), StringComparison.Ordinal);
+        Assert.False(CredentialLikeText.Looks(texto));
+    }
 
-        Assert.Equal(reconoce, tapa);
+    /// <summary>
+    /// Lo que se rechaza siempre se tapa. Nunca al revés.
+    /// </summary>
+    /// <remarks>
+    /// <b>Es la prueba que hace que los dos umbrales no se separen.</b> Son la misma idea con dos
+    /// exigencias distintas —rechazar es caro, tapar es barato— y lo único que no puede pasar es que
+    /// algo se niegue a guardarse y después no se tape en la charla. Si alguien afloja el ancho o
+    /// endurece el estricto sin mirar el otro, esto se cae.
+    /// </remarks>
+    [Theory]
+    [InlineData("la clave es Casa12345")]
+    [InlineData("el pin es 481516")]
+    [InlineData("AKIAIOSFODNN7EXAMPLE")]
+    [InlineData("sk-or-v1-abcdefghijklmnopqrstuvwxyz012345")]
+    [InlineData("la clave del wifi es Casa12345")]
+    [InlineData("recordame comprar pan")]
+    [InlineData("la clave es la constancia")]
+    public void LoQueSeRechaza_SiempreSeTapa(string texto)
+    {
+        if (CredentialLikeText.Looks(texto))
+        {
+            Assert.NotEqual(texto, CredentialLikeText.Redact(texto));
+        }
+    }
+
+    /// <summary>
+    /// Negarse a guardar algo es caro, así que el umbral para eso es más alto.
+    /// </summary>
+    /// <remarks>
+    /// <b>Salió de un defecto de verdad.</b> Al unificar los dos reconocedores quedó uno solo con el
+    /// umbral ancho, y el guardia —el que impide guardar una memoria con una clave adentro— empezó a
+    /// rechazar recordatorios perfectamente legítimos. Una asistente que se niega a anotar «la clave
+    /// del examen es la constancia» no está cuidando nada: está rota.
+    /// </remarks>
+    [Theory]
+    [InlineData("recordame que la clave del examen es la constancia")]
+    [InlineData("anotá que el pin del turno es en la puerta de atrás")]
+    [InlineData("la contraseña es difícil de recordar")]
+    public void UnaFraseDeTodosLosDias_SeGuardaAunqueSeTape(string texto)
+    {
+        Assert.False(CredentialLikeText.Looks(texto));
+    }
+
+    /// <summary>Y una clave dictada de verdad sí se rechaza, con complemento y todo.</summary>
+    /// <remarks>
+    /// «La clave DEL WIFI es …» es como se dice de verdad, y antes no coincidía: la expresión exigía
+    /// que la palabra estuviera pegada al verbo.
+    /// </remarks>
+    [Theory]
+    [InlineData("la clave del wifi es Casa12345")]
+    [InlineData("la contraseña de la compu es Bruno2019")]
+    [InlineData("el pin es 481516")]
+    public void UnaClaveDictadaDeVerdad_SeRechaza(string texto)
+    {
+        Assert.True(CredentialLikeText.Looks(texto));
     }
 
     [Theory]

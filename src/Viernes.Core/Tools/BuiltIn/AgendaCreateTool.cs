@@ -29,8 +29,8 @@ public sealed class AgendaCreateTool(IUserDataStore dataStore) : IAssistantTool
         var startsAt = JsonToolArguments.RequiredDateTimeOffset(arguments, "starts_at");
         var endsAt = JsonToolArguments.OptionalDateTimeOffset(arguments, "ends_at");
         var notes = JsonToolArguments.OptionalString(arguments, "notes", 2_000);
-        SensitiveContentGuard.RejectCredentialLikeContent(title, "title");
-        SensitiveContentGuard.RejectCredentialLikeContent(notes, "notes");
+        SensitiveContentGuard.RejectCredentialLikeContent(title);
+        SensitiveContentGuard.RejectCredentialLikeContent(notes);
         var item = await dataStore.AddAgendaItemAsync(title, startsAt, endsAt, notes, cancellationToken)
             .ConfigureAwait(false);
 

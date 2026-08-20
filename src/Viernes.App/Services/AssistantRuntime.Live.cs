@@ -146,9 +146,16 @@ internal sealed partial class AssistantRuntime
     /// La instrucción de sistema de la sesión hablada.
     /// </summary>
     /// <remarks>
-    /// No es el prompt del camino de siempre y no puede serlo: aquél está escrito alrededor de las
-    /// treinta herramientas y acá hay tres. Copiarlo produciría un asistente que dice que leyó un
-    /// archivo sin haber leído nada, que es la peor forma de fallar porque suena a que funcionó.
+    /// No es el prompt del camino de siempre y no puede serlo, pero <b>el motivo ya no es que acá
+    /// haya menos manos</b>: hoy están casi todas. Lo que cambia es el registro. Hablando no hay
+    /// pantalla que mirar, no hay comando que dictar, no hay forma de pedir una confirmación y
+    /// esperarla, y quien escucha no puede volver atrás a releer. Un prompt escrito para leerse
+    /// produce respuestas que no se pueden escuchar.
+    /// <para>
+    /// Esa frase decía «allá hay treinta herramientas y acá hay tres» y quedó vieja el día que se
+    /// abrió la mano. Se corrigieron entonces tres afirmaciones iguales en este archivo y ésta se
+    /// pasó por alto, veinte líneas más arriba de una de ellas. La encontró una auditoría.
+    /// </para>
     /// <para>
     /// Qué manos tiene no se escribe acá: se pega desde <see cref="LiveToolBridge.Anuncio"/>, al
     /// lado de la lista que las declara. Escribirlo dos veces —una en la lista y otra en el texto—

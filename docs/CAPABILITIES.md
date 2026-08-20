@@ -2,7 +2,7 @@
 
 Un modelo no obtiene permisos por ser más capaz. Viernes sólo puede hacer algo cuando existe una implementación concreta, una política de riesgo y una autorización visible.
 
-Este documento describía el MVP anterior hasta hoy: listaba seis herramientas de las dieciséis que hay, decía que `pc_action` devolvía una simulación, que la búsqueda web no hacía red y que no existía lectura arbitraria de disco. Todo eso es falso desde hace varias versiones. Un registro de capacidades desactualizado es peor que ninguno, porque es el lugar donde se supone que mirás para saber qué le estás dando.
+Un registro de capacidades desactualizado es peor que ninguno, porque es el lugar donde se supone que mirás para saber qué le estás dando. Ya quedó viejo dos veces: primero describía un MVP que listaba seis herramientas de las dieciséis que había, y después se quedó sin `leer_web` el día que se agregó. Las dos veces lo encontró una auditoría, no una lectura.
 
 ## Estado actual
 
@@ -36,7 +36,7 @@ Este documento describía el MVP anterior hasta hoy: listaba seis herramientas d
 | Servidores MCP | cliente oficial, `servidores-mcp.json` | sí | lo que exponga cada servidor, por la misma política local |
 | Tokens/costo | parseo por completion + `UsageLedger` local | sí, en lane fast | sin contenido; preflight por turno |
 | Calendario y correo externos | no implementados | no | previstos vía MCP; ver `MAIL-Y-CALENDARIO.md` |
-| Navegación | no implementada | no | no existe control implícito del navegador |
+| Navegación | leer sí, manejar no | sí | `leer_web` abre una dirección y devuelve su texto; no hay control implícito del navegador |
 
 ## Herramientas incluidas
 
@@ -46,6 +46,7 @@ Este documento describía el MVP anterior hasta hoy: listaba seis herramientas d
 | `reminder_list` | safe | lista los recordatorios pendientes con su id; `include_completed` suma los hechos |
 | `reminder_update` | safe | marca uno como hecho o lo borra; exige id o un título que corresponda a uno solo |
 | `agenda_create` | safe | guarda un evento en la agenda interna |
+| `leer_web` | safe | abre una dirección http/https y devuelve su texto; rechaza todo lo que resuelva a una red privada —en cada salto de redirección y en el momento de abrir el socket—, no manda cookies ni credenciales, corta a 4 MB bajados y 12.000 caracteres devueltos, y envuelve lo leído en un marco que le dice al modelo que es contenido ajeno y no una orden |
 | `agenda_list` | safe | lista la agenda interna |
 | `web_search` | safe | no hace red: declara que los resultados ya vienen inyectados, o que están apagados |
 | `pc_action` | variable | ejecuta de verdad las acciones previsualizables; sensibles/destructivas nunca se ejecutan |

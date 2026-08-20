@@ -289,7 +289,13 @@ public sealed class GeminiLiveOptions
             TranscribeOutput,
             TriggerTokens,
             TargetTokens,
-            SetupTimeout);
+            SetupTimeout,
+            // Faltaba, y por eso el interruptor de la búsqueda hablada no apagaba nada: la
+            // aplicación arma las opciones del entorno y después las copia acá para pegarles la
+            // instrucción, así que lo que no se copia acá no llega nunca al setup. Una copia que se
+            // olvida un campo es peor que no tener copia: el campo existe, se lee, y se pierde en
+            // silencio a mitad de camino.
+            WebSearch);
 
     /// <summary>Nunca incluye credenciales: acá no hay ninguna.</summary>
     public override string ToString() =>

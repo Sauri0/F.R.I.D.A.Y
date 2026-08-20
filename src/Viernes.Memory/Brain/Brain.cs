@@ -388,6 +388,33 @@ public sealed class Brain
         BrainConfidence confidence = BrainConfidence.Media,
         IReadOnlyList<string>? evidence = null,
         string? folder = null) =>
+        Note(
+            kind,
+            CredentialLikeText.Redact(title),
+            body,
+            CredentialLikeText.Redact(scope),
+            confidence,
+            evidence,
+            folder,
+            tapado: true);
+
+    /// <summary>
+    /// Lo mismo, con el título y el alcance ya tapados.
+    /// </summary>
+    /// <remarks>
+    /// <b>El tapado cubría el cuerpo y nada más.</b> El título viaja mucho más lejos que el cuerpo:
+    /// va adentro del archivo, va en el NOMBRE del archivo, va al índice, y el índice es lo que se le
+    /// arma al modelo en cada turno. Una clave en el título quedaba en los cuatro lugares.
+    /// </remarks>
+    private BrainNote Note(
+        BrainNoteKind kind,
+        string title,
+        string body,
+        string scope,
+        BrainConfidence confidence,
+        IReadOnlyList<string>? evidence,
+        string? folder,
+        bool tapado) =>
         new(
             Slug(title),
             kind,

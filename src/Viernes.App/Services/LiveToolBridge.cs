@@ -80,7 +80,7 @@ internal sealed class LiveToolBridge : ILiveToolBridge
     /// Cómo se le cuentan estas manos al modelo, para pegar en la instrucción de sistema.
     /// </summary>
     /// <remarks>
-    /// Vive acá, al lado de <see cref="Allowed"/>, y no en el texto de la instrucción, porque son la
+    /// Vive acá, al lado de <see cref="Declarations"/>, y no en el texto de la instrucción, porque son la
     /// misma decisión escrita dos veces y separarlas es garantizar que un día digan cosas distintas.
     /// Si se declara una herramienta y no se la nombra, el modelo no la usa —cree que no la tiene—;
     /// si se la nombra y no se declara, promete algo que no puede. Las dos formas de que se

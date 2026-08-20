@@ -91,6 +91,13 @@ Lo que hay hoy, con la configuración de fábrica y **sin pedirte confirmación*
 | `memory.json` | hechos breves consentidos | conversaciones, transcripciones, credenciales |
 | `usage-ledger.json` | id/fecha/rol/modelo/tokens/costo | prompts, respuestas, audio, claves, argumentos de tools |
 | `Models\Whisper\*.bin` | pesos de STT descargados explícitamente | datos del usuario |
+| `cerebro\charlas\*.md` | **cada conversación entera, los dos lados** | lo que el reconocedor de credenciales alcanza a tapar antes de escribir |
+| `cerebro\saber\*.md` | lo que destiló de esas charlas: preferencias, cómo funciona un programa, procedimientos | lo mismo |
+| `cerebro\CEREBRO.md` | el índice de lo anterior | lo mismo |
+
+**Las conversaciones se guardan.** No siempre fue así y el contrato que se le muestra al usuario decía lo contrario; se corrigió cuando dejó de ser cierto, no después. Están en texto plano, se pueden leer y borrar con cualquier editor, y no salen de la máquina.
+
+**El tapado de credenciales es una red, no una garantía.** Reconoce las formas conocidas —las claves de Google, OpenRouter, Stripe, GitHub, Amazon, un «bearer», un token en la consulta de una dirección, y las frases del tipo «la clave es …»— y lo que no reconozca pasa. Si le dictás una clave de una forma que no está en esa lista, va a quedar escrita. Por eso lo que se guarda sigue siendo local y borrable a mano: es la única garantía de verdad.
 
 Todos viven bajo `%LOCALAPPDATA%\Viernes`. Los stores de datos/settings/memoria escriben mediante archivo temporal y reemplazo. Hay límites de tamaño; la memoria rechaza contenido con forma de conversación y patrones de claves/tokens.
 

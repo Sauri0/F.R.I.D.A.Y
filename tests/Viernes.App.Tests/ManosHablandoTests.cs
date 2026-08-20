@@ -111,25 +111,62 @@ public sealed class ManosHablandoTests
     /// El anuncio no le dice que no puede hacer algo que sí puede.
     /// </summary>
     /// <remarks>
-    /// Es la forma que tomó la prueba vieja, que verificaba que el anuncio nombrara a cada permitida.
-    /// Con cuarenta y seis herramientas enumerarlas es absurdo, pero el error que aquella cuidaba
-    /// sigue estando y es el peor de todos: <b>una asistente que miente sobre sí misma</b>. El texto
-    /// decía «lo que hablando NO tenés es leer o escribir archivos, buscar en tu memoria, los
-    /// servidores conectados», y las tres cosas pasaron a ser falsas.
+    /// Es la forma que tomó la prueba que verificaba que el anuncio nombrara a cada permitida. Con
+    /// cuarenta y seis herramientas enumerarlas es absurdo, pero el error que aquella cuidaba sigue
+    /// siendo el peor de todos: <b>una asistente que miente sobre sí misma</b>. El texto decía «lo
+    /// que hablando NO tenés es leer o escribir archivos, buscar en tu memoria, los servidores
+    /// conectados», y las tres cosas pasaron a ser falsas.
+    /// <para>
+    /// <b>La primera versión de esta prueba no cruzaba nada</b> y una auditoría lo marcó: afirmaba
+    /// sobre las herramientas declaradas y buscaba una frase vieja literal, o sea que el anuncio
+    /// podía negar cualquier otra capacidad sin que nadie se enterara. Ahora sí cruza: parte el texto
+    /// en oraciones, se queda con las que niegan, y verifica que ninguna nombre algo que la asistente
+    /// tiene declarado.
+    /// </para>
     /// </remarks>
     [Fact]
     public void ElAnuncioNoNiegaLoQueSiPuede()
     {
         var bridge = new LiveToolBridge(Armar);
-        var tiene = bridge.Declarations.Select(definition => definition.Name).ToHashSet(StringComparer.Ordinal);
+        var declaradas = bridge.Declarations.Select(definition => definition.Name).ToHashSet(StringComparer.Ordinal);
 
-        Assert.Contains("archivo", tiene);
-        Assert.Contains("web_search", tiene);
+        // Cómo se dice en castellano cada cosa que sabe hacer, contra la herramienta que la hace.
+        (string Palabra, string Herramienta)[] capacidades =
+        [
+            ("archivo", "archivo"),
+            ("carpeta", "archivo"),
+            ("recordatorio", "reminder_create"),
+            ("agenda", "agenda_create"),
+            ("aplicaci", "pc_action"),
+            ("página", "leer_web"),
+            ("regla", "aprender"),
+        ];
 
-        // Lo único que de verdad no puede hablando es mirar la pantalla, y eso sí tiene que estar
-        // dicho: si no lo dijera, intentaría hacer clic a ciegas.
+        var niegan = LiveToolBridge.Anuncio
+            .Split(['.', '\n'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Where(oracion =>
+                oracion.Contains("NO ", StringComparison.Ordinal) ||
+                oracion.Contains("no pod", StringComparison.OrdinalIgnoreCase) ||
+                oracion.Contains("no tenés", StringComparison.OrdinalIgnoreCase) ||
+                oracion.Contains("no puedo", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        foreach (var oracion in niegan)
+        {
+            foreach (var (palabra, herramienta) in capacidades)
+            {
+                if (oracion.Contains(palabra, StringComparison.OrdinalIgnoreCase) && declaradas.Contains(herramienta))
+                {
+                    Assert.Fail(
+                        $"El anuncio niega «{palabra}» pero «{herramienta}» está declarada. " +
+                        $"La oración es: «{oracion}»");
+                }
+            }
+        }
+
+        // Y las dos que de verdad no puede tienen que estar dichas, o las va a intentar.
         Assert.Contains("pantalla", LiveToolBridge.Anuncio, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("NO tenés es el resto del taller", LiveToolBridge.Anuncio, StringComparison.Ordinal);
+        Assert.NotEmpty(niegan);
     }
 
     [Fact]

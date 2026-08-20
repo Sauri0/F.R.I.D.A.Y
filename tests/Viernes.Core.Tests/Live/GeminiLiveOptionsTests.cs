@@ -82,14 +82,40 @@ public sealed class GeminiLiveOptionsTests
     [Fact]
     public void WithSystemInstruction_ConservaLoDemas()
     {
-        var original = new GeminiLiveOptions(enabled: true, silenceDurationMs: 550, chunkMilliseconds: 40);
+        // Por reflexión y no campo por campo, y ese cambio salió de un defecto de verdad: la copia
+        // se olvidó de WebSearch cuando se agregó, así que el interruptor de la búsqueda hablada
+        // existía, se leía del entorno, y se perdía en silencio a mitad de camino. La prueba miraba
+        // cuatro propiedades de doce y no vio nada.
+        //
+        // Una copia que se olvida un campo es peor que no tener copia. Esto no se puede olvidar de
+        // ninguno: los recorre todos y el único que puede diferir es el que se cambió a propósito.
+        var original = new GeminiLiveOptions(
+            enabled: true,
+            model: "un-modelo",
+            voiceName: "Puck",
+            systemInstruction: "la vieja",
+            silenceDurationMs: 550,
+            chunkMilliseconds: 40,
+            interruptOnUserSpeech: false,
+            transcribeInput: false,
+            transcribeOutput: false,
+            triggerTokens: 12_345,
+            targetTokens: 6_789,
+            setupTimeout: TimeSpan.FromSeconds(7),
+            webSearch: false);
 
         var copia = original.WithSystemInstruction("Sos Viernes.");
 
         Assert.Equal("Sos Viernes.", copia.SystemInstruction);
-        Assert.True(copia.Enabled);
-        Assert.Equal(550, copia.SilenceDurationMs);
-        Assert.Equal(40, copia.ChunkMilliseconds);
+
+        var olvidadas = typeof(GeminiLiveOptions)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Where(propiedad => propiedad.Name != nameof(GeminiLiveOptions.SystemInstruction))
+            .Where(propiedad => !Equals(propiedad.GetValue(original), propiedad.GetValue(copia)))
+            .Select(propiedad => propiedad.Name)
+            .ToArray();
+
+        Assert.Empty(olvidadas);
     }
 
     [Fact]

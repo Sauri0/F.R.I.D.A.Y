@@ -24,7 +24,7 @@ public sealed class ReminderCreateTool(IUserDataStore dataStore) : IAssistantToo
         CancellationToken cancellationToken = default)
     {
         var title = JsonToolArguments.RequiredString(arguments, "title", 200);
-        SensitiveContentGuard.RejectCredentialLikeContent(title, "title");
+        SensitiveContentGuard.RejectCredentialLikeContent(title);
         var dueAt = JsonToolArguments.RequiredDateTimeOffset(arguments, "due_at");
         var reminder = await dataStore.AddReminderAsync(title, dueAt, cancellationToken).ConfigureAwait(false);
 

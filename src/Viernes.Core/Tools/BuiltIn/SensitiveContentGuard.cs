@@ -17,13 +17,19 @@ namespace Viernes.Core.Tools.BuiltIn;
 /// </remarks>
 internal static class SensitiveContentGuard
 {
-    public static void RejectCredentialLikeContent(string? value, string parameterName)
+    public static void RejectCredentialLikeContent(string? value)
     {
         if (CredentialLikeText.Looks(value))
         {
+            // Sin el nombre del parámetro: .NET le pega «(Parameter 'title')» al final del mensaje, y
+            // eso viaja tal cual hasta el usuario. Le quedaba un renglón en inglés hablando de un
+            // parámetro que no sabe qué es, colgado de una frase en castellano.
+            //
+            // Y diciendo qué hacer. «No lo guardé» sin más deja a alguien mirando la pantalla sin
+            // saber si tiene que insistir, reformular, o si se rompió algo.
             throw new ArgumentException(
-                "No guardé el dato porque parece contener una credencial o un secreto.",
-                parameterName);
+                "No lo guardé porque parece tener una clave adentro. Si no la tiene, escribilo sin " +
+                "esa parte; si la tiene, mejor no la anotes acá.");
         }
     }
 }
