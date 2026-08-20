@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Viernes.Core.Live;
 using Viernes.Core.Tests.TestDoubles;
+using Viernes.Core.Tools;
 using Xunit;
 
 namespace Viernes.Core.Tests.Live;
@@ -497,5 +498,135 @@ public sealed class GeminiLiveClientTests
 
         Assert.Contains("key=clave-de-mentira", banco.Last.Endpoint!.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("key=", LiveEndpoint.Redacted, StringComparison.Ordinal);
+    }
+
+    private const string PedidoDeAbrirSpotify =
+        """{"toolCall":{"functionCalls":[{"id":"c1","name":"pc_action","args":{"action":"open_application","target":"spotify"}}]}}""";
+
+    private static (GeminiLiveClient Client, Banco Banco, RecordingAudioSink Sink) ArmarConManos(
+        FakeLiveToolBridge manos)
+    {
+        var banco = new Banco();
+        var sink = new RecordingAudioSink();
+        var client = new GeminiLiveClient(
+            new GeminiLiveOptions(enabled: true),
+            () => "clave-de-mentira",
+            sink,
+            banco.Create,
+            manos);
+
+        return (client, banco, sink);
+    }
+
+    /// <summary>El último mensaje que sea una respuesta de herramienta, o null si no hubo.</summary>
+    private static string? UltimaRespuestaDeHerramienta(Banco banco) =>
+        banco.Last.SentSnapshot().LastOrDefault(m => m.Contains("toolResponse", StringComparison.Ordinal));
+
+    [Fact]
+    public async Task LasHerramientasSeDeclaranEnElSetup()
+    {
+        var manos = new FakeLiveToolBridge();
+        manos.Tools.Add(ToolDefinition.Create("pc_action", "Controla Windows.", new { type = "object" }));
+
+        var (client, banco, _) = ArmarConManos(manos);
+        await using var _guard = client;
+
+        Assert.True(await client.StartAsync());
+
+        // El setup es el único momento en que se pueden declarar: se manda una vez por conexión.
+        Assert.Contains("functionDeclarations", banco.Last.SentSnapshot()[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CuandoElServidorPideUnaHerramienta_LaEjecutaYLeContestaConElMismoId()
+    {
+        var manos = new FakeLiveToolBridge();
+        var (client, banco, _) = ArmarConManos(manos);
+        await using var _guard = client;
+        await client.StartAsync();
+
+        banco.Last.Deliver(PedidoDeAbrirSpotify);
+
+        Assert.True(await EsperarAsync(() => UltimaRespuestaDeHerramienta(banco) is not null));
+
+        using var document = JsonDocument.Parse(UltimaRespuestaDeHerramienta(banco)!);
+        var respuesta = document.RootElement.GetProperty("toolResponse").GetProperty("functionResponses")[0];
+
+        Assert.Equal("c1", respuesta.GetProperty("id").GetString());
+        Assert.Equal("pc_action", respuesta.GetProperty("name").GetString());
+        Assert.Equal("Succeeded", respuesta.GetProperty("response").GetProperty("status").GetString());
+
+        // Los argumentos se leen acá, mucho después de que el mensaje que los trajo se cerró.
+        Assert.Equal("spotify", manos.LastArguments.GetProperty("target").GetString());
+    }
+
+    [Fact]
+    public async Task ConLaHerramientaCorriendo_ElBucleSigueLeyendo()
+    {
+        // Es lo único que esta prueba no puede dejar pasar. Quien recibe el pedido es el mismo bucle
+        // que trae el «interrupted», y abrir una aplicación tarda un segundo largo: si se ejecutara
+        // ahí adentro, la sesión se quedaría sorda justo durante el único tramo en que la persona
+        // podría estar hablándole encima.
+        var manos = new FakeLiveToolBridge(blocks: true);
+        var (client, banco, sink) = ArmarConManos(manos);
+        await using var _guard = client;
+        await client.StartAsync();
+
+        banco.Last.Deliver(AudioMessage(480));
+        banco.Last.Deliver(PedidoDeAbrirSpotify);
+        Assert.True(await EsperarAsync(() => manos.Calls == 1));
+
+        // La herramienta sigue trabada y sin embargo esto tiene que llegar y vaciar la cola.
+        banco.Last.Deliver("""{"serverContent":{"interrupted":true}}""");
+        Assert.True(await EsperarAsync(() => sink.QueuedBytes == 0));
+        Assert.Equal(1, client.InterruptionCount);
+
+        manos.Release();
+    }
+
+    [Fact]
+    public async Task SiElServidorCancelaLaLlamada_NoSeLeContesta()
+    {
+        // La cancelación llega cuando la persona interrumpió mientras la herramienta corría.
+        // Contestar igual es contestarle a un turno que del otro lado ya no existe.
+        var manos = new FakeLiveToolBridge(blocks: true);
+        var (client, banco, _) = ArmarConManos(manos);
+        await using var _guard = client;
+        await client.StartAsync();
+
+        banco.Last.Deliver(PedidoDeAbrirSpotify);
+        Assert.True(await EsperarAsync(() => manos.Calls == 1));
+
+        banco.Last.Deliver("""{"toolCallCancellation":{"ids":["c1"]}}""");
+        await Task.Delay(50);
+
+        manos.Release();
+        await Task.Delay(150);
+
+        Assert.Null(UltimaRespuestaDeHerramienta(banco));
+    }
+
+    [Fact]
+    public async Task SinManosConectadas_ContestaQueNoPudoEnVezDeDejarloColgado()
+    {
+        // El servidor no cierra el turno hasta recibir la respuesta: una llamada sin contestar no se
+        // ve como un error, se ve como que se quedó muda a mitad de frase.
+        var (client, banco, _) = Armar();
+        await using var _guard = client;
+        await client.StartAsync();
+
+        banco.Last.Deliver(PedidoDeAbrirSpotify);
+
+        Assert.True(await EsperarAsync(() => UltimaRespuestaDeHerramienta(banco) is not null));
+
+        using var document = JsonDocument.Parse(UltimaRespuestaDeHerramienta(banco)!);
+        Assert.Equal(
+            "Failed",
+            document.RootElement
+                .GetProperty("toolResponse")
+                .GetProperty("functionResponses")[0]
+                .GetProperty("response")
+                .GetProperty("status")
+                .GetString());
     }
 }

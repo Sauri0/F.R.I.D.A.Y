@@ -93,6 +93,24 @@ public partial class App : System.Windows.Application
         _viewModel = new MainViewModel(runtime);
         _viewModel.PropertyChanged += ViewModelOnPropertyChanged;
         _viewModel.ActivationRequested += ViewModelOnActivationRequested;
+        // EL TAMAÑO SE LEE ACÁ, ANTES DE CONSTRUIR LA VENTANA, y bloqueando.
+        //
+        // La ventana se arma con las medidas de ShellLayout, así que si el tamaño elegido llega
+        // después, la ventana nace con el de fábrica. Y llegaba muchísimo después: la preferencia
+        // viaja al final de MainViewModel.InitializeAsync, que espera a que el runtime lea el disco
+        // y levante los servidores MCP —medido en la bitácora del usuario: dieciséis segundos—.
+        // <para>
+        // Eso daba dos cosas, y la segunda es la grave. El orbe aparecía chico y pegaba un salto de
+        // tamaño en medio del uso. Y al agrandarse conservando el centro, su esquina se corría
+        // (108 − tamaño)/2 —54 px al 200 %— y ESA esquina corrida era la que se guardaba al salir:
+        // el arranque siguiente restauraba la posición corrida y volvía a correrla, así que el orbe
+        // caminaba 54 px por arranque hasta pegarse contra el margen. Un usuario que elegía un
+        // tamaño distinto del de fábrica perdía la memoria de dónde había dejado el orbe.
+        //
+        // Se lee bloqueando y no en segundo plano porque no hay nada que hacer sin este dato: son
+        // unos pocos milisegundos de un archivo chico, contra una ventana que si no nace mal.
+        Shell.ShellLayout.Scale = ReadOrbScale();
+
         _window = new MainWindow(_viewModel, new WindowPlacementStore());
 
         _trayIcon = new TrayIconService(
@@ -102,6 +120,7 @@ public partial class App : System.Windows.Application
             ToggleListenWhileHidden,
             ToggleAutoStart,
             ChooseOrbShape,
+            ChooseOrbScale,
             ChangeAssistantName,
             ChangeKeys,
             RequestExit);
@@ -126,6 +145,7 @@ public partial class App : System.Windows.Application
         _trayIcon.SetAutoStart(autoStartStatus.IsConfiguredForCurrentExecutable);
         _trayIcon.SetListenWhileHidden(_viewModel.IsListeningWhileHidden);
         _trayIcon.SetOrbShape(_viewModel.OrbShape.ToString());
+        _trayIcon.SetOrbScale(_viewModel.OrbScale);
         // Aparecer no puede robar el teclado. Show() activa la ventana y Activate() insistía: si en
         // ese momento estabas escribiendo en otra aplicación, las teclas siguientes se las comía
         // Viernes. La ventana ya declara ShowActivated="False" —lo mismo que hace OrbSnapshot para
@@ -133,6 +153,31 @@ public partial class App : System.Windows.Application
         // interrupción.
         _window.Show();
         _window.ShowWithoutStealingFocus();
+    }
+
+    /// <summary>
+    /// El tamaño elegido, leído del archivo de preferencias antes de que exista la ventana.
+    /// </summary>
+    /// <remarks>
+    /// Usa el mismo almacén y la misma normalización que el resto: leerlo con otro parser sería dos
+    /// interpretaciones del mismo archivo, y la de acá decidiría cómo nace la ventana. Si el archivo
+    /// no está o no se puede leer, el de fábrica es la respuesta correcta.
+    /// </remarks>
+    private static double ReadOrbScale()
+    {
+        try
+        {
+            var leido = new Viernes.Platform.Windows.Storage.LocalSettingsStore()
+                .LoadAsync(CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+            return leido.Settings.OrbScale;
+        }
+        catch (Exception)
+        {
+            return Viernes.Core.Configuration.OrbScaleRange.Default;
+        }
     }
 
     private async Task CheckVoiceAndExitAsync(bool listenOnly, bool whisperOnly = false, bool micOnly = false)
@@ -299,6 +344,12 @@ public partial class App : System.Windows.Application
             : Controls.OrbShape.Gota;
         _ = _viewModel?.SetOrbShapeAsync(parsed, CancellationToken.None);
     }
+
+    /// <summary>
+    /// El tamaño elegido desde la bandeja. Es la única puerta con el orbe guardado.
+    /// </summary>
+    private void ChooseOrbScale(double scale) =>
+        _ = _viewModel?.SetOrbScaleAsync(scale, CancellationToken.None);
 
     /// <summary>
     /// Abre la ventanita del nombre desde la bandeja, incluso con el orbe guardado.
@@ -504,6 +555,10 @@ public partial class App : System.Windows.Application
         else if (e.PropertyName == nameof(MainViewModel.OrbShape))
         {
             _trayIcon?.SetOrbShape(_viewModel.OrbShape.ToString());
+        }
+        else if (e.PropertyName == nameof(MainViewModel.OrbScale))
+        {
+            _trayIcon?.SetOrbScale(_viewModel.OrbScale);
         }
         else if (e.PropertyName == nameof(MainViewModel.StatusText))
         {

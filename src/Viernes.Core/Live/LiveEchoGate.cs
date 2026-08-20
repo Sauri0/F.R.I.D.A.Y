@@ -1,0 +1,357 @@
+namespace Viernes.Core.Live;
+
+/// <summary>Qué hacer con un bloque del micrófono mientras ella habla.</summary>
+public enum LiveMicrophoneVerdict
+{
+    /// <summary>Subirlo, como siempre.</summary>
+    Send,
+
+    /// <summary>No subirlo: es su propia voz volviendo por el micrófono. Guardalo en la antesala.</summary>
+    Hold,
+
+    /// <summary>
+    /// Alguien le está hablando encima de verdad: soltá la antesala y volvé a subir todo.
+    /// </summary>
+    Release
+}
+
+/// <summary>
+/// Decide, bloque por bloque, si lo que entra por el micrófono mientras ella habla es su propio eco
+/// o es alguien hablándole encima.
+/// </summary>
+/// <remarks>
+/// Esto existe por un solo bug, y conviene contarlo entero porque el arreglo no se entiende sin él.
+/// La bomba del micrófono subía <b>todos</b> los bloques, también mientras ella hablaba. Su voz sale
+/// por los parlantes, vuelve por el micrófono, sube a Gemini, y el detector de voz <em>del
+/// servidor</em> —que no tiene forma de saber que esa voz es la suya— decide que la persona habló
+/// encima: manda <c>interrupted</c>, corta el turno y arranca otro. Ese otro turno vuelve a sonar,
+/// vuelve a entrar, y vuelve a cortarse. Medido en la bitácora del usuario: quince vueltas de
+/// Listening → Thinking → Speaking → Interrupted en cuarenta y ocho segundos. Desde afuera se ve
+/// como que colapsó.
+/// <para>
+/// Lo que no se puede hacer para arreglarlo es cerrar el micrófono mientras habla. Hablarle encima
+/// para callarla es <b>la razón por la que existe</b> el camino en vivo: el camino de siempre no
+/// puede hacerlo por más que se lo apure, está prometido en el README y es lo que el orbe dice en
+/// pantalla —«hablame encima para cortarme»—. Un arreglo que mate la interrupción cambia un problema
+/// por otro peor.
+/// </para>
+/// <para>
+/// <b>Por qué el detector de voz no alcanza para separarlas.</b> Silero acierta en lo suyo —distingue
+/// voz de un aplauso o de un portazo— pero el eco <em>es</em> voz: es la misma voz, grabada dos
+/// metros más lejos. Cualquier detector entrenado en voz dice «sí» para las dos. Lo único que las
+/// separa sin cancelación de eco de verdad es <b>cuánto</b> suenan: la persona le habla al micrófono
+/// de cerca y su propia voz llega atenuada por el parlante, el cuarto y la distancia.
+/// </para>
+/// <para>
+/// <b>Y por qué el umbral no puede ser una constante.</b> Cuánto se atenúa el eco depende del volumen
+/// de los parlantes, de dónde está el micrófono y de cómo suena el cuarto: un número escrito acá
+/// estaría calibrado contra un equipo que no es el del usuario. Así que se mide solo, y se mide con
+/// lo único que se sabe con certeza: <b>mientras ella habla y nadie la interrumpe, todo lo que entra
+/// por el micrófono es el eco</b>. De ahí sale el nivel de referencia, y el listón para creerle a
+/// alguien que habla encima es <see cref="Margin"/> veces ese nivel.
+/// </para>
+/// <para>
+/// El nivel del bloque que se está juzgando no participa de su propio criterio —el listón se evalúa
+/// con la referencia anterior y recién después se la avanza—, que es la misma disciplina que usa
+/// <c>NoiseFloorTracker</c> y por la misma razón: un estimador que se alimenta de la señal que quiere
+/// distinguir termina persiguiéndola.
+/// </para>
+/// <para>
+/// <b>Lo que esta compuerta no hace</b>, dicho acá para que no se descubra midiendo: no cancela el
+/// eco, lo esquiva. Si los parlantes están tan fuertes que el eco llega tan alto como una persona
+/// hablando —el micrófono apoyado contra el parlante— no hay listón que separe las dos cosas y algo
+/// de eco va a pasar. Para eso hace falta cancelación de verdad, restando la señal que se está
+/// reproduciendo. Ver el informe del arreglo.
+/// </para>
+/// </remarks>
+public sealed class LiveEchoGate
+{
+    /// <summary>
+    /// Cuánto tiene que superar el bloque a la referencia del eco para creerle que es una persona.
+    /// </summary>
+    /// <remarks>
+    /// El nivel que entrega el detector está comprimido con raíz cuadrada —ver
+    /// <c>HeuristicVoiceActivityDetector</c>—, así que 1,7 acá son 2,9 veces en potencia, unos 9 dB.
+    /// Ese es el margen que hay entre hablarle al micrófono de cerca y escuchar el mismo audio salido
+    /// de un parlante a un par de metros; con menos, la parte fuerte de una vocal suya cruzaría el
+    /// listón, y con mucho más habría que gritarle.
+    /// </remarks>
+    private const double Margin = 1.7;
+
+    /// <summary>
+    /// Cuánto dura la ventana en la que la referencia puede SUBIR, contada desde que ella arranca a
+    /// hablar.
+    /// </summary>
+    /// <remarks>
+    /// <b>Ésta es la corrección de fondo, y sin ella la compuerta se vuelve sorda sola.</b> La
+    /// primera versión dejaba que la referencia aprendiera de cualquier bloque que no cruzara el
+    /// listón. El problema es que una voz humana que quede por debajo del listón <em>tampoco</em>
+    /// cruza, así que la referencia se la comía como si fuera eco y el listón saltaba por encima de
+    /// quien estaba intentando interrumpir: cuanto más te esforzabas, más alto se ponía la vara.
+    /// <para>
+    /// Y al revés: si el eco entraba de entrada por encima del listón, ningún bloque de eco volvía a
+    /// alimentar la referencia —porque todos cruzaban— y la compuerta quedaba abierta el resto de la
+    /// respuesta, o sea apagada justo cuando hacía falta.
+    /// </para>
+    /// <para>
+    /// La ventana resuelve las dos: <b>en el arranque de su turno lo único que puede sonar es ella</b>
+    /// —la persona todavía no llegó a reaccionar— así que ahí se mide sin condiciones y la referencia
+    /// alcanza al eco por alto que venga. Pasada la ventana, la referencia sólo baja.
+    /// </para>
+    /// <para>
+    /// <b>Lo que cuesta</b>, dicho acá: si alguien la corta dentro de estos primeros 450 ms, su voz
+    /// entra en la medición y el listón de esa respuesta queda más alto de lo que debería. Esa
+    /// respuesta puede quedarle sorda. Es el precio de no tener cancelación de eco de verdad, y es
+    /// mucho más barato que interrumpirse sola en bucle.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan MeasuringWindow = TimeSpan.FromMilliseconds(450);
+
+    /// <summary>
+    /// Con qué referencia arranca, antes de haber medido nada.
+    /// </summary>
+    /// <remarks>
+    /// Arranca <b>pesimista</b> a propósito: es el único momento en que todavía no hay medición, y de
+    /// los dos errores posibles el caro es quedarse corto —quedarse corto es exactamente el bug que
+    /// esto viene a cerrar—. Quedarse largo cuesta hablarle un poco más fuerte durante el primer
+    /// segundo de la primera respuesta, y después ya está medido.
+    /// <para>
+    /// El valor sale del perfil del banco (<c>--medir</c>) de este equipo: el ruido del cuarto mide
+    /// 0,11 y la voz de la persona 0,89 saturando en 1,0. 0,45 cae en el medio, así que el listón
+    /// inicial queda en 0,77 — arriba de cualquier eco razonable y todavía abajo del nivel al que
+    /// habla el usuario.
+    /// </para>
+    /// </remarks>
+    private const double SeedLevel = 0.45;
+
+    /// <summary>
+    /// Hasta dónde puede trepar el listón.
+    /// </summary>
+    /// <remarks>
+    /// La voz de la persona, medida con el banco en este equipo, promedia 0,895 y satura en 1,0. Un
+    /// listón por encima de eso no sería estricto: sería <b>inalcanzable</b>, y una interrupción
+    /// imposible es peor que un eco que se cuela, porque no hay forma de darse cuenta desde afuera —se
+    /// ve igual que si no te escuchara—. Cuando el eco llega tan alto que el listón toca este tope,
+    /// esta compuerta está admitiendo que se quedó corta: hace falta cancelación de verdad.
+    /// </remarks>
+    private const double MaximumBar = 0.85;
+
+    /// <summary>
+    /// Cuánta voz seguida por encima del listón hace falta para dar la interrupción por buena.
+    /// </summary>
+    /// <remarks>
+    /// Cuatro bloques de veinte milisegundos. Uno solo no alcanza: el arranque de una sílaba suya
+    /// —una <em>p</em>, una <em>t</em>— salta varios decibeles en un bloque y puede cruzar el listón
+    /// antes de que la referencia lo alcance. Lo que el eco no puede hacer es <em>sostenerse</em> ahí
+    /// arriba, porque cada bloque que no cruza vuelve a subir la referencia. Ochenta milisegundos no
+    /// se notan: son menos que la primera sílaba, y además la antesala de la bomba devuelve el audio
+    /// de esos ochenta milisegundos, así que no se pierde ni el arranque de la palabra.
+    /// </remarks>
+    private static readonly TimeSpan Breakthrough = TimeSpan.FromMilliseconds(80);
+
+    /// <summary>
+    /// Cuánto sigue armada la compuerta después de que el parlante se calla.
+    /// </summary>
+    /// <remarks>
+    /// El eco no termina en el mismo instante que el parlante: entre lo último que sonó y el bloque
+    /// que lo contiene están la propagación por el cuarto, la latencia del driver de entrada y el
+    /// búfer de captura. Es la misma cola que <c>LiveVoiceSession</c> ya tuvo que reconocer con sus
+    /// 180 ms de voz-sobre-parlante-callado; acá se usan 200 para quedar del mismo lado con margen.
+    /// Durante esa cola la persona sigue pudiendo interrumpir: lo único que se le pide es el mismo
+    /// listón.
+    /// </remarks>
+    private static readonly TimeSpan Hangover = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>
+    /// En cuánto tiempo la referencia cae a la mitad de la distancia hacia lo que está midiendo.
+    /// </summary>
+    /// <remarks>
+    /// La referencia sube de golpe y baja despacio: es un seguidor de picos, y tiene que serlo porque
+    /// lo que importa no es cuánto suena el eco en promedio sino cuánto llega a sonar. Entre dos
+    /// palabras suyas el micrófono cae al ruido del cuarto, y si la referencia lo siguiera para abajo
+    /// la sílaba siguiente cruzaría su propio listón.
+    /// <para>
+    /// Setecientos milisegundos hacen que, si el eco de verdad es más flojo que el arranque
+    /// pesimista, la referencia lo alcance adentro de la primera respuesta y no al rato. Es el mismo
+    /// orden de magnitud que el silencio con el que el servidor cierra un turno, y no por casualidad:
+    /// las dos constantes miden lo mismo, cuánto dura una pausa que todavía es la misma frase.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan EchoHalfLife = TimeSpan.FromMilliseconds(700);
+
+    private double _echo = SeedLevel;
+    private TimeSpan _hangover;
+
+    /// <summary>Lo que queda de la ventana de medición. Ver <see cref="MeasuringWindow"/>.</summary>
+    private TimeSpan _measuring;
+
+    /// <summary>El pico que va midiendo esta ventana. Se compromete a la referencia al cerrarse.</summary>
+    /// <remarks>
+    /// Se acumula aparte y no sobre la referencia porque durante la ventana hay que <b>seguir
+    /// decidiendo</b>, y decidir con una referencia a medio medir dejaría pasar el eco justo mientras
+    /// se lo está midiendo. Adentro de la ventana manda la medición anterior; recién al cerrarse se
+    /// reemplaza.
+    /// </remarks>
+    private double _windowPeak;
+    private TimeSpan _run;
+    private bool _open;
+
+    /// <summary>Nivel de eco que tiene medido ahora mismo. Para la bitácora y las pruebas.</summary>
+    // Incluye lo que va midiendo la ventana en curso: si no, durante la medición este número diría
+    // la referencia de la respuesta anterior y quien lo mire desde afuera —la bitácora, una prueba—
+    // creería que la compuerta no se enteró del eco de ahora.
+    public double EchoLevel => Math.Max(_echo, _windowPeak);
+
+    /// <summary>Nivel que hay que superar ahora mismo para que se la pueda interrumpir.</summary>
+    /// <remarks>
+    /// <b>Mientras se está midiendo, el listón es el tope</b>, y no el de la respuesta anterior.
+    /// Durante la ventana la referencia todavía no vale: si el eco de hoy llega más fuerte que el de
+    /// la respuesta pasada, cruzaría el listón viejo y abriría la compuerta justo mientras se lo está
+    /// midiendo, dejándola abierta el resto de la respuesta por culpa del eco que venía a medir.
+    /// <para>
+    /// El tope no es bloquear: es exigir una voz claramente fuerte. Se la puede cortar desde el
+    /// primer bloque —hablándole con ganas— y el eco casi nunca llega ahí. Es el compromiso entre no
+    /// perder la interrupción temprana, que es cuando más se la usa, y no arruinar la medición.
+    /// </para>
+    /// </remarks>
+    public double Bar => _measuring > TimeSpan.Zero
+        ? MaximumBar
+        : Math.Min(_echo * Margin, MaximumBar);
+
+    /// <summary>Cuántas veces alguien le habló encima y la compuerta lo dejó pasar.</summary>
+    public int Breakthroughs { get; private set; }
+
+    /// <summary>
+    /// Juzga un bloque del micrófono.
+    /// </summary>
+    /// <param name="speakerAudible">
+    /// Si en este instante todavía está saliendo voz por los parlantes. Pasale
+    /// <c>LiveVoiceSession.IsSpeakerBusy</c> y no el estado del turno: el servidor despacha la
+    /// respuesta más rápido que tiempo real, así que el turno cierra con segundos de audio todavía
+    /// por sonar — y esos segundos son justamente los que siguen produciendo eco.
+    /// </param>
+    /// <param name="isVoice">Lo que dijo el detector local de este bloque.</param>
+    /// <param name="level">Nivel del bloque, comprimido, tal como lo entrega el detector.</param>
+    /// <param name="blockDuration">Cuánto dura el bloque.</param>
+    public LiveMicrophoneVerdict Decide(
+        bool speakerAudible,
+        bool isVoice,
+        double level,
+        TimeSpan blockDuration)
+    {
+        // Se rechaza el cero además del negativo, que es más estricto que la compuerta de habla y por
+        // un motivo concreto: acá todo lo que puede volver a abrir el micrófono —la cola del parlante
+        // y la voz sostenida por encima del listón— se mide sumando duraciones. Con bloques de cero,
+        // ninguna de las dos avanza nunca y la compuerta se queda cerrada para siempre.
+        if (blockDuration <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(blockDuration), "Un bloque tiene que durar algo.");
+        }
+
+        if (!double.IsFinite(level) || level < 0)
+        {
+            // Un nivel roto no puede cerrar el micrófono. Sin nivel no hay criterio, y sin criterio
+            // el lado seguro es el de siempre: subir. Se pierde la protección contra el eco mientras
+            // dure la falla, que es preferible a perder el micrófono sin que nadie se entere.
+            return LiveMicrophoneVerdict.Send;
+        }
+
+        if (speakerAudible)
+        {
+            // El turno de ella arranca cuando el parlante pasa de callado a sonando. Ahí se abre la
+            // ventana de medición: es el único tramo en que se sabe que lo que entra es el eco.
+            if (_hangover <= TimeSpan.Zero)
+            {
+                _measuring = MeasuringWindow;
+                _windowPeak = 0;
+            }
+
+            _hangover = Hangover;
+        }
+        else if (_hangover > TimeSpan.Zero)
+        {
+            _hangover -= blockDuration;
+            if (_hangover < TimeSpan.Zero)
+            {
+                _hangover = TimeSpan.Zero;
+            }
+        }
+
+        if (_hangover <= TimeSpan.Zero)
+        {
+            // Está callada: no hay eco posible y no hay nada que decidir. Éste es el caso normal —la
+            // charla entera menos los tramos en que ella habla— y acá la compuerta no existe: el
+            // micrófono sube tal cual, con la misma sensibilidad de siempre.
+            _run = TimeSpan.Zero;
+            _open = false;
+            return LiveMicrophoneVerdict.Send;
+        }
+
+        if (_open)
+        {
+            // Ya se confirmó que hay alguien hablando encima. Se sube todo lo que queda de su frase
+            // sin volver a pedirle el listón: pedírselo bloque a bloque partiría la frase en pedazos
+            // justo en las consonantes, y lo que le llega al servidor sería un picadillo que
+            // transcribe cualquier cosa.
+            return LiveMicrophoneVerdict.Send;
+        }
+
+        var measuring = _measuring > TimeSpan.Zero;
+        if (measuring)
+        {
+            if (isVoice && level > _windowPeak)
+            {
+                _windowPeak = level;
+            }
+
+            _measuring -= blockDuration;
+
+            // Al cerrarse, lo medido REEMPLAZA a lo anterior en vez de sumarse. Así el listón baja
+            // en un equipo silencioso —donde el eco llega flojo y no hay por qué exigir un grito— y
+            // sube en uno ruidoso. Si la ventana no llegó a medir nada —ella arrancó con un silencio—
+            // se conserva lo de antes, que es mejor que quedarse sin referencia.
+            if (_measuring <= TimeSpan.Zero && _windowPeak > 0)
+            {
+                _echo = _windowPeak;
+            }
+
+        }
+
+        var crosses = isVoice && level >= Bar;
+
+        // Adentro de la ventana no se pide permiso: lo que suena es ella y hay que medirlo aunque
+        // venga por encima del listón, que es justamente el caso que antes dejaba la compuerta
+        // apagada toda la respuesta. Fuera de la ventana la referencia sólo puede BAJAR, así que
+        // ninguna voz humana puede correr el listón hacia arriba.
+        _run = crosses ? _run + blockDuration : TimeSpan.Zero;
+
+        if (_run < Breakthrough)
+        {
+            return LiveMicrophoneVerdict.Hold;
+        }
+
+        _open = true;
+        _run = TimeSpan.Zero;
+        Breakthroughs++;
+        return LiveMicrophoneVerdict.Release;
+    }
+
+    /// <summary>
+    /// Vuelve al arranque, con la referencia pesimista otra vez.
+    /// </summary>
+    /// <remarks>
+    /// Se llama al abrir una conversación. La medición no se guarda entre charlas a propósito: entre
+    /// una y otra el usuario puede haber movido el volumen, cambiado de auriculares a parlantes o
+    /// corrido el micrófono, y una referencia vieja aplicada a un cuarto nuevo es peor que ninguna.
+    /// Volver a medirla cuesta la primera respuesta.
+    /// </remarks>
+    public void Reset()
+    {
+        _echo = SeedLevel;
+        _hangover = TimeSpan.Zero;
+        _measuring = TimeSpan.Zero;
+        _windowPeak = 0;
+        _run = TimeSpan.Zero;
+        _open = false;
+    }
+}

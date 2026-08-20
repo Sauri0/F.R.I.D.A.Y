@@ -195,4 +195,52 @@ public sealed class LiveServerEventParserTests
         Assert.True(LiveServerEventParser.Parse("{}").IsEmpty);
         Assert.True(LiveServerEventParser.Parse("   ").IsEmpty);
     }
+
+    [Fact]
+    public void PedidoDeHerramienta_SeLeeConSuIdSuNombreYSusArgumentos()
+    {
+        var serverEvent = LiveServerEventParser.Parse(
+            """{"toolCall":{"functionCalls":[{"id":"c1","name":"pc_action","args":{"action":"open_application","target":"spotify"}}]}}""");
+
+        Assert.False(serverEvent.IsEmpty);
+        var call = Assert.Single(serverEvent.FunctionCalls);
+        Assert.Equal("c1", call.Id);
+        Assert.Equal("pc_action", call.Name);
+
+        // Los argumentos se leen DESPUÉS de que el documento que los trajo se cerró: acá se lee
+        // desde afuera del Parse, que es exactamente lo que hace el cliente cuando por fin ejecuta.
+        Assert.Equal("spotify", call.Arguments.GetProperty("target").GetString());
+    }
+
+    [Fact]
+    public void PedidoDeHerramienta_SinArgumentos_LlegaConUnObjetoVacio()
+    {
+        var serverEvent = LiveServerEventParser.Parse(
+            """{"toolCall":{"functionCalls":[{"id":"c1","name":"listar"}]}}""");
+
+        var call = Assert.Single(serverEvent.FunctionCalls);
+        Assert.Equal(System.Text.Json.JsonValueKind.Object, call.Arguments.ValueKind);
+        Assert.False(call.Arguments.TryGetProperty("lo-que-sea", out _));
+    }
+
+    [Fact]
+    public void PedidoDeHerramientaSinNombre_SeDescarta()
+    {
+        // Sin nombre no hay nada que ejecutar, y contestarle al servidor con un nombre inventado es
+        // peor que ignorarla: le confirma un trabajo que nadie hizo.
+        var serverEvent = LiveServerEventParser.Parse(
+            """{"toolCall":{"functionCalls":[{"id":"c1","args":{}},{"id":"c2","name":"mision","args":{}}]}}""");
+
+        var call = Assert.Single(serverEvent.FunctionCalls);
+        Assert.Equal("c2", call.Id);
+    }
+
+    [Fact]
+    public void CancelacionDeHerramienta_SeLee()
+    {
+        var serverEvent = LiveServerEventParser.Parse("""{"toolCallCancellation":{"ids":["c1","c2"]}}""");
+
+        Assert.False(serverEvent.IsEmpty);
+        Assert.Equal(["c1", "c2"], serverEvent.CancelledToolCalls);
+    }
 }

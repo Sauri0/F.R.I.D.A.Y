@@ -61,6 +61,18 @@ public sealed record ViernesLocalSettings
     public string OrbShape { get; init; } = "Gota";
 
     /// <summary>
+    /// Qué tan grande es el orbe, en fracción de su tamaño de fábrica. Sólo lo afecta a él.
+    /// </summary>
+    /// <remarks>
+    /// Se guarda la fracción y no los píxeles a propósito: el tamaño de fábrica es una decisión de
+    /// diseño que puede cambiar con una versión, y un archivo con «108» escrito la congelaría para
+    /// quien ya lo tenía. El rango legal lo pone <see cref="OrbScaleRange"/>, y
+    /// <c>LocalSettingsStore.Normalize</c> lo recorta: un archivo editado a mano con 50 no puede
+    /// dejar un orbe de cinco mil píxeles.
+    /// </remarks>
+    public double OrbScale { get; init; } = OrbScaleRange.Default;
+
+    /// <summary>
     /// Si el orbe se muda solo al monitor donde estás trabajando, mirando dónde está el cursor.
     /// </summary>
     /// <remarks>

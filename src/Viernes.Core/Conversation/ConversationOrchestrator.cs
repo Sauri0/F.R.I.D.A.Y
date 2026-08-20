@@ -272,6 +272,16 @@ public sealed class ConversationOrchestrator : IConversationOrchestrator
         }
     }
 
+    /// <summary>
+    /// Lo que el modelo puede pedir en este turno, tal como se le declara.
+    /// </summary>
+    /// <remarks>
+    /// Está expuesto porque la sesión hablada declara sus herramientas en otro protocolo y necesita
+    /// las mismas definiciones, no una copia escrita al lado: dos listas que digan cosas distintas
+    /// terminan en una asistente que promete por un camino lo que no puede por el otro.
+    /// </remarks>
+    public IReadOnlyList<ToolDefinition> ToolDefinitions => _toolExecutor.Definitions;
+
     public event EventHandler<AssistantStateChangedEventArgs>? StateChanged;
 
     /// <summary>

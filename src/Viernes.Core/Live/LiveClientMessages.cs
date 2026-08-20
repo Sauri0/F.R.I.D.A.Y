@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Globalization;
 using System.Text.Json;
+using Viernes.Core.Tools;
 
 namespace Viernes.Core.Live;
 
@@ -34,8 +35,15 @@ public static class LiveClientMessages
     /// El handle de la sesión anterior cuando se está reconectando, o <c>null</c> en la primera
     /// conexión. Es lo que hace que reconectar no sea empezar de cero.
     /// </param>
+    /// <param name="tools">
+    /// Las herramientas que la sesión hablada va a poder usar. Es el <b>único</b> momento en que se
+    /// declaran: el setup se manda una vez y no hay forma de agregar una con la sesión abierta.
+    /// </param>
     /// <returns>El JSON del mensaje <c>setup</c>, listo para mandar.</returns>
-    public static string BuildSetup(GeminiLiveOptions options, string? resumptionHandle = null)
+    public static string BuildSetup(
+        GeminiLiveOptions options,
+        string? resumptionHandle = null,
+        IReadOnlyList<ToolDefinition>? tools = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -72,6 +80,30 @@ public static class LiveClientMessages
                 writer.WriteEndObject();
                 writer.WriteEndArray();
                 writer.WriteEndObject();
+            }
+
+            if (tools is { Count: > 0 })
+            {
+                writer.WriteStartArray("tools");
+                writer.WriteStartObject();
+                writer.WriteStartArray("functionDeclarations");
+                foreach (var tool in tools)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("name", tool.Name);
+                    writer.WriteString("description", tool.Description);
+                    if (tool.Parameters.ValueKind == JsonValueKind.Object)
+                    {
+                        writer.WritePropertyName("parameters");
+                        WriteSchema(writer, tool.Parameters);
+                    }
+
+                    writer.WriteEndObject();
+                }
+
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+                writer.WriteEndArray();
             }
 
             writer.WriteStartObject("realtimeInputConfig");
@@ -183,6 +215,127 @@ public static class LiveClientMessages
         }
 
         return System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    /// <summary>
+    /// Devuelve lo que dieron las herramientas que el servidor pidió ejecutar.
+    /// </summary>
+    /// <remarks>
+    /// Va todo en un mensaje aunque sean varias llamadas, porque así viene el <c>toolCall</c>: el
+    /// servidor manda el lote junto y espera el lote junto. Contestar de a una funciona igual, pero
+    /// deja al modelo generando entre respuesta y respuesta con la mitad del trabajo hecho.
+    /// <para>
+    /// El <c>id</c> es lo único que aparea la respuesta con la llamada. Si se pierde, el servidor
+    /// queda esperando una contestación que ya mandamos y la charla se cuelga sin error.
+    /// </para>
+    /// </remarks>
+    public static string BuildToolResponse(IReadOnlyList<LiveFunctionResponse> responses)
+    {
+        ArgumentNullException.ThrowIfNull(responses);
+
+        var buffer = new ArrayBufferWriter<byte>(512);
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteStartObject("toolResponse");
+            writer.WriteStartArray("functionResponses");
+            foreach (var response in responses)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("id", response.Id);
+                writer.WriteString("name", response.Name);
+                writer.WriteStartObject("response");
+                writer.WriteString("status", response.Outcome.Status);
+                writer.WriteString("message", response.Outcome.Message);
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    /// <summary>
+    /// Los campos del esquema que este servidor entiende.
+    /// </summary>
+    /// <remarks>
+    /// El resto se descarta a propósito. Las herramientas describen sus argumentos en JSON Schema
+    /// completo —y el que arma los esquemas de este proyecto escribe <c>additionalProperties</c>—,
+    /// pero acá el esquema no es JSON Schema sino el <c>Schema</c> del protocolo, que es un
+    /// subconjunto. Un campo de más no da un error de campo: rebota el setup entero, y rebotar el
+    /// setup es caerse al camino de siempre sin que nadie entienda por qué.
+    /// </remarks>
+    private static readonly string[] SchemaFields =
+        ["type", "description", "format", "nullable", "enum", "items", "properties", "required"];
+
+    /// <summary>
+    /// Copia un esquema quedándose sólo con lo que el protocolo acepta.
+    /// </summary>
+    /// <remarks>
+    /// Los nombres de tipo se copian tal cual llegan, en minúscula: es lo que muestran los ejemplos
+    /// REST de la documentación de esta API, y es lo que ya escriben las herramientas.
+    /// </remarks>
+    private static void WriteSchema(Utf8JsonWriter writer, JsonElement schema)
+    {
+        writer.WriteStartObject();
+
+        foreach (var field in schema.EnumerateObject())
+        {
+            if (Array.IndexOf(SchemaFields, field.Name) < 0)
+            {
+                continue;
+            }
+
+            switch (field.Name)
+            {
+                case "properties":
+                    if (field.Value.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    writer.WriteStartObject("properties");
+                    foreach (var property in field.Value.EnumerateObject())
+                    {
+                        writer.WritePropertyName(property.Name);
+                        WriteSchema(writer, property.Value);
+                    }
+
+                    writer.WriteEndObject();
+                    break;
+
+                case "items":
+                    if (field.Value.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    writer.WritePropertyName("items");
+                    WriteSchema(writer, field.Value);
+                    break;
+
+                case "required":
+                    // Una lista vacía de obligatorios no se manda: no dice nada y es un campo más
+                    // que el servidor tiene que aceptar.
+                    if (field.Value.ValueKind != JsonValueKind.Array || field.Value.GetArrayLength() == 0)
+                    {
+                        continue;
+                    }
+
+                    field.WriteTo(writer);
+                    break;
+
+                default:
+                    field.WriteTo(writer);
+                    break;
+            }
+        }
+
+        writer.WriteEndObject();
     }
 
     private static void WriteInt64AsString(Utf8JsonWriter writer, string name, long value) =>

@@ -24,6 +24,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isConfirmationVisible;
     private bool _isListeningWhileHidden = true;
     private Controls.OrbShape _orbShape = Controls.OrbShape.Gota;
+    private double _orbScale = Viernes.Core.Configuration.OrbScaleRange.Default;
     private bool _followsActiveMonitor;
     private bool _isConversationActive;
     private double _audioLevel;
@@ -240,6 +241,20 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
     {
         await _runtime.SetOrbShapeAsync(shape, cancellationToken);
         OrbShape = _runtime.OrbShape;
+    }
+
+    /// <summary>Qué tan grande es el orbe, en fracción del tamaño de fábrica.</summary>
+    public double OrbScale
+    {
+        get => _orbScale;
+        private set => SetProperty(ref _orbScale, value);
+    }
+
+    /// <summary>Guarda el tamaño elegido. Se llama al soltar la barra, no en cada paso.</summary>
+    public async Task SetOrbScaleAsync(double scale, CancellationToken cancellationToken)
+    {
+        await _runtime.SetOrbScaleAsync(scale, cancellationToken);
+        OrbScale = _runtime.OrbScale;
     }
 
     /// <summary>Si el orbe se muda solo al monitor donde estás. Apagada de fábrica.</summary>
@@ -809,6 +824,7 @@ internal sealed class MainViewModel : ObservableObject, IAsyncDisposable
         IsWakeWordEnabled = _runtime.IsWakeWordEnabled;
         IsListeningWhileHidden = _runtime.IsListeningWhileHidden;
         OrbShape = _runtime.OrbShape;
+        OrbScale = _runtime.OrbScale;
         FollowsActiveMonitor = _runtime.FollowsActiveMonitor;
 
         // El nombre recién se conoce acá: la ventana y la bandeja ya se dibujaron con el de fábrica

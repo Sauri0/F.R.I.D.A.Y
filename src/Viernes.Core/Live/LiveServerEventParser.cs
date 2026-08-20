@@ -110,6 +110,8 @@ public static class LiveServerEventParser
             Interrupted = interrupted,
             GenerationComplete = generationComplete,
             TurnComplete = turnComplete,
+            FunctionCalls = ReadFunctionCalls(root),
+            CancelledToolCalls = ReadCancelledToolCalls(root),
             ResumptionHandle = resumptionHandle,
             ResumptionHandleIsResumable = resumable,
             GoAwayTimeLeft = goAway,
@@ -167,6 +169,95 @@ public static class LiveServerEventParser
         }
 
         return text;
+    }
+
+    /// <summary>
+    /// Un objeto de argumentos vacío, para las llamadas sin parámetros.
+    /// </summary>
+    /// <remarks>
+    /// Se arma una sola vez y se reparte: un <see cref="JsonElement"/> clonado no tiene dueño y es
+    /// de sólo lectura, así que compartirlo es seguro y evita crear un documento por llamada.
+    /// </remarks>
+    private static readonly JsonElement EmptyArguments = JsonDocument.Parse("{}").RootElement.Clone();
+
+    /// <summary>
+    /// Lee las herramientas que el servidor pide ejecutar.
+    /// </summary>
+    /// <remarks>
+    /// Los argumentos se <b>clonan</b>. El documento que los trajo se cierra al terminar de leer el
+    /// mensaje y la herramienta se ejecuta después —abrir una aplicación tarda un segundo largo—,
+    /// así que sin clonar lo que le llega a la herramienta es memoria ya devuelta.
+    /// <para>
+    /// Una llamada sin <c>name</c> se descarta entera: no hay nada que ejecutar y contestarle al
+    /// servidor con un nombre inventado es peor que ignorarla.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<LiveFunctionCall> ReadFunctionCalls(JsonElement root)
+    {
+        if (!root.TryGetProperty("toolCall", out var toolCall) ||
+            toolCall.ValueKind != JsonValueKind.Object ||
+            !toolCall.TryGetProperty("functionCalls", out var calls) ||
+            calls.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<LiveFunctionCall>();
+        foreach (var call in calls.EnumerateArray())
+        {
+            if (call.ValueKind != JsonValueKind.Object ||
+                !call.TryGetProperty("name", out var name) ||
+                name.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var toolName = name.GetString();
+            if (string.IsNullOrWhiteSpace(toolName))
+            {
+                continue;
+            }
+
+            var id = call.TryGetProperty("id", out var identifier) && identifier.ValueKind == JsonValueKind.String
+                ? identifier.GetString() ?? string.Empty
+                : string.Empty;
+
+            var arguments = call.TryGetProperty("args", out var args) && args.ValueKind == JsonValueKind.Object
+                ? args.Clone()
+                : EmptyArguments;
+
+            result.Add(new LiveFunctionCall(id, toolName, arguments));
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyList<string> ReadCancelledToolCalls(JsonElement root)
+    {
+        if (!root.TryGetProperty("toolCallCancellation", out var cancellation) ||
+            cancellation.ValueKind != JsonValueKind.Object ||
+            !cancellation.TryGetProperty("ids", out var ids) ||
+            ids.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<string>();
+        foreach (var id in ids.EnumerateArray())
+        {
+            if (id.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var value = id.GetString();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                result.Add(value);
+            }
+        }
+
+        return result;
     }
 
     private static bool ReadBoolean(JsonElement parent, string name) =>

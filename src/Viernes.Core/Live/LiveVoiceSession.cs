@@ -111,13 +111,17 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     /// Cuánto silencio hace falta para avisar que la charla quedó abandonada. Por defecto
     /// <see cref="DefaultQuietTimeout"/>; se puede acortar para probarlo sin esperar el minuto.
     /// </param>
+    /// <param name="tools">
+    /// Las manos de la sesión hablada. Sin esto conversa y nada más, que es como nació.
+    /// </param>
     public LiveVoiceSession(
         GeminiLiveOptions options,
         Func<string?> apiKey,
         ILiveAudioSink audioSink,
         Func<ILiveTransport>? transportFactory = null,
         LiveFallbackLatch? latch = null,
-        TimeSpan? quietTimeout = null)
+        TimeSpan? quietTimeout = null,
+        ILiveToolBridge? tools = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
@@ -129,12 +133,13 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         // se la mira para saber si todavía está sonando, que es lo que separa «terminó el turno» de
         // «se calló». Son dos cosas distintas y confundirlas fue el bug.
         _sink = audioSink ?? throw new ArgumentNullException(nameof(audioSink));
-        _client = new GeminiLiveClient(options, apiKey, audioSink, transportFactory);
+        _client = new GeminiLiveClient(options, apiKey, audioSink, transportFactory, tools);
 
         _client.TurnStateChanged += OnTurnStateChanged;
         _client.Interrupted += OnInterrupted;
         _client.TranscriptReceived += OnTranscriptReceived;
         _client.Failed += OnFailed;
+        _client.ToolActivity += OnToolActivity;
     }
 
     /// <summary>Cambió el momento de la charla. Es lo que mira el orbe.</summary>
@@ -162,6 +167,16 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     /// avisa, porque cerrar es una decisión sobre la conversación entera y no sobre esta conexión.
     /// </remarks>
     public event EventHandler? WentQuiet;
+
+    /// <summary>
+    /// Arrancó o terminó una herramienta pedida por el servidor.
+    /// </summary>
+    /// <remarks>
+    /// Es para la bitácora del anfitrión y no para decidir nada. Cuando el usuario cuenta que le
+    /// pidió algo y no pasó, lo único que permite saber si llegó a moverse la computadora es que
+    /// quede escrito qué se llamó y cómo salió.
+    /// </remarks>
+    public event EventHandler<LiveToolEventArgs>? ToolActivity;
 
     /// <summary>Si la sesión está abierta y aceptada.</summary>
     public bool IsConnected => _client.IsConnected;
@@ -446,6 +461,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
         _client.Interrupted -= OnInterrupted;
         _client.TranscriptReceived -= OnTranscriptReceived;
         _client.Failed -= OnFailed;
+        _client.ToolActivity -= OnToolActivity;
 
         await _client.DisposeAsync().ConfigureAwait(false);
     }
@@ -493,6 +509,9 @@ public sealed class LiveVoiceSession : IAsyncDisposable
 
     private void OnTranscriptReceived(object? sender, LiveTranscriptEventArgs eventArgs) =>
         Raise(TranscriptReceived, eventArgs);
+
+    private void OnToolActivity(object? sender, LiveToolEventArgs eventArgs) =>
+        Raise(ToolActivity, eventArgs);
 
     private void OnFailed(object? sender, LiveFailureEventArgs eventArgs)
     {

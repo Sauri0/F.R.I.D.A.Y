@@ -165,6 +165,10 @@ public sealed class LocalSettingsStore : ILocalSettingsStore
             OrbShape = string.Equals(settings.OrbShape?.Trim(), "Nube", StringComparison.OrdinalIgnoreCase)
                 ? "Nube"
                 : "Gota",
+
+            // Un archivo escrito a mano con 50 —queriendo decir «50 %»— pediría un orbe de 5400 px
+            // que no entra en ninguna pantalla y que además se lleva puesto el ancho de la ventana.
+            OrbScale = OrbScaleRange.Clamp(settings.OrbScale),
             WhisperModelPath = NormalizeWhisperModelPath(settings.WhisperModelPath),
             PreferredOpenRouterModel = NormalizeOptionalText(settings.PreferredOpenRouterModel, 200),
             WidgetLeft = NormalizeCoordinate(settings.WidgetLeft),

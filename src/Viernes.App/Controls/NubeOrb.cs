@@ -89,13 +89,23 @@ internal sealed class NubeOrb : FrameworkElement, IOrbBody, IOrbMotionSink
     private const int DepthBuckets = 6;
 
     /// <summary>
-    /// De píxeles de pantalla a unidades del lienzo. El cuerpo se dibuja en 70 y el orbe mide 108.
+    /// De píxeles de pantalla a unidades del lienzo. El cuerpo se dibuja siempre en 70 unidades.
     /// </summary>
     /// <remarks>
     /// Del fuente: <c>const u = 70 / S</c>, con <c>S</c> el tamaño del orbe. Es lo que convierte la
     /// velocidad de la ventana —px/s— en algo que se pueda sumar a la posición de un grano.
+    /// <para>
+    /// El tamaño se pregunta y no se supone: acá había un 108 escrito, que es el de fábrica, y desde
+    /// que el usuario puede elegir cuánto mide el orbe ese número deja de ser el de nadie. Con un
+    /// orbe al doble, la estela se estiraba el doble de lo que le corresponde a su cuerpo.
+    /// </para>
     /// </remarks>
-    private const double CanvasPerPixel = 70.0 / 108.0;
+    // El resguardo es el tamaño de diseño y no 1. Antes de la primera pasada de medición
+    // ActualWidth vale 0, y con Math.Max(1, 0) el divisor quedaba en 1: la conversión daba 70 en vez
+    // de 0,65, o sea ciento ocho veces más grande. Un solo cuadro sin medir con la ventana en
+    // movimiento le metía a los resortes de la estela un empujón que no corresponde a nada.
+    private double CanvasPerPixel =>
+        70.0 / (this.ActualWidth > 0 ? this.ActualWidth : Shell.ShellLayout.DefaultOrbSize);
 
     /// <summary>
     /// Cuánto puede correrse un grano por la estela, en unidades del lienzo.

@@ -278,6 +278,74 @@
             </Setter>
         </Style>
 
+        <!--
+            La barra del tamaño, adentro del menú. Va con plantilla propia por lo mismo que el menú
+            entero: la del sistema es celeste claro, cuadrada y ancha, y al lado de un orbe de vidrio
+            se lee como si la hubiera puesto otro programa.
+
+            El tramo ya recorrido es el DecreaseRepeatButton pintado, que es el modo de dibujarlo sin
+            una atadura al valor: el Track ya sabe cuánto mide cada mitad, y una atadura más sería
+            otra cosa que se recalcula mientras se arrastra.
+        -->
+        <Style x:Key="BarraDelMenu" TargetType="Slider">
+            <Setter Property="Height" Value="18" />
+            <Setter Property="IsMoveToPointEnabled" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid Background="Transparent">
+                            <Border Height="3"
+                                    VerticalAlignment="Center"
+                                    CornerRadius="2"
+                                    Background="#22FFFFFF" />
+                            <Track x:Name="PART_Track">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Height="3"
+                                                        VerticalAlignment="Center"
+                                                        CornerRadius="2"
+                                                        Background="#FF72D9FF" />
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Background="Transparent" />
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Width="14" Height="14">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Grid Background="Transparent">
+                                                    <Ellipse x:Name="Perilla"
+                                                             Fill="#FFF4F4F7"
+                                                             Stroke="#40000000"
+                                                             StrokeThickness="1" />
+                                                </Grid>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Perilla" Property="Fill" Value="#FFFFFFFF" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="RayaDelMenu" TargetType="Separator">
             <Setter Property="Height" Value="1" />
             <Setter Property="Margin" Value="13,5" />
@@ -1490,7 +1558,14 @@
             </shell:GlassSurface>
         </Grid>
 
-        <!-- ============================ EL ORBE ============================ -->
+        <!--
+            ============================ EL ORBE ============================
+
+            Los 108 de acá son el tamaño de fábrica y el que se ve en el diseñador. El de verdad lo
+            pone ApplyOrbMetrics() con el que eligió el usuario, y con él crecen los tres: la
+            superficie que agarra el arrastre, el botón que recibe el toque y el cuerpo. Un orbe
+            grande con una superficie de 108 sólo se podría agarrar del centro.
+        -->
         <Grid x:Name="OrbDragSurface"
               Width="108"
               Height="108"

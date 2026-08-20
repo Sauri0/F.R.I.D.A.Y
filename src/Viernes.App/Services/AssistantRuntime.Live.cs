@@ -21,10 +21,11 @@ namespace Viernes.App.Services;
 /// apure, porque ahí, mientras habla, no hay nadie escuchando.
 /// </para>
 /// <para>
-/// <b>Lo que el camino nuevo todavía no tiene son herramientas.</b> El setup que manda
-/// <c>LiveClientMessages</c> no declara ninguna, así que en vivo se conversa pero no se abre Spotify
-/// ni se crea una carpeta. Es una diferencia real entre los dos caminos y está dicha en la
-/// instrucción de sistema, para que no prometa lo que no puede.
+/// <b>Hablando también tiene manos, pero menos.</b> El setup declara las tres herramientas de
+/// <see cref="LiveToolBridge"/> —manejar la computadora, anotar un recordatorio, llevar una misión—
+/// y el servidor las pide por <c>toolCall</c>; el resto del taller sigue siendo del camino escrito.
+/// Esa diferencia está dicha en la instrucción de sistema y tiene que seguir estándolo: si acá se
+/// agrega una herramienta y allá no se dice, la asistente sigue contestando que no puede.
 /// </para>
 /// </remarks>
 internal sealed partial class AssistantRuntime
@@ -96,12 +97,17 @@ internal sealed partial class AssistantRuntime
             () => LocalCredentials.Get("GOOGLE_API_KEY"),
             _liveSink,
             transportFactory: null,
-            _liveLatch);
+            _liveLatch,
+            quietTimeout: null,
+            // El orquestador va como función y no como valor: se rearma al conectar los servidores
+            // MCP, y esta sesión se arma una sola vez y se reusa hasta que se apague el programa.
+            new LiveToolBridge(() => _orchestrator));
 
         session.MomentChanged += LiveOnMomentChanged;
         session.TranscriptReceived += LiveOnTranscript;
         session.FellBack += LiveOnFellBack;
         session.WentQuiet += LiveOnWentQuiet;
+        session.ToolActivity += LiveOnToolActivity;
 
         _liveSession = session;
         return session;
@@ -122,9 +128,14 @@ internal sealed partial class AssistantRuntime
     /// </summary>
     /// <remarks>
     /// No es el prompt del camino de siempre y no puede serlo: aquél está escrito alrededor de las
-    /// herramientas —usá <c>pc_action</c>, anotá una misión, aprendé esto— y acá no hay ninguna
-    /// declarada. Copiarlo produciría un asistente que dice que abrió Spotify sin haber abierto
-    /// nada, que es la peor forma de fallar porque suena a que funcionó.
+    /// treinta herramientas y acá hay tres. Copiarlo produciría un asistente que dice que leyó un
+    /// archivo sin haber leído nada, que es la peor forma de fallar porque suena a que funcionó.
+    /// <para>
+    /// Qué manos tiene no se escribe acá: se pega desde <see cref="LiveToolBridge.Anuncio"/>, al
+    /// lado de la lista que las declara. Escribirlo dos veces —una en la lista y otra en el texto—
+    /// es garantizar que un día digan cosas distintas, y las dos formas de que se desincronicen
+    /// terminan en una asistente que miente sobre sí misma.
+    /// </para>
     /// </remarks>
     private string BuildLiveInstruction() => $"""
         Sos {_identity.Name}, el asistente personal de esta computadora, y esto es una conversación
@@ -133,11 +144,7 @@ internal sealed partial class AssistantRuntime
         Hablás en castellano rioplatense, de vos. Sereno, preciso y directo. Frases cortas: quien te
         escucha no puede volver atrás a releer.
 
-        Ahora mismo estás en la sesión de voz, y en la sesión de voz no tenés herramientas: no podés
-        abrir aplicaciones, ni crear archivos, ni anotar recordatorios. No digas que lo hiciste ni
-        prometas hacerlo. Decí que para eso te lo escriba o te lo pida cuando no estés en esta
-        sesión, y seguí con lo que sí podés: conversar, explicar, acordarte de lo que se viene
-        hablando en esta charla.
+        {LiveToolBridge.Anuncio}
 
         Te pueden interrumpir hablándote encima, y está bien: cuando pase, callate y escuchá lo
         nuevo. No retomes la frase anterior.
@@ -159,15 +166,25 @@ internal sealed partial class AssistantRuntime
     /// ayer y no tener con qué retomarlo.
     /// </para>
     /// <para>
-    /// Van sólo estas dos, y no las cinco del otro camino, porque las otras tres no aplican acá: las
-    /// reglas enseñadas hablan de cómo usar herramientas y en la sesión hablada no hay ninguna, y lo
-    /// mismo los permisos —que gobiernan acciones que acá no se pueden hacer—. Meterlas sería pagar
-    /// tokens en cada conexión por instrucciones sobre cosas que no puede hacer.
+    /// Van estas dos y no las cinco del otro camino: las reglas enseñadas y los permisos hablan del
+    /// taller entero —treinta herramientas—, y acá hay tres. Pagar en cada conexión los tokens de
+    /// instrucciones sobre cosas que hablando no puede hacer es pagar por confundirla.
+    /// </para>
+    /// <para>
+    /// La fecha va sí o sí, y no es adorno: sin ella «recordame el martes» se resuelve contra la
+    /// fecha de corte del entrenamiento y el recordatorio queda guardado con un año que ya pasó, o
+    /// sea que nunca vence. El camino escrito ya la manda en cada turno; acá va una vez por
+    /// conexión, que es donde se puede.
     /// </para>
     /// </remarks>
     private async Task<string> BuildLiveInstructionAsync(CancellationToken cancellationToken)
     {
         var instruccion = new StringBuilder(BuildLiveInstruction());
+
+        instruccion.AppendLine().AppendLine().Append(
+            $"Esta conversación empieza el {DateTimeOffset.Now:dddd d 'de' MMMM 'de' yyyy, HH:mm}. " +
+            "Usá esta fecha para resolver «mañana», «el martes», «en dos horas», y mandá siempre la " +
+            "hora completa con zona horaria cuando anotes un recordatorio.");
 
         var personal = await SafeContextAsync(
             () => DescribePersonalMemoryAsync(cancellationToken)).ConfigureAwait(false);
@@ -185,8 +202,9 @@ internal sealed partial class AssistantRuntime
             instruccion.AppendLine().AppendLine().Append(misiones);
             instruccion.AppendLine().AppendLine().Append(
                 "Si hay una pregunta tuya sin contestar, retomala vos apenas venga al caso. No " +
-                "esperes que se acuerde él. Y como acá no tenés herramientas, no podés anotar la " +
-                "respuesta: escuchala, seguí la charla, y pedile que te la repita cuando te escriba.");
+                "esperes que se acuerde él. Cuando te conteste, anotalo en el acto con «mision» y " +
+                "accion=«responder»: si no lo anotás, lo que te dijo se pierde al cerrar la charla " +
+                "y la misión queda frenada esperando algo que ya te contestaron.");
         }
 
         return instruccion.ToString();
@@ -313,6 +331,17 @@ internal sealed partial class AssistantRuntime
         if (microphone is not null)
         {
             microphone.LevelChanged -= LiveOnAudioLevel;
+
+            // Queda escrito porque es lo único que dice, después, si la compuerta de eco hizo su
+            // trabajo. Si «eco» es cero mientras ella habló, no está frenando nada y el bucle de
+            // cortarse sola va a volver; si «encima» es cero después de haberle hablado encima, el
+            // listón quedó alto y hay que mirar el perfil.
+            var (eco, liston) = microphone.EchoProfile;
+            RuntimeTrace.Write(
+                "vivo.microfono.eco",
+                $"eco={microphone.EchoBlocks} bloques · encima={microphone.Breakthroughs} · " +
+                $"nivel={eco:0.000} listón={liston:0.000} · tarde={microphone.DroppedBlocks}");
+
             await microphone.DisposeAsync().ConfigureAwait(false);
         }
 
@@ -353,6 +382,7 @@ internal sealed partial class AssistantRuntime
             session.TranscriptReceived -= LiveOnTranscript;
             session.FellBack -= LiveOnFellBack;
             session.WentQuiet -= LiveOnWentQuiet;
+            session.ToolActivity -= LiveOnToolActivity;
             await session.DisposeAsync().ConfigureAwait(false);
         }
 
@@ -489,6 +519,33 @@ internal sealed partial class AssistantRuntime
         }
 
         PublishDictation(_dictation.Hear(heard));
+    }
+
+    /// <summary>
+    /// Una herramienta de la sesión hablada arrancó o terminó.
+    /// </summary>
+    /// <remarks>
+    /// Sólo escribe en la bitácora, y eso es todo lo que tiene que hacer. El orbe ya lo muestra por
+    /// otro lado: la herramienta corre por dentro del orquestador, que pasa a «pensando» al empezar,
+    /// y el usuario ve ese mismo gesto que ve cuando le escribe.
+    /// <para>
+    /// Lo que se escribe es el nombre y cómo salió, nunca los argumentos. En «abrí tal cosa» los
+    /// argumentos son inocentes; en «anotá que el turno del médico es el jueves» no, y la bitácora
+    /// es un archivo de texto que se pega en un reporte cuando algo falla.
+    /// </para>
+    /// </remarks>
+    private void LiveOnToolActivity(object? sender, LiveToolEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write(
+            "vivo.herramienta",
+            eventArgs.Finished
+                ? $"{eventArgs.Name} · {(eventArgs.Succeeded ? "hecho" : "no pudo")}"
+                : $"{eventArgs.Name} · arranca");
     }
 
     /// <summary>

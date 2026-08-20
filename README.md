@@ -171,7 +171,9 @@ escribe consulta antes la política de permisos—. Ver [docs/CONECTOR.md](docs/
 **Conversa hablando.** Con una clave de Google usa Gemini Live: una sola conexión dúplex en lugar de
 grabar, reconocer, pensar y sintetizar. El micrófono queda abierto mientras habla, así que
 **hablándole encima se calla** — eso el camino de siempre no lo puede hacer por más que se lo apure,
-porque ahí, mientras habla, no hay nadie escuchando. Sin clave anda igual, por el camino de siempre.
+porque ahí, mientras habla, no hay nadie escuchando. Su propia voz volviendo por el micrófono no la
+corta: hay una compuerta que la mide y la deja afuera, si no se interrumpiría sola para siempre. Sin
+clave anda igual, por el camino de siempre.
 
 **Se mira sin mirarla.** El orbe tiene quince estados con transiciones que tienen forma propia, seis
 registros de ánimo y diecinueve desplegables. Sin movimiento —si el sistema lo pide— los quince

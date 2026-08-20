@@ -163,6 +163,20 @@ internal interface IAssistantRuntime : IAsyncDisposable
     Task SetOrbShapeAsync(Controls.OrbShape shape, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Qué tan grande es el orbe, en fracción del tamaño de fábrica. Preferencia, se persiste local.
+    /// </summary>
+    double OrbScale { get; }
+
+    /// <summary>
+    /// Deja elegido el tamaño y lo escribe en las preferencias.
+    /// </summary>
+    /// <remarks>
+    /// Se llama <b>al soltar</b> la barra, no en cada paso: lo que se ve mientras se arrastra lo
+    /// resuelve la ventana sola, sin tocar el disco. Ver <c>MainWindow.ApplyOrbScale</c>.
+    /// </remarks>
+    Task SetOrbScaleAsync(double scale, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Si el orbe se muda solo al monitor donde el usuario está trabajando. Preferencia, se persiste.
     /// </summary>
     /// <remarks>

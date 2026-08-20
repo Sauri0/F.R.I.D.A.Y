@@ -60,6 +60,26 @@ public sealed class LiveServerEvent
     /// <summary>Se cerró el turno. Es el único final garantizado.</summary>
     public bool TurnComplete { get; init; }
 
+    /// <summary>
+    /// Herramientas que el servidor pide ejecutar.
+    /// </summary>
+    /// <remarks>
+    /// Mientras esto está pendiente el turno <b>no cierra</b>: el servidor espera la respuesta antes
+    /// de seguir hablando. Por eso una llamada que no se contesta no se ve como un error sino como
+    /// que se quedó muda a mitad de frase.
+    /// </remarks>
+    public IReadOnlyList<LiveFunctionCall> FunctionCalls { get; init; } = [];
+
+    /// <summary>
+    /// Llamadas que el servidor ya no quiere que se contesten.
+    /// </summary>
+    /// <remarks>
+    /// Llega cuando la persona interrumpió mientras la herramienta corría. Lo que la herramienta ya
+    /// hizo, hecho está —abrir una aplicación no se deshace—; lo que cambia es que la respuesta ya
+    /// no tiene a dónde ir, y mandarla igual le contesta a un turno que del otro lado no existe.
+    /// </remarks>
+    public IReadOnlyList<string> CancelledToolCalls { get; init; } = [];
+
     /// <summary>El handle para reconectar sin perder la conversación.</summary>
     public string? ResumptionHandle { get; init; }
 
@@ -90,6 +110,8 @@ public sealed class LiveServerEvent
         !Interrupted &&
         !GenerationComplete &&
         !TurnComplete &&
+        FunctionCalls.Count == 0 &&
+        CancelledToolCalls.Count == 0 &&
         ResumptionHandle is null &&
         GoAwayTimeLeft is null &&
         Usage is null &&

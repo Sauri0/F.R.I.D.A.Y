@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Viernes.Core.Live;
+using Viernes.Core.Tools;
 using Xunit;
 
 namespace Viernes.Core.Tests.Live;
@@ -13,9 +14,12 @@ namespace Viernes.Core.Tests.Live;
 /// </remarks>
 public sealed class LiveClientMessagesTests
 {
-    private static JsonElement Setup(GeminiLiveOptions options, string? handle = null)
+    private static JsonElement Setup(
+        GeminiLiveOptions options,
+        string? handle = null,
+        IReadOnlyList<ToolDefinition>? tools = null)
     {
-        using var document = JsonDocument.Parse(LiveClientMessages.BuildSetup(options, handle));
+        using var document = JsonDocument.Parse(LiveClientMessages.BuildSetup(options, handle, tools));
         return document.RootElement.GetProperty("setup").Clone();
     }
 
@@ -183,5 +187,111 @@ public sealed class LiveClientMessagesTests
         using var document = JsonDocument.Parse(LiveClientMessages.BuildAudioStreamEnd());
 
         Assert.True(document.RootElement.GetProperty("realtimeInput").GetProperty("audioStreamEnd").GetBoolean());
+    }
+
+    /// <summary>Una herramienta con un esquema como los que arma este proyecto de verdad.</summary>
+    private static ToolDefinition Herramienta() => ToolDefinition.Create(
+        "pc_action",
+        "Controla Windows.",
+        new
+        {
+            type = "object",
+            properties = new
+            {
+                action = new { type = "string", description = "Qué hacer." },
+                target = new { type = "string", description = "Sobre qué." }
+            },
+            required = new[] { "action" },
+            // Es JSON Schema válido y el protocolo de esta API no lo tiene. Está acá a propósito.
+            additionalProperties = false
+        });
+
+    [Fact]
+    public void Setup_SinHerramientas_NoDeclaraNinguna()
+    {
+        // Mandar un arreglo vacío no es lo mismo que no mandar nada, y acá la sesión sin manos tiene
+        // que seguir armando exactamente el mismo setup que armaba antes de que esto existiera.
+        var setup = Setup(new GeminiLiveOptions());
+
+        Assert.False(setup.TryGetProperty("tools", out _));
+    }
+
+    [Fact]
+    public void Setup_DeclaraLasHerramientasConNombreDescripcionYEsquema()
+    {
+        var setup = Setup(new GeminiLiveOptions(), tools: [Herramienta()]);
+
+        var declaration = setup
+            .GetProperty("tools")[0]
+            .GetProperty("functionDeclarations")[0];
+
+        Assert.Equal("pc_action", declaration.GetProperty("name").GetString());
+        Assert.Equal("Controla Windows.", declaration.GetProperty("description").GetString());
+
+        var parameters = declaration.GetProperty("parameters");
+        Assert.Equal("object", parameters.GetProperty("type").GetString());
+        Assert.Equal("string", parameters.GetProperty("properties").GetProperty("action").GetProperty("type").GetString());
+        Assert.Equal("Sobre qué.", parameters.GetProperty("properties").GetProperty("target").GetProperty("description").GetString());
+        Assert.Equal(
+            ["action"],
+            parameters.GetProperty("required").EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToArray());
+    }
+
+    [Fact]
+    public void Setup_TiraLosCamposDeEsquemaQueEsteProtocoloNoTiene()
+    {
+        // El esquema del protocolo es un subconjunto de JSON Schema. Un campo de más no da un error
+        // de campo: rebota el setup entero, la sesión se cae al camino de siempre, y el usuario se
+        // queda sin manos sin que nadie sepa por qué.
+        var setup = Setup(new GeminiLiveOptions(), tools: [Herramienta()]);
+
+        var parameters = setup
+            .GetProperty("tools")[0]
+            .GetProperty("functionDeclarations")[0]
+            .GetProperty("parameters");
+
+        Assert.False(parameters.TryGetProperty("additionalProperties", out _));
+    }
+
+    [Fact]
+    public void Setup_NoMandaUnaListaVaciaDeObligatorios()
+    {
+        var tool = ToolDefinition.Create(
+            "listar",
+            "No lleva argumentos.",
+            new { type = "object", properties = new { }, required = Array.Empty<string>() });
+
+        var setup = Setup(new GeminiLiveOptions(), tools: [tool]);
+
+        var parameters = setup
+            .GetProperty("tools")[0]
+            .GetProperty("functionDeclarations")[0]
+            .GetProperty("parameters");
+
+        Assert.False(parameters.TryGetProperty("required", out _));
+    }
+
+    [Fact]
+    public void RespuestaDeHerramienta_LlevaElIdQueApareaConLaLlamada()
+    {
+        using var document = JsonDocument.Parse(LiveClientMessages.BuildToolResponse(
+        [
+            new LiveFunctionResponse("c1", "pc_action", new LiveToolOutcome("Succeeded", "Abrí Spotify.")),
+            new LiveFunctionResponse("c2", "mision", LiveToolOutcome.Failed("No encontré esa misión."))
+        ]));
+
+        var responses = document.RootElement.GetProperty("toolResponse").GetProperty("functionResponses");
+        Assert.Equal(2, responses.GetArrayLength());
+
+        // Sin el id el servidor queda esperando una contestación que ya se mandó, y la charla se
+        // cuelga sin error.
+        Assert.Equal("c1", responses[0].GetProperty("id").GetString());
+        Assert.Equal("pc_action", responses[0].GetProperty("name").GetString());
+        Assert.Equal("Succeeded", responses[0].GetProperty("response").GetProperty("status").GetString());
+        Assert.Equal("Abrí Spotify.", responses[0].GetProperty("response").GetProperty("message").GetString());
+
+        // El estado viaja aparte del texto: es lo que le permite al modelo distinguir «lo hice» de
+        // «no pude» sin interpretar una frase en castellano.
+        Assert.Equal("Failed", responses[1].GetProperty("response").GetProperty("status").GetString());
     }
 }

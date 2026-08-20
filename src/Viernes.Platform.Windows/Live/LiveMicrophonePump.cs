@@ -6,13 +6,20 @@ using Viernes.Platform.Windows.Speech.Recognition;
 namespace Viernes.Platform.Windows.Live;
 
 /// <summary>
-/// El micrófono de la sesión en vivo: toma sin parar y sube todo, también mientras ella habla.
+/// El micrófono de la sesión en vivo: toma sin parar, también mientras ella habla, y sube todo menos
+/// su propio eco.
 /// </summary>
 /// <remarks>
 /// Que el micrófono quede abierto durante la respuesta no es un descuido: es lo único que hace que
 /// se la pueda interrumpir. El camino de siempre no puede hacerlo por más que se lo apure —ahí,
 /// mientras ella habla, no hay nadie escuchando—, y por eso el bucle de conversación de siempre
 /// espera a que la voz termine antes de volver a abrir la captura.
+/// <para>
+/// Lo que <b>no</b> puede pasar es que ese micrófono abierto le suba a Gemini su propia voz saliendo
+/// por los parlantes: el detector de voz del servidor la toma por la persona, manda
+/// <c>interrupted</c>, y la conversación entra en un bucle de cortarse sola. Eso lo decide
+/// <see cref="LiveEchoGate"/>, bloque por bloque, y acá sólo se ejecuta lo que decidió.
+/// </para>
 /// <para>
 /// Es dueño único del dispositivo mientras dura la conversación en vivo. Quien lo arranque tiene
 /// que haber apagado antes el oído continuo, igual que hace el bucle de siempre: dos capturas sobre
@@ -43,6 +50,23 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
     /// </remarks>
     private const int QueuedBlocks = 1000 / BlockMilliseconds;
 
+    /// <summary>
+    /// Cuánto audio frenado se guarda para poder devolverlo si resulta ser una persona.
+    /// </summary>
+    /// <remarks>
+    /// La compuerta necesita ochenta milisegundos de voz por encima del listón para creer que
+    /// alguien está hablando encima, y esos ochenta milisegundos ya pasaron cuando lo cree: son la
+    /// primera sílaba. Sin esta antesala la interrupción le llegaría al servidor empezada por la
+    /// mitad —«…ará» en vez de «pará»—, y una palabra cortada no es sólo fea: es lo que hace que el
+    /// detector del servidor dude de si eso fue voz.
+    /// <para>
+    /// Trescientos milisegundos son de sobra para los ochenta que hacen falta, y aun así son quince
+    /// bloques de 640 bytes: nueve kilobytes. El costo de tenerla de más es cero y el de tenerla de
+    /// menos es perder el arranque de cada interrupción.
+    /// </para>
+    /// </remarks>
+    private const int PreRollBlocks = 300 / BlockMilliseconds;
+
     private static readonly WaveFormat Format = new(
         LiveAudioFormat.InputSampleRate,
         LiveAudioFormat.BitsPerSample,
@@ -55,6 +79,18 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
     private readonly bool _ownsDetector;
     private readonly int _deviceNumber;
     private readonly Lock _gate = new();
+    private readonly LiveEchoGate _echo = new();
+
+    /// <summary>
+    /// Los bloques frenados que todavía podrían resultar ser de una persona.
+    /// </summary>
+    /// <remarks>
+    /// Sin candado a propósito: la toca <see cref="OnDataAvailable"/>, que corre en el hilo del
+    /// dispositivo y en ninguno más, y <see cref="Start"/>, que la vacía con la captura todavía
+    /// cerrada. Ponerle un candado sería tomar uno por bloque en el hilo del audio para proteger algo
+    /// que nadie más mira.
+    /// </remarks>
+    private readonly Queue<byte[]> _preRoll = new(PreRollBlocks);
 
     private Channel<byte[]>? _queue;
     private WaveInEvent? _capture;
@@ -126,6 +162,23 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
     /// <summary>Bloques que se tiraron por atraso de la subida. Si crece, la red no da abasto.</summary>
     public long DroppedBlocks { get; private set; }
 
+    /// <summary>
+    /// Bloques que no se subieron por ser su propia voz volviendo por el micrófono.
+    /// </summary>
+    /// <remarks>
+    /// Se cuentan recién cuando se tiran, así que los que resultaron ser de una persona y se
+    /// soltaron no están acá. Este número por veinte milisegundos es cuánto eco se le ahorró al
+    /// servidor, y es lo que hay que mirar en la bitácora para saber si la compuerta está haciendo
+    /// algo o está de adorno.
+    /// </remarks>
+    public long EchoBlocks { get; private set; }
+
+    /// <summary>Cuántas veces alguien le habló encima y la compuerta lo dejó pasar.</summary>
+    public int Breakthroughs => _echo.Breakthroughs;
+
+    /// <summary>Cuánto eco tiene medido la compuerta, y el listón que salió de esa medición.</summary>
+    public (double Echo, double Bar) EchoProfile => (_echo.EchoLevel, _echo.Bar);
+
     /// <summary>Por qué no pudo abrir el micrófono, si no pudo.</summary>
     public string? LastFailure { get; private set; }
 
@@ -150,6 +203,12 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
             try
             {
                 _detector.Reset();
+
+                // La compuerta vuelve a arrancar sin medición, y la antesala se vacía: lo que quedó
+                // frenado pertenece a una conversación que ya terminó. Se hace acá, con la captura
+                // todavía cerrada, que es el único momento en que nadie más las está tocando.
+                _echo.Reset();
+                _preRoll.Clear();
 
                 var queue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(QueuedBlocks)
                 {
@@ -283,6 +342,12 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
 
         var block = eventArgs.Buffer.AsSpan(0, eventArgs.BytesRecorded);
 
+        // Si el detector se cae no hay veredicto, y sin veredicto la compuerta no tiene con qué
+        // decidir: se sube, que es lo que hacía siempre. Se pierde la protección contra el eco
+        // mientras dure la falla, y eso es preferible a un micrófono que se cierra sin que nadie
+        // pueda saber por qué.
+        var verdict = LiveMicrophoneVerdict.Send;
+
         try
         {
             var samples = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, short>(block);
@@ -293,6 +358,16 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
             // de ruido del cuarto en cada respuesta, hasta dejar de oír a quien habla bajo.
             var ocupado = _session.IsUserSpeaking || _session.TurnState != LiveTurnState.Idle;
             var decision = _detector.Analyze(samples, ocupado);
+
+            // Se le pregunta por el parlante y no por el turno: el servidor despacha la respuesta
+            // más rápido que tiempo real, así que el turno cierra con segundos de voz todavía por
+            // sonar, y esos segundos son los que siguen entrando por el micrófono.
+            verdict = _echo.Decide(
+                _session.IsSpeakerBusy,
+                decision.IsVoice,
+                decision.Level,
+                BlockDuration);
+
             _session.NoteUserAudio(decision.IsVoice, BlockDuration);
             LevelChanged?.Invoke(this, new Speech.AudioLevelEventArgs(decision.Level, decision.IsVoice));
         }
@@ -302,8 +377,64 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
             // «pensando», que es un dibujo, y no la conversación, que es lo que importa.
         }
 
-        // El búfer del driver se reutiliza en cuanto vuelve este método, así que se copia.
-        if (!writer.TryWrite(block.ToArray()))
+        // El búfer del driver se reutiliza en cuanto vuelve este método, así que se copia siempre,
+        // vaya a la cola de subida o a la antesala.
+        switch (verdict)
+        {
+            case LiveMicrophoneVerdict.Hold:
+                Hold(block.ToArray());
+                return;
+
+            case LiveMicrophoneVerdict.Release:
+                ReleaseHeld(writer);
+                break;
+
+            default:
+                DiscardHeld();
+                break;
+        }
+
+        Upload(writer, block.ToArray());
+    }
+
+    /// <summary>Guarda un bloque frenado, tirando el más viejo si la antesala se llenó.</summary>
+    private void Hold(byte[] block)
+    {
+        while (_preRoll.Count >= PreRollBlocks)
+        {
+            _preRoll.Dequeue();
+            EchoBlocks++;
+        }
+
+        _preRoll.Enqueue(block);
+    }
+
+    /// <summary>
+    /// Sube lo que estaba frenado: no era eco, era alguien hablándole encima.
+    /// </summary>
+    /// <remarks>
+    /// Van en orden y antes que el bloque actual. El servidor no sabe que hubo una pausa —lo que
+    /// recibe es audio seguido— así que la frase le llega entera desde su primera sílaba, que es lo
+    /// único que hace que la reconozca como una interrupción y no como un ruido.
+    /// </remarks>
+    private void ReleaseHeld(ChannelWriter<byte[]> writer)
+    {
+        while (_preRoll.Count > 0)
+        {
+            Upload(writer, _preRoll.Dequeue());
+        }
+    }
+
+    /// <summary>Tira lo frenado: era eco y nadie habló encima.</summary>
+    private void DiscardHeld()
+    {
+        EchoBlocks += _preRoll.Count;
+        _preRoll.Clear();
+    }
+
+    private void Upload(ChannelWriter<byte[]> writer, byte[] block)
+    {
+        if (!writer.TryWrite(block))
         {
             DroppedBlocks++;
         }

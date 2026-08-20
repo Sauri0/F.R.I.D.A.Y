@@ -637,6 +637,29 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             shape == OrbShape.Nube ? "Ahora soy una nube" : "Ahora soy una gota"));
     }
 
+    /// <inheritdoc />
+    public double OrbScale { get; private set; } = OrbScaleRange.Default;
+
+    /// <inheritdoc />
+    public async Task SetOrbScaleAsync(double scale, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        var wanted = OrbScaleRange.Clamp(scale);
+
+        // Medio punto porcentual: por debajo de eso no hay píxel que cambie y sí habría un archivo
+        // escrito. La barra vuelve a pasar por acá al soltarla aunque no la hayan movido.
+        if (Math.Abs(OrbScale - wanted) < 0.005)
+        {
+            return;
+        }
+
+        OrbScale = wanted;
+        await PersistVoiceSettingsAsync(cancellationToken).ConfigureAwait(false);
+        Publish(new AssistantRuntimeUpdate(
+            _lastVisualState,
+            $"Ahora mido {wanted * 100:0} %"));
+    }
+
     public bool IsWakeWordDemo => _wakeWord?.IsDemoOnly ?? true;
 
     public string RecognitionProviderName => _recognitionProviderName;
@@ -973,6 +996,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             ? OrbShape.Nube
             : OrbShape.Gota;
         FollowsActiveMonitor = _settings.FollowActiveMonitor;
+        OrbScale = OrbScaleRange.Clamp(_settings.OrbScale);
 
         // Recién acá, con el archivo leído, se sabe qué voz eligió el usuario. Es el único lugar
         // donde se fija: las opciones con las que se construye el sintetizador.
@@ -3056,6 +3080,7 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             // seguiría despertando con el nombre viejo. Sólo se guardan si alguien las eligió a mano.
             ListenWhileHidden = _listenWhileHidden,
             OrbShape = OrbShape.ToString(),
+            OrbScale = OrbScale,
             FollowActiveMonitor = FollowsActiveMonitor,
             PreferredRecognitionProvider = _recognition?.Info.Kind ?? _settings.PreferredRecognitionProvider
         };

@@ -11,6 +11,12 @@ namespace Viernes.Core.Live;
 /// escucha, así que hablarle encima la calla. Eso no se puede hacer con el otro camino por más que
 /// se lo apure: ahí no hay nadie escuchando mientras habla.
 /// <para>
+/// Con una salvedad que costó una sesión entera de cortarse sola: el servidor escucha, pero no sabe
+/// distinguir la voz de la persona de la voz de ella volviendo por los parlantes, y le manda
+/// <c>interrupted</c> a las dos. Quién puede subir cada bloque se decide antes de llegar acá, en
+/// <see cref="LiveEchoGate"/>.
+/// </para>
+/// <para>
 /// Esta clase no toca el micrófono ni los parlantes. Recibe audio por <see cref="SendAudioAsync"/> y
 /// entrega audio por <see cref="ILiveAudioSink"/>. De ese modo el proyecto de Windows es dueño de
 /// sus dispositivos y esto se puede probar entero sin hardware y sin red.
@@ -38,6 +44,20 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     private readonly SemaphoreSlim _audioGate = new(1, 1);
     private readonly List<byte> _pendingAudio = [];
 
+    /// <summary>Quién ejecuta lo que el servidor pide. Sin esto, la sesión conversa y nada más.</summary>
+    private readonly ILiveToolBridge? _tools;
+
+    /// <summary>
+    /// Las llamadas que el servidor canceló mientras corrían.
+    /// </summary>
+    /// <remarks>
+    /// Se anotan del lado del que lee y se consultan del lado del que ejecuta, que son dos hilos
+    /// distintos: por eso el candado. No crece sin límite porque cada id se saca al mirarlo, y las
+    /// que sobren se van con la sesión.
+    /// </remarks>
+    private readonly HashSet<string> _cancelledToolCalls = new(StringComparer.Ordinal);
+    private readonly Lock _toolGate = new();
+
     private ILiveTransport? _transport;
     private CancellationTokenSource? _lifetime;
     private Task? _readLoop;
@@ -57,16 +77,22 @@ public sealed class GeminiLiveClient : IAsyncDisposable
     /// Con qué se conecta. Se deja abierto para poder probar el comportamiento sin red; en
     /// producción es <see cref="WebSocketLiveTransport"/>.
     /// </param>
+    /// <param name="tools">
+    /// Las manos de la sesión. Sin esto no se declara ninguna herramienta y la sesión conversa y
+    /// nada más, que es como nació este cliente.
+    /// </param>
     public GeminiLiveClient(
         GeminiLiveOptions options,
         Func<string?> apiKey,
         ILiveAudioSink audioSink,
-        Func<ILiveTransport>? transportFactory = null)
+        Func<ILiveTransport>? transportFactory = null,
+        ILiveToolBridge? tools = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _sink = audioSink ?? throw new ArgumentNullException(nameof(audioSink));
         _transportFactory = transportFactory ?? (() => new WebSocketLiveTransport());
+        _tools = tools;
     }
 
     /// <summary>Hay clave y la sesión en vivo está encendida por configuración.</summary>
@@ -116,6 +142,9 @@ public sealed class GeminiLiveClient : IAsyncDisposable
 
     /// <summary>Algo salió mal.</summary>
     public event EventHandler<LiveFailureEventArgs>? Failed;
+
+    /// <summary>Arrancó o terminó una herramienta pedida por el servidor.</summary>
+    public event EventHandler<LiveToolEventArgs>? ToolActivity;
 
     /// <summary>
     /// Abre la sesión y deja andando el bucle de lectura.
@@ -327,6 +356,11 @@ public sealed class GeminiLiveClient : IAsyncDisposable
         _sink.Flush();
         _turns.Reset();
 
+        lock (_toolGate)
+        {
+            _cancelledToolCalls.Clear();
+        }
+
         // El handle de reanudación se tira acá y sólo acá.
         //
         // Sirve para que un corte de transporte —el goAway del servidor— no le haga perder el hilo
@@ -374,8 +408,14 @@ public sealed class GeminiLiveClient : IAsyncDisposable
         try
         {
             await transport.ConnectAsync(LiveEndpoint.Build(key), cancellationToken).ConfigureAwait(false);
+
+            // Las herramientas se preguntan en cada conexión y no una sola vez al armar el cliente:
+            // el setup se manda una vez por conexión y es el único momento en que se pueden declarar,
+            // así que lo que haya cambiado entre una charla y otra entra acá o no entra nunca.
             await transport
-                .SendAsync(LiveClientMessages.BuildSetup(_options, _resumptionHandle), cancellationToken)
+                .SendAsync(
+                    LiveClientMessages.BuildSetup(_options, _resumptionHandle, _tools?.Declarations),
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             using var handshake = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -566,11 +606,118 @@ public sealed class GeminiLiveClient : IAsyncDisposable
             Raise(TurnStateChanged, new LiveTurnStateChangedEventArgs(transition.Previous, transition.Current));
         }
 
+        if (serverEvent.CancelledToolCalls.Count > 0)
+        {
+            lock (_toolGate)
+            {
+                foreach (var id in serverEvent.CancelledToolCalls)
+                {
+                    _cancelledToolCalls.Add(id);
+                }
+            }
+        }
+
+        if (serverEvent.FunctionCalls.Count > 0)
+        {
+            DispatchToolCalls(serverEvent.FunctionCalls, cancellationToken);
+        }
+
         if (serverEvent.GoAwayTimeLeft is not null)
         {
             // No se reconecta acá aunque el aviso llegue en el medio de una frase: cortar para
             // reconectar se oye peor que aprovechar el margen que el propio servidor está dando.
             _reconnectWhenIdle = true;
+        }
+    }
+
+    /// <summary>
+    /// Ejecuta lo que el servidor pidió y le devuelve el resultado.
+    /// </summary>
+    /// <remarks>
+    /// Sale por una tarea aparte y esto no es prolijidad: quien llama es el bucle de lectura, que es
+    /// el mismo que trae el <c>interrupted</c>. Abrir una aplicación tarda un segundo largo, y
+    /// esperarla adentro del bucle es quedarse sordo justo mientras la persona podría estar
+    /// hablándole encima.
+    /// <para>
+    /// Las llamadas se ejecutan <b>en orden</b> y no en paralelo. Cuando el modelo pide dos cosas
+    /// juntas suelen depender una de la otra —abrir la ventana y después escribir en ella—, y
+    /// largarlas a la vez las mezcla.
+    /// </para>
+    /// <para>
+    /// Se contesta siempre, incluso cuando falla. El servidor no cierra el turno hasta recibir la
+    /// respuesta: una llamada sin contestar no se ve como un error sino como que se quedó muda a
+    /// mitad de frase.
+    /// </para>
+    /// </remarks>
+    private void DispatchToolCalls(IReadOnlyList<LiveFunctionCall> calls, CancellationToken cancellationToken)
+    {
+        _ = Task.Run(
+            async () =>
+            {
+                var responses = new List<LiveFunctionResponse>(calls.Count);
+
+                foreach (var call in calls)
+                {
+                    if (WasCancelled(call.Id))
+                    {
+                        continue;
+                    }
+
+                    Raise(ToolActivity, new LiveToolEventArgs(call.Name, finished: false, succeeded: false, null));
+
+                    LiveToolOutcome outcome;
+                    try
+                    {
+                        outcome = _tools is null
+                            ? LiveToolOutcome.Failed("No tengo esa herramienta conectada en la sesión hablada.")
+                            : await _tools.InvokeAsync(call, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // La charla se cerró mientras la herramienta corría. No hay a quién
+                        // contestarle y el resto del lote ya no tiene sentido.
+                        return;
+                    }
+                    catch (Exception exception)
+                    {
+                        // El texto del error no viaja al modelo: puede llevar rutas de esta máquina.
+                        LastFailure = $"Una herramienta de la sesión hablada falló ({exception.GetType().Name}).";
+                        outcome = LiveToolOutcome.Failed("La herramienta no pudo completar la operación.");
+                    }
+
+                    Raise(ToolActivity, new LiveToolEventArgs(
+                        call.Name,
+                        finished: true,
+                        outcome.Succeeded,
+                        outcome.Message));
+
+                    // Se vuelve a mirar recién ahora porque la cancelación llega mientras corría.
+                    if (!WasCancelled(call.Id))
+                    {
+                        responses.Add(new LiveFunctionResponse(call.Id, call.Name, outcome));
+                    }
+                }
+
+                if (responses.Count > 0)
+                {
+                    await SendRawAsync(LiveClientMessages.BuildToolResponse(responses), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            },
+            CancellationToken.None);
+    }
+
+    /// <summary>Si el servidor canceló esta llamada. La saca al mirarla: se pregunta una vez por id.</summary>
+    private bool WasCancelled(string id)
+    {
+        if (string.IsNullOrEmpty(id))
+        {
+            return false;
+        }
+
+        lock (_toolGate)
+        {
+            return _cancelledToolCalls.Remove(id);
         }
     }
 

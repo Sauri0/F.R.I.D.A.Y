@@ -223,6 +223,7 @@ voz.camino           siempre · falta la clave de Google
 vivo.abierta
 vivo.momento         Listening → Speaking
 vivo.caida           Se cortó la sesión en vivo y no pude reconectar.
+vivo.microfono.eco   eco=812 bloques · encima=2 · nivel=0,312 listón=0,530 · tarde=0
 vivo.cerrada         Conversación cerrada
 ```
 
@@ -240,6 +241,23 @@ La sesión sabe cuatro momentos y sólo cuatro; el resto de lo que dibuja el orb
 | interrumpida | `Interrupted` | `serverContent.interrupted` |
 
 **«Pensando» no lo manda el servidor.** Entre que el servidor da por cerrada tu frase y el primer bloque de voz de la respuesta no hay ningún mensaje en el protocolo. Ese momento lo pone el detector de voz local —el mismo modelo entrenado que usa el oído continuo— cuando ve que dejaste de hablar y el turno sigue en reposo.
+
+### Su propia voz no la interrumpe
+
+El micrófono queda abierto mientras Viernes habla —es lo único que permite cortarla—, y eso trae un problema que no se ve leyendo el código: su voz sale por los parlantes, vuelve por el micrófono y sube a Gemini. El detector de voz **del servidor** no tiene forma de saber que esa voz es la suya, así que la toma por vos, manda `interrupted` y corta el turno. El turno siguiente vuelve a sonar, vuelve a entrar y vuelve a cortarse.
+
+Pasó, y en la bitácora se ve así: quince vueltas de `Listening → Thinking → Speaking → Interrupted` en cuarenta y ocho segundos. Desde afuera se ve como que se cuelga, contesta a medias y corta frases.
+
+Quien lo evita es `LiveEchoGate`. Mientras esté saliendo voz por los parlantes, un bloque del micrófono sube sólo si el detector local dice que es voz **y** suena bastante más fuerte que el eco:
+
+- **El listón se mide, no está escrito.** Cuánto se atenúa el eco depende del volumen, del cuarto y de dónde está el micrófono, así que un número fijo estaría calibrado contra otro equipo. Mientras ella habla y nadie la interrumpe, todo lo que entra *es* el eco: de ahí sale la referencia, y el listón es 1,7 veces esa referencia —unos 9 dB.
+- **Hace falta sostenerlo.** Ochenta milisegundos seguidos por encima del listón. Un pico suelto del arranque de una sílaba suya no alcanza; una persona hablando, sí.
+- **No se pierde el arranque de la palabra.** La bomba guarda los últimos 300 ms frenados y los suelta cuando confirma que hay alguien hablando, así que al servidor le llega la frase desde su primera sílaba.
+- **Arranca desconfiada.** Sin medición todavía, el listón parte alto y baja hacia lo medido en el primer segundo de la primera respuesta. De los dos errores posibles, el caro es quedarse corto.
+
+**Lo que cuesta:** para cortarla hay que hablarle con voz normal, no en susurro. Esto esquiva el eco, no lo cancela: si los parlantes están muy fuertes o el micrófono está apoyado contra ellos, el eco llega tan alto como una persona y algo se va a colar. La solución completa es cancelación de eco de verdad —restar la señal que se está reproduciendo—, que es bastante más trabajo y todavía no está.
+
+En la traza, al cerrar la conversación, queda `vivo.microfono.eco`: cuántos bloques se frenaron por ser eco, cuántas veces alguien le habló encima, y el nivel y el listón con los que terminó. Si «eco» es cero después de una charla en la que ella habló, la compuerta no está frenando nada.
 
 ### Cuándo se cae al camino de siempre
 

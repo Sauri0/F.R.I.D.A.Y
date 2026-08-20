@@ -16,6 +16,7 @@ internal sealed class TrayIconService : IDisposable
     private readonly Forms.ToolStripMenuItem _autoStartItem;
     private readonly Forms.ToolStripMenuItem _gotaItem;
     private readonly Forms.ToolStripMenuItem _nubeItem;
+    private readonly IReadOnlyList<(double Scale, Forms.ToolStripMenuItem Item)> _scaleItems;
     private readonly Forms.ToolStripMenuItem _nameItem;
     private readonly Forms.ToolStripMenuItem _exitItem;
     private readonly Icon _icon;
@@ -34,6 +35,7 @@ internal sealed class TrayIconService : IDisposable
         Action toggleListenWhileHidden,
         Action toggleAutoStart,
         Action<string> chooseShape,
+        Action<double> chooseScale,
         Action changeName,
         Action changeKeys,
         Action exit)
@@ -43,6 +45,23 @@ internal sealed class TrayIconService : IDisposable
         _nubeItem = new Forms.ToolStripMenuItem("Nube", null, (_, _) => chooseShape("Nube"));
         var shapeMenu = new Forms.ToolStripMenuItem("Cómo se ve");
         shapeMenu.DropDownItems.AddRange([_gotaItem, _nubeItem]);
+
+        // Acá van seis tamaños con nombre y no la barra que tiene el menú del orbe, y es a propósito:
+        // esta puerta es la que se usa con el orbe guardado en la bandeja, o sea sin nada en pantalla
+        // que se pueda ver crecer. Una barra sin nada que mirar es una barra a medias; una lista de
+        // tamaños se elige con lo que uno ya sabe —«ponelo en la mitad»— y dice cuál está puesto.
+        var scaleSteps = new[] { 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 };
+        var scaleItems = new List<(double, Forms.ToolStripMenuItem)>(scaleSteps.Length);
+        var scaleMenu = new Forms.ToolStripMenuItem("Qué tamaño tengo");
+        foreach (var step in scaleSteps)
+        {
+            var salto = step;
+            var item = new Forms.ToolStripMenuItem($"{salto * 100:0} %", null, (_, _) => chooseScale(salto));
+            scaleItems.Add((salto, item));
+            scaleMenu.DropDownItems.Add(item);
+        }
+
+        _scaleItems = scaleItems;
 
         _icon = CreateIcon();
         _showItem = new Forms.ToolStripMenuItem("Ocultar widget", null, (_, _) => toggleVisibility());
@@ -64,6 +83,7 @@ internal sealed class TrayIconService : IDisposable
             _showItem,
             new Forms.ToolStripSeparator(),
             shapeMenu,
+            scaleMenu,
             _nameItem,
             keysItem,
             new Forms.ToolStripSeparator(),
@@ -115,6 +135,22 @@ internal sealed class TrayIconService : IDisposable
         var isNube = string.Equals(shape, "Nube", StringComparison.OrdinalIgnoreCase);
         _gotaItem.Checked = !isNube;
         _nubeItem.Checked = isNube;
+    }
+
+    /// <summary>
+    /// Marca el tamaño puesto, o ninguno si viene de la barra y cayó entre dos.
+    /// </summary>
+    /// <remarks>
+    /// Media unidad porcentual de tolerancia: la barra del orbe va de a 5 %, así que un 125 elegido
+    /// allá tiene que encontrarse marcado acá, y un 135 no tiene que marcar nada. Marcar el más
+    /// cercano sería mentir sobre lo que está puesto.
+    /// </remarks>
+    public void SetOrbScale(double scale)
+    {
+        foreach (var (step, item) in _scaleItems)
+        {
+            item.Checked = Math.Abs(step - scale) < 0.005;
+        }
     }
 
     public void SetAutoStart(bool enabled) => _autoStartItem.Checked = enabled;

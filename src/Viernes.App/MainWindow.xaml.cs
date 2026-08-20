@@ -11,6 +11,7 @@ using Viernes.App.Controls;
 using Viernes.App.Services;
 using Viernes.App.Shell;
 using Viernes.App.ViewModels;
+using Viernes.Core.Configuration;
 using Binding = System.Windows.Data.Binding;
 
 // El proyecto arrastra WinForms por la bandeja y los monitores, así que el menú existe dos veces.
@@ -220,11 +221,6 @@ public partial class MainWindow : Window
         _placementStore = placementStore;
         DataContext = viewModel;
 
-        Width = ShellLayout.WindowWidth;
-        Height = ShellLayout.WindowHeight;
-        Stage.Width = ShellLayout.WindowWidth;
-        Stage.Height = ShellLayout.WindowHeight;
-
         SpendHoldHost.Content = _spendHold;
         _spendHold.Authorized += (_, _) => _viewModel.ClosePanel();
 
@@ -234,8 +230,12 @@ public partial class MainWindow : Window
             new Binding(nameof(MainViewModel.IsStatePillSuppressed)) { Source = _viewModel });
 
         ApplyOrbShape(viewModel.OrbShape);
+
+        // Antes de ApplySide: el lado coloca las cosas en la ventana con las medidas que esto deja
+        // puestas, y el tamaño elegido puede no ser el de fábrica —la preferencia llega en
+        // InitializeAsync, pero una ventana rehecha en la misma sesión la encuentra ya aplicada—.
+        ApplyOrbMetrics();
         ApplySide(opensRight: true, force: true);
-        MeasurePillSlack();
         BuildOrbMenu();
 
         // Los tres se sueltan en Window_Closed. El ViewModel vive más que la ventana —lo crea la
@@ -303,8 +303,18 @@ public partial class MainWindow : Window
         // La marca se refresca al abrir el menú y no una sola vez al armarlo: la preferencia se lee
         // del archivo después de que esto corre —InitializeAsync llega más tarde—, así que un tilde
         // puesto acá diría lo de fábrica para siempre.
-        menu.Opened += (_, _) => RefreshFollowItems();
+        menu.Opened += (_, _) =>
+        {
+            RefreshFollowItems();
+            RefreshScaleSlider();
+        };
 
+        // Al cerrarse se guarda lo que haya quedado sin guardar: soltar la perilla ya guarda, pero
+        // las flechas del teclado y un clic en la barra no pasan por ahí.
+        menu.Closed += (_, _) => SaveOrbScale();
+
+        AddSeparator(menu);
+        AddScaleSlider(menu);
         AddSeparator(menu);
 
         // El nombre no es decoración: es la palabra con la que se lo despierta. Se pidió que se
@@ -327,6 +337,129 @@ public partial class MainWindow : Window
     /// <summary>Las dos claves, para ponerlas o cambiarlas sin abrir un archivo.</summary>
     private void ShowClavesDialog() =>
         new Shell.ClavesDialog(_viewModel) { Owner = this }.ShowDialog();
+
+    private Slider? _scaleSlider;
+    private TextBlock? _scaleReadout;
+
+    /// <summary>
+    /// La barra que elige cuánto mide el orbe, adentro del menú del botón derecho.
+    /// </summary>
+    /// <remarks>
+    /// Una barra y no una lista de tamaños porque lo que se elige acá no tiene nombre: se elige
+    /// mirando. Un <c>ContextMenu</c> de WPF puede tener un <c>Slider</c> adentro de un
+    /// <c>MenuItem</c>, y con <c>StaysOpenOnClick</c> el menú no se cierra al agarrar la perilla:
+    /// mientras se arrastra, el orbe de atrás cambia de tamaño en vivo, que es todo el sentido de
+    /// que sea una barra y no un número.
+    /// <para>
+    /// El porcentaje se escribe al lado en números porque «un poco más grande» no se puede repetir
+    /// ni contar: con el número, alguien puede decir «lo tengo en 140» y volver a ese lugar.
+    /// </para>
+    /// <para>
+    /// Va en pasos de 5 % —<c>IsSnapToTickEnabled</c>— para que el valor sea un número que se pueda
+    /// decir y para que el archivo no termine con 137,4183.
+    /// </para>
+    /// </remarks>
+    private void AddScaleSlider(ContextMenu menu)
+    {
+        _scaleSlider = new Slider
+        {
+            Style = (Style)FindResource("BarraDelMenu"),
+            Minimum = OrbScaleRange.Minimum * 100,
+            Maximum = OrbScaleRange.Maximum * 100,
+            SmallChange = 5,
+            LargeChange = 25,
+            TickFrequency = 5,
+            IsSnapToTickEnabled = true,
+            Width = 132,
+            VerticalAlignment = VerticalAlignment.Center,
+            Value = ShellLayout.Scale * 100
+        };
+
+        _scaleReadout = new TextBlock
+        {
+            Style = (Style)FindResource("Dato"),
+            Width = 44,
+            Margin = new Thickness(10, 0, 0, 0),
+            TextAlignment = TextAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var fila = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        fila.Children.Add(new TextBlock
+        {
+            Text = "Mi tamaño",
+            Width = 74,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        fila.Children.Add(_scaleSlider);
+        fila.Children.Add(_scaleReadout);
+
+        // Se ve mientras se arrastra: cada paso de la barra reacomoda la ventana y el cuerpo, sin
+        // tocar el disco. Lo que se guarda se guarda al soltar.
+        _scaleSlider.ValueChanged += (_, e) =>
+        {
+            ApplyOrbScale(e.NewValue / 100);
+            ShowScaleReadout();
+        };
+
+        // Soltar la perilla es el gesto terminado. El evento del Thumb y no el ValueChanged: ése
+        // llega una vez por paso, y guardar en cada paso serían cien escrituras por gesto.
+        _scaleSlider.AddHandler(
+            System.Windows.Controls.Primitives.Thumb.DragCompletedEvent,
+            new System.Windows.Controls.Primitives.DragCompletedEventHandler((_, _) => SaveOrbScale()));
+
+        var item = new MenuItem
+        {
+            Style = (Style)FindResource("ItemDelMenu"),
+            Header = fila,
+
+            // Sin esto, el clic con el que se agarra la perilla cierra el menú y el gesto termina
+            // antes de empezar.
+            StaysOpenOnClick = true
+        };
+
+        menu.Items.Add(item);
+        ShowScaleReadout();
+    }
+
+    private void ShowScaleReadout()
+    {
+        if (_scaleReadout is not null)
+        {
+            _scaleReadout.Text = $"{ShellLayout.Scale * 100:0} %";
+        }
+    }
+
+    /// <summary>Deja la barra diciendo el tamaño que hay puesto, que puede venir del archivo.</summary>
+    private void RefreshScaleSlider()
+    {
+        if (_scaleSlider is not null)
+        {
+            _scaleSlider.Value = ShellLayout.Scale * 100;
+        }
+
+        ShowScaleReadout();
+    }
+
+    /// <summary>
+    /// Escribe el tamaño elegido en las preferencias. Una vez por gesto, no una por paso.
+    /// </summary>
+    /// <remarks>
+    /// El runtime descarta el pedido si el valor no cambió, así que llamarlo al soltar y otra vez al
+    /// cerrar el menú no escribe dos veces.
+    /// </remarks>
+    private void SaveOrbScale()
+    {
+        // Nada de async void en un manejador: se lanza y se le miran las fallas por continuación,
+        // igual que el seguimiento entre pantallas.
+        _ = _viewModel.SetOrbScaleAsync(ShellLayout.Scale, CancellationToken.None)
+            .ContinueWith(
+                task => System.Diagnostics.Debug.WriteLine(
+                    $"No se pudo guardar el tamaño: {task.Exception?.GetType().Name}"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.FromCurrentSynchronizationContext());
+    }
 
     private void RefreshFollowItems()
     {
@@ -456,8 +589,8 @@ public partial class MainWindow : Window
     /// Le abre a la píldora el ancho que necesita, en una celda que mide lo que mide el orbe.
     /// </summary>
     /// <remarks>
-    /// El contenedor de la píldora mide 108 —lo que mide el orbe, que es a lo que tiene que seguir—
-    /// y las etiquetas largas miden bastante más. Cuando un hijo pide más ancho que su lugar, WPF le
+    /// El contenedor de la píldora mide lo que mide el orbe —que es a lo que tiene que seguir— y las
+    /// etiquetas largas miden bastante más. Cuando un hijo pide más ancho que su lugar, WPF le
     /// pone un clip de layout: la píldora sale cortada, y justo la etiqueta más larga es la que más
     /// importa que se lea. El margen lateral negativo ensancha el lugar sin mover el centro.
     /// <para>
@@ -473,6 +606,121 @@ public partial class MainWindow : Window
         Pill.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         var slack = Math.Max(0, (Pill.DesiredSize.Width - ShellLayout.OrbSize) / 2);
         Pill.Margin = new Thickness(-slack, PillTop, -slack, 0);
+    }
+
+    /// <summary>
+    /// Qué parte del orbe recibe el toque: 76 sobre 108, del boceto.
+    /// </summary>
+    /// <remarks>
+    /// Se guarda como proporción y no como 76 px porque el círculo que recibe el clic tiene que
+    /// crecer con el cuerpo. Con 76 fijos, un orbe al 200 % se dejaría tocar sólo por el centro y el
+    /// resto del cuerpo —la mitad de su superficie— sería decoración.
+    /// </remarks>
+    private const double TouchShare = 76.0 / ShellLayout.DefaultOrbSize;
+
+    /// <summary>Aire entre la punta de la burbuja de dictado y el borde de arriba del orbe.</summary>
+    /// <remarks>Estaba escrito como un margen de 116 sobre un orbe de 108: ocho píxeles.</remarks>
+    private const double BubbleGap = 8;
+
+    /// <summary>El tamaño de orbe que está efectivamente dibujado. <c>NaN</c> hasta la primera vez.</summary>
+    private double _appliedScale = double.NaN;
+
+    /// <summary>
+    /// Pone en la ventana y en el orbe las medidas que salen del tamaño elegido.
+    /// </summary>
+    /// <remarks>
+    /// Lo único que cambia de tamaño es el orbe. Los desplegables, la píldora y la burbuja conservan
+    /// el suyo y su tipografía: lo único que se mueve de ellos es dónde arrancan respecto del orbe,
+    /// para que el solape de 8 px sea el mismo a cualquier escala.
+    /// <para>
+    /// El alto de la ventana no cambia nunca —el panel más alto le gana al orbe en todo el rango—,
+    /// pero el ancho sí, porque el alcance del panel sigue al orbe. Eso obliga a recolocar la
+    /// ventana, y de eso se encarga <see cref="ApplySide"/> con la posición del orbe, que es lo que
+    /// el usuario ve y lo único que tiene que quedarse quieto.
+    /// </para>
+    /// </remarks>
+    private void ApplyOrbMetrics()
+    {
+        var size = ShellLayout.OrbSize;
+
+        Width = ShellLayout.WindowWidth;
+        Height = ShellLayout.WindowHeight;
+        Stage.Width = ShellLayout.WindowWidth;
+        Stage.Height = ShellLayout.WindowHeight;
+
+        OrbDragSurface.Width = size;
+        OrbDragSurface.Height = size;
+        OrbOverlay.Width = size;
+        OrbOverlay.Height = size;
+        OrbButton.Width = size * TouchShare;
+        OrbButton.Height = size * TouchShare;
+
+        foreach (var body in OrbHost.Children.OfType<FrameworkElement>())
+        {
+            body.Width = size;
+            body.Height = size;
+        }
+
+        MeasurePillSlack();
+        _appliedScale = ShellLayout.Scale;
+    }
+
+    /// <summary>
+    /// Cambia el tamaño del orbe en vivo, dejándolo donde estaba.
+    /// </summary>
+    /// <remarks>
+    /// Lo que se conserva es el <b>centro</b>, no la esquina: un orbe que crece hacia abajo y a la
+    /// derecha se lee como un orbe que se movió. Y después se recorta contra el área útil ya medida
+    /// con el tamaño nuevo, porque un orbe que crece pegado a un borde tiene que entrar entero.
+    /// <para>
+    /// El escritorio medido se tira: sus celdas traen el alcance del orbe calculado con el tamaño
+    /// viejo, y el cuadro siguiente lo vuelve a medir solo.
+    /// </para>
+    /// <para>
+    /// Esto corre <b>mientras el menú está abierto</b>, y mover la ventana debajo de un menú abierto
+    /// da miedo por una razón concreta: si el menú siguiera a la ventana, la barra se correría bajo
+    /// el cursor y cada píxel de movimiento se leería como más arrastre —una realimentación que
+    /// mandaría la barra sola hasta el tope—. <b>Medido: no la sigue.</b> Un
+    /// <c>ContextMenu</c> se coloca en el punto del mouse una sola vez, al abrirse, y se queda en
+    /// coordenadas de pantalla aunque la ventana se ensanche y se corra debajo.
+    /// </para>
+    /// </remarks>
+    /// <param name="scale">El tamaño pedido, como fracción.</param>
+    /// <param name="keepCentre">
+    /// Si el orbe tiene que quedar centrado donde estaba. <b>Verdadero cuando lo cambia el usuario</b>
+    /// —crecer desde la esquina se lee como que el orbe se movió solo— y <b>falso al restaurar el
+    /// tamaño guardado</b>, donde nadie vio nada todavía y conservar la esquina es lo que evita que
+    /// la posición se corra.
+    /// </param>
+    /// <remarks>
+    /// La distinción no es estética: conservar el centro corre la esquina (108 − tamaño)/2, y la
+    /// esquina es lo que se guarda. Restaurando con el centro, cada arranque corría el orbe 54 px al
+    /// 200 % y lo guardaba corrido, así que al siguiente volvía a correrlo. Caminaba hasta el borde.
+    /// </remarks>
+    private void ApplyOrbScale(double scale, bool keepCentre = true)
+    {
+        var wanted = OrbScaleRange.Clamp(scale);
+        if (Math.Abs(_appliedScale - wanted) < 0.0005)
+        {
+            return;
+        }
+
+        var centre = OrbCentre();
+        var corner = _motion.Position;
+        ShellLayout.Scale = wanted;
+        ApplyOrbMetrics();
+        _field = null;
+
+        var workArea = CurrentWorkArea;
+        var bounds = ShellLayout.OrbBounds(workArea);
+        var size = ShellLayout.OrbSize;
+        _motion.Teleport(Clamp(
+            keepCentre ? new Point(centre.X - (size / 2), centre.Y - (size / 2)) : corner,
+            bounds));
+
+        // Con force: el lado puede no haber cambiado y las medidas sí, y es este método el que
+        // reparte las medidas nuevas por la ventana y la vuelve a colocar.
+        ApplySide(ShellLayout.ShouldOpenRight(_motion.Position, workArea), force: true);
     }
 
     /// <summary>
@@ -533,7 +781,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        var gota = new LiquidOrb();
+        // La gota trae 108 escritos en su XAML; el tamaño elegido se los pisa acá, igual que en la
+        // nube. Adentro dibuja sobre un lienzo de 70 unidades dentro de un Viewbox, así que crece
+        // sin perder un trazo.
+        var gota = new LiquidOrb { Width = ShellLayout.OrbSize, Height = ShellLayout.OrbSize };
         gota.SetBinding(LiquidOrb.StateProperty, new Binding(nameof(MainViewModel.State)) { Source = _viewModel });
         // No hay enlace de «micrófono armado»: eso ahora es un estado —guardia— y entra por State,
         // igual que los otros catorce y en los dos cuerpos.
@@ -1023,9 +1274,12 @@ public partial class MainWindow : Window
         // El brillo no se espeja: la luz viene del ambiente, no del panel. La burbuja sí, porque su
         // esquina chica es la que apunta al orbe.
         DictationBubble.HorizontalAlignment = opensRight ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        // La burbuja no cambia de tamaño con el orbe: lo único que la sigue es dónde apoya su punta,
+        // que son ocho píxeles por encima del borde de arriba del cuerpo.
+        var bubbleBottom = ShellLayout.OrbSize + BubbleGap;
         DictationBubble.Margin = opensRight
-            ? new Thickness(2, 0, 0, 116)
-            : new Thickness(0, 0, 2, 116);
+            ? new Thickness(2, 0, 0, bubbleBottom)
+            : new Thickness(0, 0, 2, bubbleBottom);
         DictationBubble.CornerRadius = opensRight
             ? new CornerRadius(20, 20, 20, 7)
             : new CornerRadius(20, 20, 7, 20);
@@ -1861,6 +2115,19 @@ public partial class MainWindow : Window
         else if (e.PropertyName == nameof(MainViewModel.OrbShape))
         {
             ApplyOrbShape(_viewModel.OrbShape);
+        }
+        else if (e.PropertyName == nameof(MainViewModel.OrbScale))
+        {
+            // Por acá entra el elegido desde la bandeja, y también el guardado si por algún motivo
+            // no se alcanzó a leer antes de construir la ventana —App lo lee ahí justamente para que
+            // esto no pase—. Lo que viene de la barra ya está aplicado: ApplyOrbScale se va solo si
+            // el tamaño no cambió.
+            //
+            // keepCentre queda en verdadero porque acá el orbe ya está en pantalla y quien cambia el
+            // tamaño lo está mirando. El caso de restaurar sin que nadie haya visto nada lo resuelve
+            // App poniendo la escala antes de que la ventana exista.
+            ApplyOrbScale(_viewModel.OrbScale);
+            RefreshScaleSlider();
         }
         else if (e.PropertyName == nameof(MainViewModel.FollowsActiveMonitor))
         {
