@@ -79,35 +79,6 @@ public sealed class LiveEchoGate
     private const double Margin = 1.7;
 
     /// <summary>
-    /// Cuánto dura la ventana en la que la referencia puede SUBIR, contada desde que ella arranca a
-    /// hablar.
-    /// </summary>
-    /// <remarks>
-    /// <b>Ésta es la corrección de fondo, y sin ella la compuerta se vuelve sorda sola.</b> La
-    /// primera versión dejaba que la referencia aprendiera de cualquier bloque que no cruzara el
-    /// listón. El problema es que una voz humana que quede por debajo del listón <em>tampoco</em>
-    /// cruza, así que la referencia se la comía como si fuera eco y el listón saltaba por encima de
-    /// quien estaba intentando interrumpir: cuanto más te esforzabas, más alto se ponía la vara.
-    /// <para>
-    /// Y al revés: si el eco entraba de entrada por encima del listón, ningún bloque de eco volvía a
-    /// alimentar la referencia —porque todos cruzaban— y la compuerta quedaba abierta el resto de la
-    /// respuesta, o sea apagada justo cuando hacía falta.
-    /// </para>
-    /// <para>
-    /// La ventana resuelve las dos: <b>en el arranque de su turno lo único que puede sonar es ella</b>
-    /// —la persona todavía no llegó a reaccionar— así que ahí se mide sin condiciones y la referencia
-    /// alcanza al eco por alto que venga. Pasada la ventana, la referencia sólo baja.
-    /// </para>
-    /// <para>
-    /// <b>Lo que cuesta</b>, dicho acá: si alguien la corta dentro de estos primeros 450 ms, su voz
-    /// entra en la medición y el listón de esa respuesta queda más alto de lo que debería. Esa
-    /// respuesta puede quedarle sorda. Es el precio de no tener cancelación de eco de verdad, y es
-    /// mucho más barato que interrumpirse sola en bucle.
-    /// </para>
-    /// </remarks>
-    private static readonly TimeSpan MeasuringWindow = TimeSpan.FromMilliseconds(450);
-
-    /// <summary>
     /// Cuánto puede frenar seguido antes de rendirse y dejar pasar todo.
     /// </summary>
     /// <remarks>
@@ -130,6 +101,59 @@ public sealed class LiveEchoGate
     /// </para>
     /// </remarks>
     private static readonly TimeSpan GiveUp = TimeSpan.FromSeconds(30);
+
+    /// <summary>Cuántas muestras hacen falta antes de creerle al percentil.</summary>
+    /// <remarks>
+    /// Doce bloques son unos 240 ms de ella hablando. Menos que eso y el percentil lo decide un
+    /// puñado de muestras, que es como no tenerlo.
+    /// </remarks>
+    private const int MinimumSamples = 12;
+
+    /// <summary>
+    /// Qué percentil de lo que entra mientras ella habla se toma como nivel del eco.
+    /// </summary>
+    /// <remarks>
+    /// <b>Un percentil y no el pico de una ventana, y hay cuatro mediciones reales que explican por
+    /// qué.</b> La versión anterior medía el pico de los primeros 450 ms de cada respuesta, y en la
+    /// bitácora del usuario quedó así:
+    /// <code>
+    ///   eco=148  · nivel=0,450  listón=0,765  encima=1
+    ///   eco=123  · nivel=1,000  listón=0,850  encima=1
+    ///   eco=0    · nivel=0,450  listón=0,765  encima=0
+    ///   eco=2041 · nivel=0,450  listón=0,765  encima=0
+    /// </code>
+    /// <para>
+    /// El 0,450 es el valor de fábrica: la ventana <b>no midió nada</b>. Pasa porque el eco no llega
+    /// al micrófono en el mismo instante en que arranca el parlante —hay que sumarle el camino por el
+    /// cuarto— así que la ventana se cerraba mirando silencio. El 1,000 es el otro extremo: un solo
+    /// bloque saturado adentro de la ventana y el listón se iba al tope.
+    /// </para>
+    /// <para>
+    /// Las dos fallas se ven igual desde afuera: el listón queda muy alto y no se la puede
+    /// interrumpir. Los 2041 bloques frenados con <c>encima=0</c> son cuarenta y un segundos en los
+    /// que el usuario no logró cortarla ni una vez, y es exactamente lo que reportó.
+    /// </para>
+    /// <para>
+    /// El percentil arregla las dos: no se queda sin muestras porque toma todo lo que entra mientras
+    /// ella habla, y no se lo lleva un pico porque un bloque saturado es una muestra entre cientos.
+    /// Se toma el 75 y no la mediana para quedar del lado seguro: el eco tiene picos, y quedarse en el
+    /// medio dejaría pasar la mitad de ellos.
+    /// </para>
+    /// </remarks>
+    private const double EchoPercentile = 0.50;
+
+    /// <summary>En cuántos escalones se reparte el nivel para sacarle un percentil barato.</summary>
+    private const int Steps = 64;
+
+    /// <summary>
+    /// Por debajo de esto no baja la referencia, por bien que haya medido.
+    /// </summary>
+    /// <remarks>
+    /// Una medición hecha casi toda de silencio daría un listón al ras del ruido del cuarto, y ahí
+    /// cualquier suspiro la cortaría. Sale del perfil del banco de este equipo, donde el ruido de
+    /// cuarto midió 0,11.
+    /// </remarks>
+    private const double SeedFloor = 0.16;
 
     /// <summary>
     /// Con qué referencia arranca, antes de haber medido nada.
@@ -203,23 +227,27 @@ public sealed class LiveEchoGate
     /// </remarks>
     private static readonly TimeSpan EchoHalfLife = TimeSpan.FromMilliseconds(700);
 
-    private double _echo = SeedLevel;
     private TimeSpan _hangover;
-
-    /// <summary>Lo que queda de la ventana de medición. Ver <see cref="MeasuringWindow"/>.</summary>
-    private TimeSpan _measuring;
 
     /// <summary>Cuánto lleva frenando seguido. Ver <see cref="GiveUp"/>.</summary>
     private TimeSpan _holding;
 
-    /// <summary>El pico que va midiendo esta ventana. Se compromete a la referencia al cerrarse.</summary>
+    /// <summary>
+    /// Cuántas veces cayó el nivel en cada escalón, contando sólo bloques con forma de voz.
+    /// </summary>
     /// <remarks>
-    /// Se acumula aparte y no sobre la referencia porque durante la ventana hay que <b>seguir
-    /// decidiendo</b>, y decidir con una referencia a medio medir dejaría pasar el eco justo mientras
-    /// se lo está midiendo. Adentro de la ventana manda la medición anterior; recién al cerrarse se
-    /// reemplaza.
+    /// Un histograma y no una lista de muestras: el percentil se pide una vez por bloque —cincuenta
+    /// veces por segundo— y ordenar miles de números cada vez sería trabajo por nada. Con 64
+    /// escalones el nivel se resuelve con precisión de 0,016, mucho más fina que cualquier decisión
+    /// que se tome con él.
     /// </remarks>
-    private double _windowPeak;
+    private readonly int[] _steps = new int[Steps];
+
+    private int _samples;
+
+    /// <summary>El pico visto, para los primeros bloques en que todavía no hay percentil.</summary>
+    private double _peak;
+
     private TimeSpan _run;
     private bool _open;
 
@@ -231,29 +259,20 @@ public sealed class LiveEchoGate
     /// </remarks>
     public bool GaveUp { get; private set; }
 
-    /// <summary>Nivel de eco que tiene medido ahora mismo. Para la bitácora y las pruebas.</summary>
+    /// <summary>
+    /// Nivel de eco que tiene medido ahora mismo. Para la bitácora y las pruebas.
+    /// </summary>
     /// <remarks>
-    /// Incluye lo que va midiendo la ventana en curso: si no, durante la medición este número diría
-    /// la referencia de la respuesta anterior y quien lo mire desde afuera —la bitácora, una prueba—
-    /// creería que la compuerta no se enteró del eco de ahora.
+    /// Con pocas muestras contesta el pico, que es pesimista y por lo tanto seguro; con suficientes,
+    /// el percentil. Nunca baja del arranque de fábrica: una medición hecha con silencio no puede
+    /// dejar el listón al ras del ruido del cuarto.
     /// </remarks>
-    public double EchoLevel => Math.Max(_echo, _windowPeak);
+    public double EchoLevel => _samples < MinimumSamples
+        ? Math.Max(SeedLevel, _peak)
+        : Math.Max(SeedFloor, Percentil(EchoPercentile));
 
     /// <summary>Nivel que hay que superar ahora mismo para que se la pueda interrumpir.</summary>
-    /// <remarks>
-    /// <b>Mientras se está midiendo, el listón es el tope</b>, y no el de la respuesta anterior.
-    /// Durante la ventana la referencia todavía no vale: si el eco de hoy llega más fuerte que el de
-    /// la respuesta pasada, cruzaría el listón viejo y abriría la compuerta justo mientras se lo está
-    /// midiendo, dejándola abierta el resto de la respuesta por culpa del eco que venía a medir.
-    /// <para>
-    /// El tope no es bloquear: es exigir una voz claramente fuerte. Se la puede cortar desde el
-    /// primer bloque —hablándole con ganas— y el eco casi nunca llega ahí. Es el compromiso entre no
-    /// perder la interrupción temprana, que es cuando más se la usa, y no arruinar la medición.
-    /// </para>
-    /// </remarks>
-    public double Bar => _measuring > TimeSpan.Zero
-        ? MaximumBar
-        : Math.Min(_echo * Margin, MaximumBar);
+    public double Bar => Math.Min(EchoLevel * Margin, MaximumBar);
 
     /// <summary>Cuántas veces alguien le habló encima y la compuerta lo dejó pasar.</summary>
     public int Breakthroughs { get; private set; }
@@ -295,14 +314,6 @@ public sealed class LiveEchoGate
 
         if (speakerAudible)
         {
-            // El turno de ella arranca cuando el parlante pasa de callado a sonando. Ahí se abre la
-            // ventana de medición: es el único tramo en que se sabe que lo que entra es el eco.
-            if (_hangover <= TimeSpan.Zero)
-            {
-                _measuring = MeasuringWindow;
-                _windowPeak = 0;
-            }
-
             _hangover = Hangover;
         }
         else if (_hangover > TimeSpan.Zero)
@@ -343,25 +354,18 @@ public sealed class LiveEchoGate
             return LiveMicrophoneVerdict.Send;
         }
 
-        var measuring = _measuring > TimeSpan.Zero;
-        if (measuring)
+        // Se muestrea TODO lo que entra con forma de voz mientras ella habla, y de ahí sale el
+        // percentil. Incluye lo que diga la persona si habla encima: son unas pocas muestras entre
+        // cientos, y que un percentil no las persiga es justamente la propiedad por la que se eligió.
+        if (isVoice)
         {
-            if (isVoice && level > _windowPeak)
+            _steps[(int)Math.Clamp(level * (Steps - 1), 0, Steps - 1)]++;
+            _samples++;
+
+            if (level > _peak)
             {
-                _windowPeak = level;
+                _peak = level;
             }
-
-            _measuring -= blockDuration;
-
-            // Al cerrarse, lo medido REEMPLAZA a lo anterior en vez de sumarse. Así el listón baja
-            // en un equipo silencioso —donde el eco llega flojo y no hay por qué exigir un grito— y
-            // sube en uno ruidoso. Si la ventana no llegó a medir nada —ella arrancó con un silencio—
-            // se conserva lo de antes, que es mejor que quedarse sin referencia.
-            if (_measuring <= TimeSpan.Zero && _windowPeak > 0)
-            {
-                _echo = _windowPeak;
-            }
-
         }
 
         var crosses = isVoice && level >= Bar;
@@ -392,13 +396,38 @@ public sealed class LiveEchoGate
     /// corrido el micrófono, y una referencia vieja aplicada a un cuarto nuevo es peor que ninguna.
     /// Volver a medirla cuesta la primera respuesta.
     /// </remarks>
+    /// <summary>El nivel por debajo del cual cae esa fracción de lo medido.</summary>
+    /// <remarks>
+    /// Se recorre el histograma sumando hasta pasar la fracción pedida y se devuelve el centro de ese
+    /// escalón. Sesenta y cuatro sumas de enteros por bloque: nada al lado de lo que ya cuesta el
+    /// detector de voz que corrió sobre el mismo bloque.
+    /// </remarks>
+    private double Percentil(double fraccion)
+    {
+        var objetivo = _samples * fraccion;
+        var acumulado = 0;
+
+        for (var i = 0; i < Steps; i++)
+        {
+            acumulado += _steps[i];
+            if (acumulado >= objetivo)
+            {
+                return (i + 0.5) / (Steps - 1);
+            }
+        }
+
+        return 1;
+    }
+
     public void Reset()
     {
-        _echo = SeedLevel;
+        Array.Clear(_steps);
+        _samples = 0;
+        _peak = 0;
         _hangover = TimeSpan.Zero;
-        _measuring = TimeSpan.Zero;
-        _windowPeak = 0;
         _run = TimeSpan.Zero;
         _open = false;
+        _holding = TimeSpan.Zero;
+        GaveUp = false;
     }
 }
