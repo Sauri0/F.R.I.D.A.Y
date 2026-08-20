@@ -87,10 +87,11 @@ public static class BrainLearning
     /// Saca del texto los objetos que haya, venga como venga.
     /// </summary>
     /// <remarks>
-    /// Se busca desde el primer corchete hasta el último, que es lo que sobrevive a una frase
-    /// adelante y a un bloque de código alrededor. Si eso no es un arreglo válido se prueba con un
-    /// objeto suelto entre llaves: contestar una sola nota sin el arreglo es el error de formato más
-    /// común de todos.
+    /// Se prueban las dos formas y <b>la primera que dé algo gana</b>, que es lo que arregla el
+    /// defecto: antes, encontrar un arreglo hacía <c>return</c> aunque estuviera vacío, así que un
+    /// corchete suelto en una frase de cortesía —«te dejo [lo que aprendí]…»— se llevaba puestas
+    /// TODAS las notas de esa charla, sin dejar rastro, y el respaldo del objeto suelto —que el
+    /// comentario de al lado llama «el error de formato más común de todos»— nunca llegaba a correr.
     /// </remarks>
     private static IEnumerable<JsonElement> Leer(string? reply)
     {
@@ -99,47 +100,118 @@ public static class BrainLearning
             return [];
         }
 
-        if (Entre(reply, '[', ']') is { } arreglo &&
-            arreglo.RootElement.ValueKind == JsonValueKind.Array)
+        var delArreglo = DelArreglo(reply);
+        return delArreglo.Count > 0 ? delArreglo : DelObjeto(reply);
+    }
+
+    private static IReadOnlyList<JsonElement> DelArreglo(string reply)
+    {
+        if (Entre(reply, '[', ']') is not { } arreglo)
         {
-            using (arreglo)
-            {
-                return [.. arreglo.RootElement
+            return [];
+        }
+
+        using (arreglo)
+        {
+            return arreglo.RootElement.ValueKind != JsonValueKind.Array
+                ? []
+                : [.. arreglo.RootElement
                     .EnumerateArray()
                     .Where(item => item.ValueKind == JsonValueKind.Object)
                     .Select(item => item.Clone())];
-            }
         }
-
-        if (Entre(reply, '{', '}') is { } objeto &&
-            objeto.RootElement.ValueKind == JsonValueKind.Object)
-        {
-            using (objeto)
-            {
-                return [objeto.RootElement.Clone()];
-            }
-        }
-
-        return [];
     }
 
-    private static JsonDocument? Entre(string texto, char abre, char cierra)
+    private static IReadOnlyList<JsonElement> DelObjeto(string reply)
     {
-        var desde = texto.IndexOf(abre);
-        var hasta = texto.LastIndexOf(cierra);
-        if (desde < 0 || hasta <= desde)
+        if (Entre(reply, '{', '}') is not { } objeto)
         {
-            return null;
+            return [];
         }
 
-        try
+        using (objeto)
         {
-            return JsonDocument.Parse(texto[desde..(hasta + 1)]);
+            return objeto.RootElement.ValueKind != JsonValueKind.Object
+                ? []
+                : [objeto.RootElement.Clone()];
         }
-        catch (JsonException)
+    }
+
+    /// <summary>
+    /// El primer bloque balanceado que empiece con ese carácter, probando desde cada aparición.
+    /// </summary>
+    /// <remarks>
+    /// Del primero al último no sirve: un corchete de más en la prosa de alrededor mete texto que no
+    /// es JSON adentro del recorte y lo tira todo. Acá se prueba desde cada apertura y se corta en su
+    /// cierre balanceado, saltando lo que esté adentro de una cadena — que es donde viven los
+    /// corchetes que no cuentan, porque el cuerpo de una nota puede tener cualquier cosa escrita.
+    /// </remarks>
+    private static JsonDocument? Entre(string texto, char abre, char cierra)
+    {
+        for (var inicio = texto.IndexOf(abre); inicio >= 0; inicio = texto.IndexOf(abre, inicio + 1))
         {
-            return null;
+            if (Balanceado(texto, inicio, abre, cierra) is not { } fin)
+            {
+                continue;
+            }
+
+            try
+            {
+                return JsonDocument.Parse(texto[inicio..(fin + 1)]);
+            }
+            catch (JsonException)
+            {
+                // Ese bloque no era. Se sigue con la apertura siguiente.
+            }
         }
+
+        return null;
+    }
+
+    /// <summary>Dónde cierra el bloque que abre en <paramref name="inicio"/>, o nulo si no cierra.</summary>
+    private static int? Balanceado(string texto, int inicio, char abre, char cierra)
+    {
+        var nivel = 0;
+        var enCadena = false;
+        var escapado = false;
+
+        for (var i = inicio; i < texto.Length; i++)
+        {
+            var letra = texto[i];
+
+            if (enCadena)
+            {
+                if (escapado)
+                {
+                    escapado = false;
+                }
+                else if (letra == '\\')
+                {
+                    escapado = true;
+                }
+                else if (letra == '"')
+                {
+                    enCadena = false;
+                }
+
+                continue;
+            }
+
+            if (letra == '"')
+            {
+                enCadena = true;
+            }
+            else if (letra == abre)
+            {
+                nivel++;
+            }
+            else if (letra == cierra && --nivel == 0)
+            {
+                return i;
+            }
+        }
+
+        return null;
     }
 
     private static string Campo(JsonElement objeto, string nombre) =>

@@ -21,11 +21,16 @@ namespace Viernes.App.Services;
 /// apure, porque ahí, mientras habla, no hay nadie escuchando.
 /// </para>
 /// <para>
-/// <b>Hablando también tiene manos, pero menos.</b> El setup declara las tres herramientas de
-/// <see cref="LiveToolBridge"/> —manejar la computadora, anotar un recordatorio, llevar una misión—
-/// y el servidor las pide por <c>toolCall</c>; el resto del taller sigue siendo del camino escrito.
-/// Esa diferencia está dicha en la instrucción de sistema y tiene que seguir estándolo: si acá se
-/// agrega una herramienta y allá no se dice, la asistente sigue contestando que no puede.
+/// <b>Hablando tiene las mismas manos que por escrito.</b> El setup declara todo lo que tiene el
+/// ejecutor —lo integrado y lo que aporten los servidores conectados— más la búsqueda web, y el
+/// servidor las pide por <c>toolCall</c>. Eran tres de cuarenta y seis por un miedo que se midió y
+/// resultó infundado; lo que protege ahora no es una lista corta sino que un rechazo del setup se
+/// reintente con un piso conocido.
+/// <para>
+/// Dos excepciones, y las dos están dichas en la instrucción de sistema: mirar la pantalla —la
+/// imagen no tiene por dónde volver— y un comando de PowerShell arbitrario, que hablando lo escribe
+/// un reconocedor de voz y del otro lado no hay forma de confirmar nada. Si acá cambia lo que puede
+/// y allá no se dice, la asistente miente sobre sí misma en una de las dos direcciones.
 /// </para>
 /// </remarks>
 internal sealed partial class AssistantRuntime
@@ -186,9 +191,12 @@ internal sealed partial class AssistantRuntime
     /// ayer y no tener con qué retomarlo.
     /// </para>
     /// <para>
-    /// Van estas dos y no las cinco del otro camino: las reglas enseñadas y los permisos hablan del
-    /// taller entero —treinta herramientas—, y acá hay tres. Pagar en cada conexión los tokens de
-    /// instrucciones sobre cosas que hablando no puede hacer es pagar por confundirla.
+    /// <b>Van estas dos y no las cinco del otro camino, y ese recorte ya no tiene su motivo original.</b>
+    /// Decía que las reglas enseñadas y los permisos hablan del taller entero y que acá había tres
+    /// herramientas. Acá ahora están todas, así que el argumento se cayó: lo que falta —reglas, objetivos
+    /// y permisos— falta porque el anfitrión no tiene esos libros a mano, viven adentro de la fábrica del
+    /// núcleo, y traerlos hasta acá es cambiar la fábrica. Queda anotado como lo que falta, no como una
+    /// decisión.
     /// </para>
     /// <para>
     /// La fecha va sí o sí, y no es adorno: sin ella «recordame el martes» se resuelve contra la

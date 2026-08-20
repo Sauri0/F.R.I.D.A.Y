@@ -669,6 +669,17 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             "mcp.listo",
             $"servidores={servers.Count(server => server.Enabled)} · herramientas={tools.Count} · " +
             $"atados={atados}");
+
+        // Cero atados con servidores levantados es la falla silenciosa de todo esto: los procesos
+        // quedan huérfanos igual que antes y no hay ningún otro síntoma hasta que alguien cuenta los
+        // procesos meses después. Queda dicho con nombre y apellido.
+        if (atados == 0 && ejecutables.Count > 0)
+        {
+            RuntimeTrace.Write(
+                "mcp.sin.atar",
+                $"no reconocí el proceso de {string.Join(", ", ejecutables.Select(System.IO.Path.GetFileName))} · " +
+                "van a quedar huérfanos si Viernes no cierra bien");
+        }
     }
 
     /// <summary>

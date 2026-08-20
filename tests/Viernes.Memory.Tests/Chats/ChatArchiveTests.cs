@@ -174,8 +174,9 @@ public sealed class ChatArchiveTests : IDisposable
         Assert.DoesNotContain("hunter2sombrero", texto, StringComparison.Ordinal);
         Assert.Contains("credencial", texto, StringComparison.Ordinal);
 
-        // Y lo que no es la clave sigue estando: tapar no es tirar la charla.
-        Assert.Contains("guardá esta clave", texto, StringComparison.Ordinal);
+        // Y lo que no es la clave sigue estando: tapar no es tirar la charla. La etiqueta se va con
+        // el valor —«clave: X» se tapa entero— y eso es a propósito: prefiere tapar de más.
+        Assert.Contains("guardá esta", texto, StringComparison.Ordinal);
     }
 
     /// <summary>

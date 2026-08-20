@@ -265,9 +265,20 @@ Sin que el usuario tenga que hacer nada, y siempre con el motivo en la traza: si
 
 Después de una caída el camino nuevo queda trabado un rato y la espera crece con cada caída seguida, hasta media hora. Sin eso, «se cae al camino de siempre» duraría una conversación: la siguiente volvería a intentar y a esperar la conexión, y desde afuera eso no se ve como un servicio caído sino como un asistente que tarda de más cada vez que le hablás.
 
+### Herramientas
+
+El `setup` declara **todo lo que tiene el ejecutor** —lo integrado y lo que aporten los servidores MCP conectados— más la búsqueda web de Google. Hablando se abre una aplicación, se lee y se escribe un archivo, se anota un recordatorio y se busca en internet, igual que por escrito.
+
+No siempre fue así: declaraba tres de cuarenta y seis, por miedo a que un esquema que este protocolo no acepta rebotara el `setup` entero. Se midió contra el servidor de verdad —una por una y todas juntas— y el miedo era infundado. Pero verificar por adelantado tampoco alcanza, porque el conjunto cambia: los esquemas de los servidores MCP los escribe un tercero. Lo que protege es que el rechazo sea recuperable — si el servidor no acepta el `setup`, se reintenta una vez con un piso de tres herramientas medidas, y queda el renglón en la bitácora. Se pierden manos, no se pierde la voz.
+
+**Lo único que hablando no puede:**
+
+- **Mirar la pantalla y hacer clic por coordenadas.** La respuesta de una herramienta viaja como texto y una captura no tiene por dónde volver. Las acciones que van por el nombre del control sí andan.
+- **Un comando de PowerShell arbitrario.** Por escrito la orden se tipea y se lee antes de mandarla; hablando la escribe un reconocedor de voz a partir de lo que le pareció oír, y del otro lado no hay forma de confirmar nada. Es la única herramienta donde equivocarse no se deshace.
+
 ### Lo que el camino nuevo todavía no tiene
 
-**Herramientas.** El `setup` que se manda no declara ninguna, así que en vivo se conversa pero no se abre una aplicación ni se crea una carpeta ni se anota un recordatorio. Está dicho en la instrucción de sistema para que no prometa lo que no puede, y escribir cierra la sesión hablada y devuelve el turno al camino de siempre, que sí las tiene.
+**Las reglas enseñadas, los objetivos abiertos y los permisos.** La instrucción hablada lleva la memoria personal y las misiones, pero no esas tres. No es una decisión de diseño: los libros que las guardan viven adentro de la fábrica del núcleo y el anfitrión no los tiene a mano.
 
 ### Cierres automáticos
 

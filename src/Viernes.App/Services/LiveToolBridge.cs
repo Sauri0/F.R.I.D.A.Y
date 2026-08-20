@@ -86,7 +86,10 @@ internal sealed class LiveToolBridge : ILiveToolBridge
     /// si se la nombra y no se declara, promete algo que no puede. Las dos formas de que se
     /// desincronicen terminan en el mismo síntoma: una asistente que miente sobre sí misma.
     /// <para>
-    /// Hay una prueba que verifica que este texto nombre a cada una de las permitidas.
+    /// Hay una prueba que verifica que este texto <b>no niegue</b> lo que sí puede — que es el error
+    /// que importa y el que ya se cometió: decía «lo que hablando NO tenés es leer o escribir
+    /// archivos, buscar en tu memoria, los servidores conectados», y las tres cosas pasaron a ser
+    /// falsas. Enumerar cada herramienta dejó de tener sentido cuando pasaron a ser cuarenta y seis.
     /// </para>
     /// </remarks>
     internal const string Anuncio = """

@@ -25,9 +25,14 @@ namespace Viernes.Platform.Windows.Processes;
 /// hijos en pleno uso. Lo cierra el sistema, y ése es el momento correcto.
 /// </para>
 /// <para>
-/// Se adopta por descendencia y no por nombre. Buscar «los node» sería adivinar: en esa máquina hay
-/// decenas que no son de acá. Lo que se busca es <em>quién tiene a Viernes de padre</em>, que no se
-/// puede confundir con nada.
+/// <b>Por descendencia Y por nombre de ejecutable, y las dos mitades hacen falta.</b> Sólo por
+/// nombre sería adivinar: en esa máquina hay decenas de <c>node</c> que no son de acá. Sólo por
+/// descendencia sería un desastre silencioso, porque cuando el usuario le pide que abra Spotify esa
+/// aplicación también nace descendiente de Viernes, y cerrar el asistente le cerraría de golpe lo
+/// que le pidió que abriera.
+/// </para>
+/// <para>
+/// Se ve en el contador: sin el filtro por nombre se ataban 3 procesos, con el filtro 1.
 /// </para>
 /// </remarks>
 public static class ChildProcessJob
@@ -97,6 +102,8 @@ public static class ChildProcessJob
             {
                 buscados.Add(nombre + ".exe");
             }
+
+            buscados.UnionWith(LoQueRealmenteCorre(nombre));
         }
 
         if (buscados.Count == 0)
@@ -134,6 +141,61 @@ public static class ChildProcessJob
             }
 
             return propios;
+        }
+    }
+
+    /// <summary>
+    /// Qué proceso queda vivo de verdad cuando el comando configurado es un guión.
+    /// </summary>
+    /// <remarks>
+    /// <b>Sin esto la protección quedaba en cero, y en silencio, para la forma más habitual de
+    /// declarar un servidor MCP en Windows.</b> <c>npx</c>, <c>npm</c> y compañía no son ejecutables:
+    /// son <c>.cmd</c> que arrancan otra cosa y se van. Buscando un proceso llamado «npx» no se
+    /// encuentra ninguno, así que no se adoptaba nada — ni un error, ni un renglón, ni nada.
+    /// <para>
+    /// Lo que queda vivo es el intérprete. Se agregan los que corresponden al lanzador, y también el
+    /// <c>cmd.exe</c> que Windows usa para correr un <c>.cmd</c>.
+    /// </para>
+    /// <para>
+    /// <b>Es una lista y las listas envejecen.</b> Un lanzador que no esté acá vuelve a no adoptar
+    /// nada — pero ya no en silencio: quien llama informa cuántos ató, y cero con servidores
+    /// levantados es visible en la bitácora. Lo correcto de verdad sería mirar la línea de comando de
+    /// cada descendiente y quedarse con los que mencionan el guión configurado; eso pide leer el
+    /// bloque de entorno de otro proceso y quedó anotado como lo que falta.
+    /// </para>
+    /// </remarks>
+    private static IEnumerable<string> LoQueRealmenteCorre(string nombre)
+    {
+        var pelado = Path.GetFileNameWithoutExtension(nombre);
+
+        if (nombre.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+            nombre.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "cmd.exe";
+        }
+
+        switch (pelado.ToLowerInvariant())
+        {
+            case "npx":
+            case "npm":
+            case "yarn":
+            case "pnpm":
+            case "bunx":
+                yield return "node.exe";
+                yield return "cmd.exe";
+                break;
+
+            case "uv":
+            case "uvx":
+            case "pipx":
+                yield return "python.exe";
+                yield return "pythonw.exe";
+                yield return "cmd.exe";
+                break;
+
+            case "deno":
+                yield return "deno.exe";
+                break;
         }
     }
 

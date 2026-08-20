@@ -23,10 +23,16 @@ namespace Viernes.Memory.Brain;
 ///     saber\            lo destilado, en carpetas
 /// </code>
 /// <para>
-/// <b>El índice existe porque el cerebro entero no entra en el contexto.</b> Lo que se le arma al
-/// modelo en cada turno es el índice —una línea por nota— y recién después las notas que parecen
-/// venir al caso. Por eso el título de cada nota importa tanto como su cuerpo: es lo único que se ve
-/// cuando hay que decidir qué leer.
+/// <b>El índice existe porque el cerebro entero no va a entrar siempre en el contexto.</b> Hoy lo
+/// que se le arma al modelo son todas las notas vigentes enteras mientras entren en el presupuesto,
+/// y recién cuando no entran pasa a ser el índice: los títulos con su alcance, sin los cuerpos. Con
+/// veinte notas conviene tenerlas enteras; con doscientas conviene saber que existen todas antes que
+/// conocer bien treinta y ninguna de las otras.
+/// <para>
+/// Leer sólo las que vienen al caso sería mejor que las dos cosas y <b>no está hecho</b>. Cuando
+/// esté, el título de cada nota va a pesar tanto como su cuerpo, porque va a ser lo único que se vea
+/// al decidir qué leer.
+/// </para>
 /// </para>
 /// <para>
 /// <b>Nada se borra al corregir.</b> Cuando algo resulta estar mal, la nota vieja queda marcada como
@@ -36,6 +42,17 @@ namespace Viernes.Memory.Brain;
 /// </remarks>
 public sealed class Brain
 {
+    /// <summary>
+    /// Guardar y reindexar son una sola cosa, y dos charlas pueden cerrar a la vez.
+    /// </summary>
+    /// <remarks>
+    /// Cerrar una conversación dispara la destilación en una tarea aparte. Dos charlas que cierran
+    /// juntas —hablando y escribiendo, o dos ventanas— entran acá al mismo tiempo, y el índice se
+    /// rehace leyendo el disco entero: sin candado, una puede estar escribiendo el índice mientras
+    /// la otra escribe una nota, y el índice queda sin ella hasta el próximo aprendizaje.
+    /// </remarks>
+    private readonly System.Threading.Lock _gate = new();
+
     private readonly string _root;
     private readonly TimeProvider _time;
 
@@ -126,6 +143,18 @@ public sealed class Brain
     {
         ArgumentNullException.ThrowIfNull(note);
 
+        lock (_gate)
+        {
+            GuardarSinCandado(note);
+        }
+
+        Reindex();
+    }
+
+    private void GuardarSinCandado(BrainNote note)
+    {
+        note = note with { Name = NombreLibre(note) };
+
         if (Ubicacion(note.Name) is { } donde && !string.Equals(donde, note.Folder, StringComparison.OrdinalIgnoreCase))
         {
             note = note with { Folder = donde };
@@ -134,7 +163,59 @@ public sealed class Brain
         var destino = System.IO.Path.Combine(_root, note.RelativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destino)!);
         File.WriteAllText(destino, Render(note), Encoding.UTF8);
-        Reindex();
+    }
+
+    /// <summary>
+    /// Un nombre que no pise una nota que no es ésta.
+    /// </summary>
+    /// <remarks>
+    /// <b>Dos formas de pisar en silencio, y las dos costaban algo que no se recupera.</b>
+    /// <list type="number">
+    ///   <item>
+    ///     <see cref="Slug"/> colapsa títulos distintos en el mismo nombre —recorta a sesenta
+    ///     caracteres y tira todo lo que no sea letra o número—, así que una nota nueva podía
+    ///     escribirse encima de una vieja de otra charla que no tenía nada que ver.
+    ///   </item>
+    ///   <item>
+    ///     Volver a aprender un título que ya había sido reemplazado <em>resucitaba</em> la nota
+    ///     vieja: se pisaba el archivo, quedaba vigente otra vez, y se perdía la evidencia de lo que
+    ///     creía antes. Eso es exactamente lo que <see cref="Supersede"/> promete que no puede
+    ///     pasar, y lo que la clase promete cuando dice que nada se borra al corregir.
+    ///   </item>
+    /// </list>
+    /// El título de adentro sigue siendo el que se lee, así que un sufijo en el nombre del archivo
+    /// no se nota en ningún lado salvo en el explorador.
+    /// </remarks>
+    private string NombreLibre(BrainNote note)
+    {
+        var candidato = note.Name;
+        for (var i = 2; i < 100; i++)
+        {
+            if (Archivo(candidato) is not { } existente)
+            {
+                return candidato;
+            }
+
+            var actual = Parse(existente);
+            if (actual is null)
+            {
+                return candidato;
+            }
+
+            // Es la misma nota si se llama igual, y sólo entonces se la pisa. Una que ya fue
+            // reemplazada no se pisa ni siendo la misma: eso sería resucitarla.
+            var esLaMisma = string.Equals(actual.Title, note.Title, StringComparison.OrdinalIgnoreCase);
+            var resucitaria = actual.Status == BrainStatus.Reemplazada && note.Status == BrainStatus.Vigente;
+
+            if (esLaMisma && !resucitaria)
+            {
+                return candidato;
+            }
+
+            candidato = $"{note.Name}-{i}";
+        }
+
+        return candidato;
     }
 
     /// <summary>
@@ -151,12 +232,20 @@ public sealed class Brain
     {
         ArgumentNullException.ThrowIfNull(replacement);
 
-        if (Read(oldName) is { } vieja)
+        lock (_gate)
         {
-            Save(vieja with { Status = BrainStatus.Reemplazada });
+            // Las dos escrituras bajo el mismo candado: si entre una y otra se colara otro cierre de
+            // charla, el índice podría quedar con la vieja ya vencida y la nueva todavía sin
+            // escribir, o sea sin nada vigente sobre el tema.
+            if (Read(oldName) is { } vieja)
+            {
+                GuardarSinCandado(vieja with { Status = BrainStatus.Reemplazada });
+            }
+
+            GuardarSinCandado(replacement with { Supersedes = oldName });
         }
 
-        Save(replacement with { Supersedes = oldName });
+        Reindex();
     }
 
     /// <summary>En qué carpeta vive ya una nota, o nulo si todavía no existe.</summary>
@@ -226,6 +315,14 @@ public sealed class Brain
     /// </remarks>
     public void Reindex()
     {
+        lock (_gate)
+        {
+            ReindexSinCandado();
+        }
+    }
+
+    private void ReindexSinCandado()
+    {
         var notas = All();
         var texto = new StringBuilder();
 
@@ -268,8 +365,18 @@ public sealed class Brain
                 "entender después por qué creía eso._");
         }
 
-        Directory.CreateDirectory(_root);
-        File.WriteAllText(IndexPath, texto.ToString(), Encoding.UTF8);
+        try
+        {
+            Directory.CreateDirectory(_root);
+            File.WriteAllText(IndexPath, texto.ToString(), Encoding.UTF8);
+        }
+        catch (Exception excepcion) when (excepcion is IOException or UnauthorizedAccessException)
+        {
+            // El índice se puede rehacer en cualquier momento desde el disco; las notas no. Dejar
+            // que esto tire se llevaba puestas las que faltaban de la misma charla, porque quien
+            // aprende recorre las notas una por una y la primera excepción aborta el resto. Perder
+            // el índice cuesta un aprendizaje de nada; perder una nota cuesta algo que no vuelve.
+        }
     }
 
     /// <summary>Arma una nota nueva con lo mínimo, poniéndole fecha y nombre.</summary>
@@ -309,14 +416,27 @@ public sealed class Brain
         _ => "yo"
     };
 
+    /// <summary>
+    /// Aplasta a una línea lo que va en la cabecera.
+    /// </summary>
+    /// <remarks>
+    /// La cabecera es «clave: valor» por renglón y no escapa nada. Un título con un salto de línea
+    /// adentro escribía renglones sueltos que al leerse se tomaban por campos —y como al leer gana
+    /// el último valor, podía cambiar campos escritos ANTES, como el tipo o la versión del formato—.
+    /// Además el título quedaba truncado a su primera línea. El cuerpo puede tener los saltos que
+    /// quiera; la cabecera, no.
+    /// </remarks>
+    private static string UnaLinea(string valor) =>
+        string.Join(' ', valor.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
     private static string Render(BrainNote note)
     {
         var texto = new StringBuilder();
         texto.AppendLine("---");
         texto.AppendLine($"esquema: {BrainNote.Schema}");
         texto.AppendLine($"tipo: {note.Kind.ToString().ToLowerInvariant()}");
-        texto.AppendLine($"titulo: {note.Title}");
-        texto.AppendLine($"alcance: {note.Scope}");
+        texto.AppendLine($"titulo: {UnaLinea(note.Title)}");
+        texto.AppendLine($"alcance: {UnaLinea(note.Scope)}");
         texto.AppendLine($"confianza: {note.Confidence.ToString().ToLowerInvariant()}");
         texto.AppendLine($"estado: {note.Status.ToString().ToLowerInvariant()}");
         texto.AppendLine($"cuando: {note.When:yyyy-MM-dd HH:mm}");
@@ -362,7 +482,15 @@ public sealed class Brain
         var lineas = texto.Replace("\r\n", "\n").Split('\n');
         var campos = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var cuerpo = new StringBuilder();
-        var enCabecera = lineas.Length > 0 && lineas[0].Trim() == "---";
+
+        // Si el archivo abre cabecera y nunca la cierra —lo edita el usuario a mano, así que va a
+        // pasar— todas las líneas de abajo se leían como campos y el cuerpo quedaba vacío: la nota
+        // seguía apareciendo en el índice como si supiera algo, y no sabía nada. Se mira si el cierre
+        // existe antes de entrar, y si no existe se trata todo como cuerpo.
+        var enCabecera = lineas.Length > 0 &&
+            lineas[0].Trim() == "---" &&
+            lineas.Skip(1).Any(linea => linea.Trim() == "---");
+
         var empezoElCuerpo = !enCabecera;
 
         for (var i = enCabecera ? 1 : 0; i < lineas.Length; i++)
