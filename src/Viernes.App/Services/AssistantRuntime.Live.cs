@@ -191,12 +191,15 @@ internal sealed partial class AssistantRuntime
     /// ayer y no tener con qué retomarlo.
     /// </para>
     /// <para>
-    /// <b>Van estas dos y no las cinco del otro camino, y ese recorte ya no tiene su motivo original.</b>
-    /// Decía que las reglas enseñadas y los permisos hablan del taller entero y que acá había tres
-    /// herramientas. Acá ahora están todas, así que el argumento se cayó: lo que falta —reglas, objetivos
-    /// y permisos— falta porque el anfitrión no tiene esos libros a mano, viven adentro de la fábrica del
-    /// núcleo, y traerlos hasta acá es cambiar la fábrica. Queda anotado como lo que falta, no como una
-    /// decisión.
+    /// <b>Van las cinco, igual que en el camino escrito.</b> Iban dos, con un motivo escrito que se
+    /// cayó solo: decía que las reglas enseñadas y los permisos hablan del taller entero y que acá
+    /// había tres herramientas. Acá ahora están todas. Y una regla que el usuario enseñó a propósito
+    /// para frenar algo no puede valer sólo cuando escribe — hablando es como más la usa.
+    /// </para>
+    /// <para>
+    /// Los libros se los arma el anfitrión y se los pasa a la fábrica del núcleo, que ya los recibe.
+    /// Que la fábrica creara los suyos era lo que hacía parecer que traerlos costaba caro: costaba
+    /// pasarlos.
     /// </para>
     /// <para>
     /// La fecha va sí o sí, y no es adorno: sin ella «recordame el martes» se resuelve contra la
@@ -220,6 +223,37 @@ internal sealed partial class AssistantRuntime
         if (!string.IsNullOrWhiteSpace(personal))
         {
             instruccion.AppendLine().AppendLine().Append(personal);
+        }
+
+        // Las reglas enseñadas van enteras y sin filtrar, igual que en el camino escrito. Son pocas,
+        // las eligió el usuario a propósito, y casi siempre existen para frenar algo que ella ya hizo
+        // mal una vez. Que valieran sólo escribiendo era lo peor de los dos mundos: la regla existe,
+        // el usuario cree que la enseñó, y hablando —que es como más la usa— no la ve.
+        var reglas = await SafeContextAsync(
+            () => _ruleBook.RecallAllAsync(cancellationToken)).ConfigureAwait(false);
+
+        if (!string.IsNullOrWhiteSpace(reglas))
+        {
+            instruccion.AppendLine().AppendLine().Append(reglas);
+        }
+
+        // Los permisos aprendidos, por el mismo motivo y con más razón desde que hablando puede
+        // mandar cosas: son decisiones que el usuario tomó a propósito sobre qué puede hacer sola.
+        var permisos = await SafeContextAsync(
+            () => _autonomy.DescribeAsync(cancellationToken)).ConfigureAwait(false);
+
+        if (!string.IsNullOrWhiteSpace(permisos))
+        {
+            instruccion.AppendLine().AppendLine().Append(permisos);
+        }
+
+        // Los objetivos abiertos son lo que le da referente a «seguí con eso».
+        var objetivos = await SafeContextAsync(
+            () => _goalBook.DescribeOpenAsync(cancellationToken)).ConfigureAwait(false);
+
+        if (!string.IsNullOrWhiteSpace(objetivos))
+        {
+            instruccion.AppendLine().AppendLine().Append(objetivos);
         }
 
         var misiones = await SafeContextAsync(

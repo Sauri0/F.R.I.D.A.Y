@@ -192,6 +192,27 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     // propia expectativa.
 
     private readonly JsonUserDataStore _dataStore = new();
+    /// <summary>
+    /// Las reglas que le enseñó el usuario, los objetivos abiertos y los permisos aprendidos.
+    /// </summary>
+    /// <remarks>
+    /// <b>Se arman acá y se le pasan a la fábrica, por el mismo motivo que las misiones:</b> el
+    /// camino escrito los lee en cada turno a través del orquestador, y el hablado arma su
+    /// instrucción por su cuenta. Si la fábrica los creara sola, el anfitrión no tendría con qué
+    /// armarla y hablando seguiría sin saber qué le enseñaron.
+    /// <para>
+    /// Que hablando no los tuviera dejó de ser defendible cuando pasó a declarar todas las
+    /// herramientas: <b>una regla que el usuario enseñó a propósito para frenar algo no puede valer
+    /// sólo cuando escribe</b>. El motivo que estaba escrito —«allá hay treinta herramientas y acá
+    /// tres»— se cayó con ellas.
+    /// </para>
+    /// </remarks>
+    private readonly Viernes.Core.Learning.RuleBook _ruleBook = new();
+
+    private readonly Viernes.Core.Goals.GoalBook _goalBook = new();
+
+    private readonly Viernes.Core.Autonomy.AutonomyPolicy _autonomy = new();
+
     private readonly JsonPersonalMemoryStore _memory = new();
 
     /// <summary>
@@ -421,6 +442,12 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
             // creaba uno propio, y con dos instancias cacheando aparte «te espero» podía quedar
             // encendido sobre una pregunta que la herramienta ya había contestado.
             missions: _missionBook,
+            // Los tres van explícitos por lo mismo que el libro de misiones: la fábrica crearía los
+            // suyos, y con dos instancias cacheando aparte una regla enseñada por la herramienta no
+            // la vería quien arma la instrucción hablada.
+            rules: _ruleBook,
+            goals: _goalBook,
+            autonomy: _autonomy,
             rest: RestAsync);
 
     /// <summary>
