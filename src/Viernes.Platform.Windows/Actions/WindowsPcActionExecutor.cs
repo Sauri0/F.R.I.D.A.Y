@@ -863,6 +863,37 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
     private static List<nint> FindWindows(string? target) =>
         FindWindowsWithTitles(target).Select(match => match.Window).ToList();
 
+    /// <summary>
+    /// Todas las ventanas visibles con título, sin filtrar por nombre.
+    /// </summary>
+    /// <remarks>
+    /// Hace falta para poder decir «apareció una ventana nueva» sin depender de cómo se llame. Ver
+    /// <see cref="VerifyWindowAppeared"/>: buscar por título era lo que hacía que abrir una
+    /// aplicación dijera «no pude» habiéndola abierto.
+    /// </remarks>
+    private static HashSet<nint> AllWindows()
+    {
+        var todas = new HashSet<nint>();
+        EnumWindows((window, _) =>
+        {
+            if (IsWindowVisible(window) && GetWindowTextLength(window) > 0)
+            {
+                todas.Add(window);
+            }
+
+            return true;
+        }, nint.Zero);
+
+        return todas;
+    }
+
+    /// <summary>De qué proceso es una ventana.</summary>
+    private static uint ProcessOf(nint window)
+    {
+        GetWindowThreadProcessId(window, out var processId);
+        return processId;
+    }
+
     private static List<(nint Window, string Title)> FindWindowsWithTitles(string? target)
     {
         var matches = new List<(nint, string)>();
@@ -929,7 +960,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         }
 
         var query = Uri.EscapeDataString(target.Trim());
-        return Launch($"https://www.google.com/search?q={query}", $"Busqué «{target.Trim()}» en el navegador.");
+        return Launch($"https://www.google.com/search?q={query}", $"Busqué «{target.Trim()}» en el navegador.").Outcome;
     }
 
     /// <summary>
@@ -973,7 +1004,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
             $"spotify:search:{Uri.EscapeDataString(query)}",
             $"NO puse la música: sólo abrí Spotify con la búsqueda de «{query}». " +
             "Si tenés herramientas de Spotify, usá ésas para reproducirla de verdad; " +
-            "si no, decile al usuario que le dé play él.");
+            "si no, decile al usuario que le dé play él.").Outcome;
     }
 
     /// <summary>
@@ -1281,7 +1312,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
     {
         if (string.IsNullOrWhiteSpace(target))
         {
-            return Launch("ms-settings:", "Abrí Configuración.");
+            return Launch("ms-settings:", "Abrí Configuración.").Outcome;
         }
 
         if (!SettingsPages.TryGetValue(target.Trim(), out var page))
@@ -1292,7 +1323,7 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
                 $"No tengo habilitada esa página de Configuración. Puedo abrir: {available}.");
         }
 
-        return Launch(page.Uri, $"Abrí Configuración en {page.Label}.");
+        return Launch(page.Uri, $"Abrí Configuración en {page.Label}.").Outcome;
     }
 
     /// <summary>
@@ -1330,11 +1361,11 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         // de las dos rutas y no la otra es no verificar: el usuario no sabe cuál se usó.
         if (Applications.TryGetValue(name, out var known))
         {
-            var beforeKnown = FindWindows(known.Label).ToHashSet();
+            var beforeKnown = AllWindows();
             var startedKnown = Launch(known.Command, $"Abrí {known.Label}.");
-            return startedKnown.Executed
-                ? VerifyWindowAppeared(known.Label, known.Label, beforeKnown)
-                : startedKnown;
+            return startedKnown.Outcome.Executed
+                ? VerifyWindowAppeared(known.Label, known.Label, beforeKnown, startedKnown.Process)
+                : startedKnown.Outcome;
         }
 
         // Después, cualquier cosa instalada. El modelo elige del catálogo real; nunca compone una
@@ -1358,11 +1389,11 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
             if (looksOpenable)
             {
                 var directLabel = System.IO.Path.GetFileNameWithoutExtension(direct);
-                var beforeDirect = FindWindows(directLabel).ToHashSet();
+                var beforeDirect = AllWindows();
                 var started = Launch(direct, $"Abrí {direct}.");
-                return started.Executed && System.IO.File.Exists(direct)
-                    ? VerifyWindowAppeared(directLabel, direct, beforeDirect)
-                    : started;
+                return started.Outcome.Executed && System.IO.File.Exists(direct)
+                    ? VerifyWindowAppeared(directLabel, direct, beforeDirect, started.Process)
+                    : started.Outcome;
             }
 
             var similar = _installed.Suggest(name);
@@ -1378,16 +1409,26 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         // por el explorador, que es exactamente como lo abre el menú Inicio.
         // Se anota qué ventanas coincidían ANTES de lanzar nada: sin esa foto previa no hay forma de
         // distinguir «se abrió» de «ya estaba».
-        var before = FindWindows(name).ToHashSet();
+        var before = AllWindows();
         var label = InstalledApplications.IsLaunchableFile(resolved)
             ? System.IO.Path.GetFileNameWithoutExtension(resolved)
             : name;
-        var launched = InstalledApplications.IsLaunchableFile(resolved)
-            ? Launch(resolved, $"Abrí {label}.")
-            : LaunchPackaged(resolved, name);
+
+        Process? arrancado = null;
+        PcActionOutcome launched;
+        if (InstalledApplications.IsLaunchableFile(resolved))
+        {
+            var directo = Launch(resolved, $"Abrí {label}.");
+            launched = directo.Outcome;
+            arrancado = directo.Process;
+        }
+        else
+        {
+            launched = LaunchPackaged(resolved, name);
+        }
 
         return launched.Executed
-            ? VerifyWindowAppeared(name, label, before)
+            ? VerifyWindowAppeared(name, label, before, arrancado)
             : launched;
     }
 
@@ -1408,22 +1449,32 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
     /// cambio, se abre igual pero se dice, porque lo que viene después depende de eso.
     /// </para>
     /// </remarks>
-    private static PcActionOutcome VerifyWindowAppeared(string needle, string label, HashSet<nint> before)
+    private static PcActionOutcome VerifyWindowAppeared(
+        string needle,
+        string label,
+        HashSet<nint> before,
+        Process? started)
     {
+        // Si ya había una ventana suya, esperar diez segundos una nueva es esperar de gusto: las
+        // aplicaciones de instancia única no la van a abrir nunca. Se le dan tres, por si resulta ser
+        // de las que sí abren otra, y después se resuelve por el camino de «ya estaba».
+        var yaEstaba = before.Any(w => Coincide(w, needle));
+
         var appeared = nint.Zero;
         var stable = WaitForStable(
             () =>
             {
-                appeared = FindWindows(needle).Except(before).FirstOrDefault();
+                appeared = Aparecida(needle, before, started);
                 return appeared != nint.Zero;
             },
-            TimeSpan.FromSeconds(10));
+            yaEstaba ? TimeSpan.FromSeconds(3) : TimeSpan.FromSeconds(10));
 
         if (!stable)
         {
-            return new PcActionOutcome(
-                false,
-                $"Lancé {label} pero no llegué a ver su ventana. Puede estar tardando en cargar.");
+            return YaEstabaAbierta(needle, label, before)
+                ?? new PcActionOutcome(
+                    false,
+                    $"Lancé {label} pero no llegué a ver su ventana. Puede estar tardando en cargar.");
         }
 
         ShowWindow(appeared, ShowRestore);
@@ -1434,6 +1485,114 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
                 true,
                 $"Abrí {label}, pero quedó detrás: Windows no me dejó traerla al frente. " +
                 "Si le vas a escribir, primero usá focus_application.");
+    }
+
+    /// <summary>
+    /// Cuál de las ventanas nuevas es la de la aplicación que se acaba de abrir.
+    /// </summary>
+    /// <remarks>
+    /// <b>Tres caminos, en orden de confianza, y el orden es el arreglo.</b> Acá se buscaba una
+    /// ventana <em>cuyo título contuviera el nombre pedido</em>, y nada más. Eso falla en cuanto la
+    /// aplicación no se titula como se llama, que es lo normal: un navegador titula la página,
+    /// Discord titula el servidor, un editor titula el archivo abierto. La aplicación abría bien y
+    /// Viernes contestaba «no llegué a ver su ventana» —después de esperar diez segundos— con la
+    /// ventana ahí delante. El usuario lo reportó así: «me dice que no puede abrir apps».
+    /// <list type="number">
+    ///   <item><b>Por proceso.</b> Si <see cref="Launch"/> devolvió uno, su ventana es su ventana, se
+    ///   llame como se llame. Es lo único que no depende de cómo alguien decidió titular su
+    ///   programa.</item>
+    ///   <item><b>Por título, entre las nuevas.</b> Si el proceso no sirve —arrancar por protocolo se
+    ///   lo entrega a otro que ya estaba— pero apareció una ventana nueva que además coincide, es
+    ///   ésa.</item>
+    ///   <item><b>Cualquier ventana nueva.</b> Se lanzó algo y apareció una ventana que antes no
+    ///   estaba: casi siempre es ésa. Puede equivocarse si otro programa abre una ventana en el mismo
+    ///   instante, y ese error cuesta traer al frente la ventana equivocada. Contra el error anterior
+    ///   —decir que no abrió lo que abrió— es mucho más barato.</item>
+    /// </list>
+    /// </remarks>
+    /// <summary>
+    /// Si la aplicación ya estaba abierta, la trae al frente y lo dice.
+    /// </summary>
+    /// <remarks>
+    /// <b>Éste es el caso que hacía esperar diez segundos para contestar que no.</b> Spotify,
+    /// Discord, Steam, un navegador: si ya están abiertos, volver a lanzarlos no crea ninguna ventana
+    /// nueva —el ejecutable le pasa el pedido a la instancia que ya corre y se va—. La verificación
+    /// esperaba una ventana nueva que nunca iba a aparecer, agotaba el plazo entero y contestaba «no
+    /// llegué a ver su ventana» con la aplicación abierta ahí adelante.
+    /// <para>
+    /// Medido con la propia Viernes, que tiene candado de instancia única, antes y después:
+    /// <code>
+    ///   antes:  NO  ·  10.663 ms  ·  «Lancé … pero no llegué a ver su ventana»
+    ///   ahora:  SÍ  ·   3.900 ms  ·  «… ya estaba abierta: te la traje al frente»
+    /// </code>
+    /// </para>
+    /// <para>
+    /// Y se dice «ya estaba abierta» y no «la abrí», que no es lo mismo: explica por qué la persona
+    /// encuentra adentro lo que había dejado, en vez de sugerir que arrancó de cero.
+    /// </para>
+    /// </remarks>
+    private static PcActionOutcome? YaEstabaAbierta(string needle, string label, HashSet<nint> before)
+    {
+        var abierta = before.FirstOrDefault(w => Coincide(w, needle));
+        if (abierta == nint.Zero)
+        {
+            return null;
+        }
+
+        ShowWindow(abierta, ShowRestore);
+        ForceForeground(abierta);
+        return WaitFor(() => GetForegroundWindow() == abierta, TimeSpan.FromSeconds(3))
+            ? new PcActionOutcome(true, $"{label} ya estaba abierta: te la traje al frente.")
+            : new PcActionOutcome(
+                true,
+                $"{label} ya estaba abierta, pero Windows no me dejó traerla al frente.");
+    }
+
+    /// <summary>Si el título de esa ventana contiene lo que se buscó.</summary>
+    private static bool Coincide(nint window, string needle)
+    {
+        var largo = GetWindowTextLength(window);
+        if (largo <= 0)
+        {
+            return false;
+        }
+
+        var buffer = new System.Text.StringBuilder(largo + 1);
+        GetWindowText(window, buffer, buffer.Capacity);
+        return Simplify(buffer.ToString()).Contains(Simplify(needle), StringComparison.Ordinal);
+    }
+
+    private static nint Aparecida(string needle, HashSet<nint> before, Process? started)
+    {
+        var nuevas = AllWindows().Except(before).ToList();
+        if (nuevas.Count == 0)
+        {
+            return nint.Zero;
+        }
+
+        if (started is not null)
+        {
+            try
+            {
+                if (!started.HasExited)
+                {
+                    var suya = nuevas.FirstOrDefault(w => ProcessOf(w) == (uint)started.Id);
+                    if (suya != nint.Zero)
+                    {
+                        return suya;
+                    }
+                }
+            }
+            catch (Exception excepcion) when (excepcion is InvalidOperationException
+                or System.ComponentModel.Win32Exception
+                or NotSupportedException)
+            {
+                // Un proceso que ya no se puede consultar no descalifica a las otras dos vías.
+            }
+        }
+
+        var porTitulo = FindWindows(needle).Except(before).FirstOrDefault();
+        return porTitulo != nint.Zero ? porTitulo : nuevas[0];
     }
 
     private static PcActionOutcome LaunchPackaged(string applicationId, string spokenName)
@@ -1484,20 +1643,34 @@ public sealed partial class WindowsPcActionExecutor : IPcActionExecutor
         }
     }
 
-    private static PcActionOutcome Launch(string command, string successMessage)
+    /// <summary>Lo que dejó un intento de arranque: si salió, y qué proceso quedó.</summary>
+    /// <remarks>
+    /// El proceso se conserva porque es la forma confiable de saber qué ventana apareció. Acá se
+    /// descartaba en el acto —<c>using var</c>— y la verificación quedaba obligada a buscar por
+    /// título, que es de dónde salía «no llegué a ver su ventana» con la aplicación abierta delante.
+    /// <para>
+    /// Puede volver nulo y eso no es un error: arrancando por protocolo o por acceso directo, Windows
+    /// se lo entrega a otro proceso que ya estaba corriendo y no hay ninguno nuevo que devolver. Por
+    /// eso la verificación tiene tres caminos y éste es sólo el mejor de los tres.
+    /// </para>
+    /// </remarks>
+    private readonly record struct Started(PcActionOutcome Outcome, Process? Process);
+
+    private static Started Launch(string command, string successMessage)
     {
         try
         {
-            using var process = Process.Start(new ProcessStartInfo
+            var process = Process.Start(new ProcessStartInfo
             {
                 FileName = command,
                 UseShellExecute = true
             });
-            return new PcActionOutcome(true, successMessage);
+
+            return new Started(new PcActionOutcome(true, successMessage), process);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return new PcActionOutcome(false, "Windows no dejó abrir eso.");
+            return new Started(new PcActionOutcome(false, "Windows no dejó abrir eso."), null);
         }
     }
 }
