@@ -94,6 +94,24 @@ public partial class MainWindow : Window
     /// <summary>Cuántos cuadros del vuelo se anotan después de soltar. Ver el bloque de OnRendering.</summary>
     private const int FlightSamples = 24;
 
+    /// <summary>
+    /// Si se vuelca el detalle del arrastre y del vuelo, cuadro por cuadro.
+    /// </summary>
+    /// <remarks>
+    /// <b>Apagado por omisión, y eso se aprendió pagando.</b> Son cuarenta y ocho líneas por cada vez
+    /// que el usuario mueve el orbe. Se puso para arreglar el arrastre —y lo arregló— pero después,
+    /// diagnosticando un problema de voz, la bitácora de una sesión entera eran casi todas líneas de
+    /// arrastre y el rastro de la voz estaba enterrado. Un instrumento que tapa lo que no mide deja
+    /// de ser un instrumento.
+    /// <para>
+    /// Se enciende con <c>VIERNES_TRAZA_ARRASTRE=1</c> cuando haga falta volver a mirarlo. La línea
+    /// de <c>orbe.suelto</c> —una por gesto, con el tiro y el retraso— queda siempre: ésa es barata y
+    /// es la que dice si hay algo que mirar.
+    /// </para>
+    /// </remarks>
+    private static readonly bool DetalleDelArrastre =
+        Environment.GetEnvironmentVariable("VIERNES_TRAZA_ARRASTRE") == "1";
+
     /// <summary>Cuadros que quedan por anotar del vuelo en curso.</summary>
     private int _afterDrop;
 
@@ -744,7 +762,7 @@ public partial class MainWindow : Window
         //
         // Anotar ya no cuesta disco —RuntimeTrace encola y escribe en otro hilo—, así que esto se
         // puede dejar puesto sin pagar el cuadro que costaba antes.
-        if (_afterDrop > 0)
+        if (_afterDrop > 0 && DetalleDelArrastre)
         {
             _afterDrop--;
             Diagnostics.RuntimeTrace.Write(
@@ -1995,7 +2013,7 @@ public partial class MainWindow : Window
 
         // Los últimos cuadros del arrastre, en orden. Sin esto, «salió a 11 px/s» no se puede
         // explicar: hay que ver si el objetivo venía siguiendo al cursor o se había quedado.
-        var vueltas = Math.Min(_dragTrailCount, _dragTrail.Length);
+        var vueltas = DetalleDelArrastre ? Math.Min(_dragTrailCount, _dragTrail.Length) : 0;
         var desde = _dragTrailCount <= _dragTrail.Length ? 0 : _dragTrailNext;
         for (var i = 0; i < vueltas; i++)
         {
