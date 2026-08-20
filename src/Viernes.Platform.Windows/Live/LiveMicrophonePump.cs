@@ -147,6 +147,22 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
     /// </remarks>
     public event EventHandler<Speech.AudioLevelEventArgs>? LevelChanged;
 
+    /// <summary>
+    /// Se soltó la antesala: alguien le habló encima y sube de golpe lo que estaba frenado.
+    /// </summary>
+    /// <remarks>
+    /// Es la única forma de ver <em>cuándo</em> pasa esto. El contador
+    /// <see cref="Breakthroughs"/> se escribe al cerrar la charla y dice cuántas veces, que no
+    /// alcanza para cruzarlo con un corte de voz. Y hace falta cruzarlo: la sospecha de que esta
+    /// ráfaga de trescientos milisegundos entrando de golpe es lo que el servidor lee como una
+    /// interrupción sólo se puede confirmar o tirar abajo mirando si el corte cae al lado de esta
+    /// marca.
+    /// <para>
+    /// Sale del hilo del dispositivo, así que quien escuche no puede tardar.
+    /// </para>
+    /// </remarks>
+    public event EventHandler<LivePreRollReleasedEventArgs>? PreRollReleased;
+
     /// <summary>Si el micrófono está tomando.</summary>
     public bool IsCapturing
     {
@@ -427,9 +443,27 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
     /// </remarks>
     private void ReleaseHeld(ChannelWriter<byte[]> writer)
     {
+        var soltados = _preRoll.Count;
+
         while (_preRoll.Count > 0)
         {
             Upload(writer, _preRoll.Dequeue());
+        }
+
+        if (soltados == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            PreRollReleased?.Invoke(
+                this,
+                new LivePreRollReleasedEventArgs(soltados, BlockDuration * soltados));
+        }
+        catch (Exception)
+        {
+            // Un oyente roto no puede cortar la captura.
         }
     }
 
@@ -506,4 +540,18 @@ public sealed class LiveMicrophonePump : IAsyncDisposable
 
         capture.Dispose();
     }
+}
+
+/// <summary>Se soltó la antesala del micrófono porque alguien le habló encima.</summary>
+/// <remarks>
+/// Lleva cuánto se soltó porque eso es lo que importa del asunto: son los milisegundos que le entran
+/// al servidor de una sola vez, y la duda es justamente si esa ráfaga se lee como una interrupción.
+/// </remarks>
+public sealed class LivePreRollReleasedEventArgs(int blocks, TimeSpan duration) : EventArgs
+{
+    /// <summary>Cuántos bloques frenados se soltaron.</summary>
+    public int Blocks { get; } = blocks;
+
+    /// <summary>Cuánto audio suman.</summary>
+    public TimeSpan Duration { get; } = duration;
 }

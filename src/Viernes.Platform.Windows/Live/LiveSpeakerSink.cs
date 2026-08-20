@@ -1,4 +1,4 @@
-using NAudio.Wave;
+﻿using NAudio.Wave;
 using Viernes.Core.Live;
 
 namespace Viernes.Platform.Windows.Live;
@@ -12,10 +12,23 @@ namespace Viernes.Platform.Windows.Live;
 /// que el dispositivo se abre una vez y se queda abierto toda la conversación. Abrirlo y cerrarlo
 /// por bloque metería el arranque del driver —decenas de milisegundos— en el medio de cada sílaba.
 /// <para>
-/// <b>Todo lo que sigue existe para que <see cref="Flush"/> se oiga en el acto.</b> La transición
-/// del orbe de hablando a interrumpida dura 80 ms y es un corte, no un fundido: si el audio tarda
-/// más que eso en callarse, la persona ve el corte y lo sigue escuchando, que se lee como que no
-/// hizo caso.
+/// <b>La geometría de los búferes existe para que <see cref="Flush"/> se oiga en el acto.</b> La
+/// transición del orbe de hablando a interrumpida dura 80 ms y es un corte, no un fundido: si el
+/// audio tarda más que eso en callarse, la persona ve el corte y lo sigue escuchando, que se lee
+/// como que no hizo caso.
+/// </para>
+/// <para>
+/// <b>Y lo otro que hay acá es el colchón de arranque, que vino después y por otro motivo.</b> El
+/// usuario reportó que a veces se le corta la voz mientras habla. La salida reproduce con
+/// <c>ReadFully</c>, que es lo correcto, pero tiene un costo invisible: cuando la cola se queda
+/// corta el hueco se rellena con silencio y no lo denuncia nadie. Y el peor momento para que se
+/// quede corta es el arranque: NAudio le pide al proveedor todos sus búferes en la primera vuelta
+/// —cien milisegundos de una— y la reproducción arrancaba con el primer bloque de veinte que
+/// llegara, así que ochenta de esos cien salían de silencio, adentro de la primera palabra, en cada
+/// respuesta. Está medido con esta misma geometría y da <c>relleno = 100 ms − lo encolado</c>,
+/// clavado, y cero justo al llegar a cien. <see cref="LivePlayout"/> espera ese colchón —ni un
+/// milisegundo más, porque de ahí en adelante es demora pura— y deja escrito en la bitácora cuándo
+/// el parlante se quedó sin nada que sonar.
 /// </para>
 /// </remarks>
 public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
@@ -68,15 +81,99 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
         LiveAudioFormat.BitsPerSample,
         LiveAudioFormat.Channels);
 
+    /// <summary>
+    /// Hasta cuándo se espera el colchón antes de arrancar igual.
+    /// </summary>
+    /// <remarks>
+    /// Red de seguridad, no plazo esperado. <see cref="CompleteTurnAsync"/> ya suelta la respuesta
+    /// corta que nunca junta el colchón, pero eso depende de que el turno cierre: si el servidor
+    /// manda dos palabras y después se va diez segundos a esperar una herramienta, sin este plazo
+    /// esas dos palabras se quedarían calladas en la cola todo ese rato.
+    /// <para>
+    /// <b>Ciento cincuenta milisegundos es el techo de lo que todo esto puede demorar una voz</b>, y
+    /// está escrito acá para que se lea de una: es la cuenta que hay que mirar antes de creer que
+    /// esto sale gratis. Vale una vez y media el colchón, que es de cien y está medido; el intento
+    /// anterior pedía trescientos porque el colchón era de doscientos cincuenta, y esos ciento
+    /// cincuenta de más se pagaban en cada respuesta —también en la que sigue a una interrupción, que
+    /// es la interacción que el usuario dijo que andaba bien.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan PrimeDeadline = TimeSpan.FromMilliseconds(150);
+
     private readonly Lock _gate = new();
+
+    /// <summary>
+    /// La cuenta de cuándo arrancar y de si se oyó un silencio que no estaba en la voz.
+    /// </summary>
+    /// <remarks>
+    /// Vive en Core porque es lo único de todo esto que se puede probar sin tarjeta de sonido, y
+    /// porque el defecto que viene a cerrar —cortes de voz que ningún contador registraba— ya se
+    /// buscó una vez leyendo código y no apareció.
+    /// </remarks>
+    private readonly LivePlayout _playout = new();
+
     private BufferedWaveProvider? _queue;
     private DriverTap? _tap;
     private WaveOutEvent? _output;
+    private System.Threading.Timer? _primeTimer;
+    private bool _primeArmed;
     private bool _started;
+    /// <summary>
+    /// Si el turno ya cerró y no viene más audio.
+    /// </summary>
+    /// <remarks>
+    /// Va como entero y se lee sin candado porque lo consulta el hilo del driver en cada lectura, y
+    /// ese hilo no puede pedir el candado de la salida. Ver <see cref="NoteDriverRead"/>.
+    /// </remarks>
+    private int _turnClosedFlag;
     private bool _disposed;
+
+    private bool TurnClosed
+    {
+        get => Volatile.Read(ref _turnClosedFlag) != 0;
+        set => Volatile.Write(ref _turnClosedFlag, value ? 1 : 0);
+    }
 
     /// <summary>Cuántas veces la mandaron a callar. Para la bitácora y el diagnóstico.</summary>
     public int FlushCount { get; private set; }
+
+    /// <summary>
+    /// Se oyó un silencio en el medio de una respuesta.
+    /// </summary>
+    /// <remarks>
+    /// Se dispara <b>desde el hilo del driver</b>, así que quien se suscriba no puede hacer nada que
+    /// tarde: anotar un renglón en la bitácora —que encola y escribe en otro hilo— está bien;
+    /// escribir en disco o tocar la interfaz, no.
+    /// <para>
+    /// Existe porque el corte que reportó el usuario no dejaba ningún rastro: la cola se rellena con
+    /// silencio y la reproducción sigue como si nada. Sin esto, cualquier arreglo del audio es una
+    /// suposición.
+    /// </para>
+    /// </remarks>
+    public event EventHandler<LiveAudioGapEventArgs>? GapHeard;
+
+    /// <summary>
+    /// Cuántos huecos se oyeron desde que se armó la salida. Para el renglón de cierre.
+    /// </summary>
+    /// <remarks>
+    /// Acumulado y no por conversación, igual que <see cref="FlushCount"/>: la salida se reusa entre
+    /// charlas y este número es del asistente encendido, que es la unidad en la que el usuario cuenta
+    /// lo que le pasó.
+    /// </remarks>
+    public int Gaps => _playout.Gaps;
+
+    /// <summary>Cuánto silencio suman esos huecos.</summary>
+    public TimeSpan GapTotal => _playout.GapTotal;
+
+    /// <summary>
+    /// Todo el silencio que <c>ReadFully</c> metió, se haya informado como hueco o no.
+    /// </summary>
+    /// <remarks>
+    /// Va aparte de <see cref=GapTotal/> porque no acusa a nadie: acá adentro está el final de
+    /// cada frase y cada herramienta que tardó, que no son defectos. Sirve para poder escribir «se
+    /// rellenaron X ms» sin tener que afirmar que algo estuvo mal.
+    /// </remarks>
+    public TimeSpan Filler => _playout.Filler;
 
     /// <summary>Si el dispositivo está abierto.</summary>
     public bool IsOpen
@@ -164,14 +261,105 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
 
             _queue!.AddSamples(pcm24k.ToArray(), 0, pcm24k.Length);
 
+            // Llegó audio: el turno está abierto otra vez, venga de donde venga.
+            TurnClosed = false;
+
             if (!_started)
             {
-                _output!.Play();
-                _started = true;
+                ArmPrimeDeadlineLocked();
+                StartIfPrimedLocked(force: false);
             }
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Le da el play al dispositivo si ya hay colchón juntado.
+    /// </summary>
+    /// <remarks>
+    /// <b>Arrancar apenas llega el primer bloque es lo que hacía tartamudear la primera palabra de
+    /// cada respuesta.</b> NAudio, en la primera vuelta de su hilo de reproducción, le pide al
+    /// proveedor todos sus búferes de una: con la geometría de acá son cien milisegundos leídos de
+    /// golpe. Si en la cola había un bloque de veinte, los otros ochenta salen de
+    /// <c>ReadFully</c> —silencio— y ya sonaron para cuando llega el audio de verdad.
+    /// <para>
+    /// El colchón no le agrega demora al corte: <see cref="Flush"/> vacía la cola y resetea el
+    /// dispositivo igual, y lo que se oye después de callarla no depende de cuánto había esperando.
+    /// </para>
+    /// </remarks>
+    private void StartIfPrimedLocked(bool force)
+    {
+        if (_started || _output is null || _queue is null)
+        {
+            return;
+        }
+
+        var queued = LiveAudioFormat.OutputDurationOf(_queue.BufferedBytes);
+        if (!force && !_playout.ShouldStart(queued, TurnClosed))
+        {
+            return;
+        }
+
+        if (queued <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        // La cuenta se abre antes del play: la primera lectura del driver puede llegar mientras Play
+        // todavía no volvió, y una lectura fuera de la cuenta deja el reparto corrido para siempre.
+        // El reloj no arranca acá sino en esa primera lectura — entre el play y ella hay un despacho
+        // del ThreadPool que se midió tardando 56 ms, y contarlos como atraso es informar un hueco
+        // que no sonó.
+        _playout.NoteStarted();
+        _output.Play();
+        _started = true;
+        DisarmPrimeDeadlineLocked();
+    }
+
+    /// <summary>
+    /// Pone el plazo una sola vez por respuesta.
+    /// </summary>
+    /// <remarks>
+    /// Una sola vez y no por bloque: rearmarlo en cada bloque haría que un servidor que manda el
+    /// audio a cuentagotas lo corriera para adelante indefinidamente, que es justamente el caso
+    /// contra el que está.
+    /// </remarks>
+    private void ArmPrimeDeadlineLocked()
+    {
+        if (_primeArmed)
+        {
+            return;
+        }
+
+        _primeArmed = true;
+        (_primeTimer ??= new System.Threading.Timer(OnPrimeDeadline, null, Timeout.Infinite, Timeout.Infinite))
+            .Change(PrimeDeadline, Timeout.InfiniteTimeSpan);
+    }
+
+    private void DisarmPrimeDeadlineLocked()
+    {
+        _primeArmed = false;
+        _primeTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void OnPrimeDeadline(object? state)
+    {
+        lock (_gate)
+        {
+            // El plazo ya se cumplió: se baja la marca acá y no adentro del arranque. Si se dejara
+            // que la bajara sólo el arranque exitoso, un plazo que llega con el dispositivo cerrado
+            // dejaría la marca puesta para siempre y la respuesta siguiente se quedaría sin red de
+            // seguridad, en silencio, sin que nada lo explique.
+            _primeArmed = false;
+
+            if (_disposed)
+            {
+                return;
+            }
+
+            StartIfPrimedLocked(force: true);
+        }
     }
 
     /// <summary>
@@ -213,6 +401,9 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
             // La próxima cosa que se encole vuelve a arrancar la reproducción. Dejarlo en marcha
             // sobre una cola vacía haría que el primer bloque del turno nuevo saliera cortado.
             _started = false;
+            TurnClosed = false;
+            _playout.NoteStopped();
+            DisarmPrimeDeadlineLocked();
         }
     }
 
@@ -220,23 +411,55 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
     /// El turno cerró: no viene más audio.
     /// </summary>
     /// <remarks>
-    /// No hace nada, y eso es lo correcto: lo encolado tiene que <em>terminar de sonar</em>.
-    /// Confundir esto con <see cref="Flush"/> corta la última palabra de todas las respuestas.
+    /// Lo encolado tiene que <em>terminar de sonar</em>: confundir esto con <see cref="Flush"/>
+    /// corta la última palabra de todas las respuestas.
+    /// <para>
+    /// Lo único que hace es anotar que no viene más, y eso decide dos cosas. Una: una respuesta de
+    /// una palabra nunca junta el colchón de <see cref="LivePlayout"/>, así que si nadie avisara que
+    /// se terminó, se quedaría esperando un audio que ya no existe. Dos: cuando la cola se vacía con
+    /// el turno cerrado, ese silencio es el final de la respuesta y no un corte — sin esta marca, el
+    /// final de cada frase se anotaría en la bitácora como un hueco.
+    /// </para>
     /// </remarks>
-    public ValueTask CompleteTurnAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    public ValueTask CompleteTurnAsync(CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            TurnClosed = true;
+            _playout.NoteTurnEnded();
+            StartIfPrimedLocked(force: false);
+        }
+
+        return ValueTask.CompletedTask;
+    }
 
     /// <summary>Cierra el dispositivo. La sesión que vuelva a encolar lo abre de nuevo.</summary>
     public void Close()
     {
         WaveOutEvent? output;
+        System.Threading.Timer? timer;
         lock (_gate)
         {
             output = _output;
+            timer = _primeTimer;
             _output = null;
             _queue = null;
             _tap = null;
+            _primeTimer = null;
+            _primeArmed = false;
             _started = false;
+            TurnClosed = false;
+            _playout.NoteStopped();
         }
+
+        // El reloj se suelta fuera del candado: su devolución de llamada lo toma, y desecharlo
+        // adentro es cómo se arma un abrazo mortal con un temporizador.
+        timer?.Dispose();
 
         if (output is null)
         {
@@ -310,7 +533,7 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
 
             // El driver lee por acá y no de la cola directamente: es el único lugar desde donde se
             // ve cuándo se llevó audio de verdad, que es lo que Pending necesita saber.
-            var tap = new DriverTap(queue);
+            var tap = new DriverTap(queue, this);
             output.Init(tap);
 
             _queue = queue;
@@ -329,6 +552,32 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
     }
 
     /// <summary>
+    /// El driver leyó: se le cuenta a <see cref="LivePlayout"/> y se avisa si hubo un hueco.
+    /// </summary>
+    /// <remarks>
+    /// <b>No toma el candado de la salida.</b> Corre en el hilo del driver, y ese candado se
+    /// sostiene mientras se abre el dispositivo y mientras se lo resetea: pedirlo desde acá es cómo
+    /// se traba una reproducción. <see cref="LivePlayout"/> lleva el suyo, que sólo protege
+    /// aritmética.
+    /// </remarks>
+    private void NoteDriverRead(int available, int requested, long timestamp)
+    {
+        if (_playout.NoteRead(available, requested, timestamp) is not { } gap)
+        {
+            return;
+        }
+
+        try
+        {
+            GapHeard?.Invoke(this, new LiveAudioGapEventArgs(gap));
+        }
+        catch (Exception)
+        {
+            // Un oyente roto no puede cortar la reproducción, y menos desde el hilo del driver.
+        }
+    }
+
+    /// <summary>
     /// El caño por el que el driver se lleva el audio, con la cuenta de hasta cuándo se sigue oyendo.
     /// </summary>
     /// <remarks>
@@ -342,8 +591,13 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
     /// porque tomar el candado de la salida adentro del hilo del driver es cómo se traba una
     /// reproducción.
     /// </para>
+    /// <para>
+    /// Y es además el único lugar donde se puede ver que el parlante se quedó sin audio: con
+    /// <c>ReadFully</c> el hueco se rellena con silencio y no lo denuncia nadie. Por eso cada lectura
+    /// se le cuenta al dueño.
+    /// </para>
     /// </remarks>
-    private sealed class DriverTap(BufferedWaveProvider queue) : IWaveProvider
+    private sealed class DriverTap(BufferedWaveProvider queue, LiveSpeakerSink owner) : IWaveProvider
     {
         private long _audibleUntil;
 
@@ -369,14 +623,15 @@ public sealed class LiveSpeakerSink : ILiveAudioSink, IDisposable
         {
             var real = queue.BufferedBytes;
             var read = queue.Read(buffer, offset, count);
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
             if (real > 0)
             {
                 Volatile.Write(
                     ref _audibleUntil,
-                    System.Diagnostics.Stopwatch.GetTimestamp() +
-                        (long)(DriverLatency.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+                    now + (long)(DriverLatency.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
             }
 
+            owner.NoteDriverRead(real, count, now);
             return read;
         }
     }

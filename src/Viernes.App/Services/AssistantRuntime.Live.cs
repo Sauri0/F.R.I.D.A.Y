@@ -117,8 +117,11 @@ internal sealed partial class AssistantRuntime
         session.MomentChanged += LiveOnMomentChanged;
         session.TranscriptReceived += LiveOnTranscript;
         session.FellBack += LiveOnFellBack;
+        session.Hiccup += LiveOnHiccup;
         session.WentQuiet += LiveOnWentQuiet;
         session.ToolActivity += LiveOnToolActivity;
+
+        _liveSink.GapHeard += LiveOnGapHeard;
 
         _liveSession = session;
         return session;
@@ -302,9 +305,11 @@ internal sealed partial class AssistantRuntime
         }
 
         microphone.LevelChanged += LiveOnAudioLevel;
+        microphone.PreRollReleased += LiveOnPreRollReleased;
         if (!microphone.Start())
         {
             microphone.LevelChanged -= LiveOnAudioLevel;
+            microphone.PreRollReleased -= LiveOnPreRollReleased;
             RuntimeTrace.Write("vivo.microfono", microphone.LastFailure ?? "no abrió");
             await microphone.DisposeAsync().ConfigureAwait(false);
             await session.StopAsync().ConfigureAwait(false);
@@ -348,6 +353,7 @@ internal sealed partial class AssistantRuntime
         if (microphone is not null)
         {
             microphone.LevelChanged -= LiveOnAudioLevel;
+            microphone.PreRollReleased -= LiveOnPreRollReleased;
 
             // Queda escrito porque es lo único que dice, después, si la compuerta de eco hizo su
             // trabajo. Si «eco» es cero mientras ella habló, no está frenando nada y el bucle de
@@ -401,9 +407,24 @@ internal sealed partial class AssistantRuntime
             session.MomentChanged -= LiveOnMomentChanged;
             session.TranscriptReceived -= LiveOnTranscript;
             session.FellBack -= LiveOnFellBack;
+            session.Hiccup -= LiveOnHiccup;
             session.WentQuiet -= LiveOnWentQuiet;
             session.ToolActivity -= LiveOnToolActivity;
             await session.DisposeAsync().ConfigureAwait(false);
+        }
+
+        // El resumen del parlante se escribe ANTES de cerrarlo, y es lo primero que hay que mirar
+        // cuando el usuario dice que se le cortó la voz: cero huecos con la charla entera hablada
+        // significa que el corte no estuvo en la salida de audio y hay que buscarlo en otro lado.
+        // El relleno va aparte de los huecos justamente porque no acusa a nadie: ahí adentro está
+        // el final de cada frase y cada herramienta que tardó, que no son defectos.
+        if (_liveSink is not null)
+        {
+            _liveSink.GapHeard -= LiveOnGapHeard;
+            RuntimeTrace.Write(
+                "vivo.parlante",
+                $"huecos={_liveSink.Gaps} · silencio={_liveSink.GapTotal.TotalMilliseconds:0} ms · " +
+                $"relleno={_liveSink.Filler.TotalMilliseconds:0} ms · callada={_liveSink.FlushCount} veces");
         }
 
         _liveSink?.Dispose();
@@ -660,6 +681,80 @@ internal sealed partial class AssistantRuntime
                 RuntimeTrace.Write("vivo.caida.excepcion", exception.GetType().Name);
             }
         });
+    }
+
+    /// <summary>
+    /// El parlante se quedó sin voz que sonar en el medio de una respuesta.
+    /// </summary>
+    /// <remarks>
+    /// <b>Este renglón es todo el punto.</b> El usuario reportó que «a veces se le corta la voz
+    /// mientras habla» y no había en toda la bitácora una sola marca de eso: la salida rellena con
+    /// silencio y sigue como si nada. Ahora queda escrito cuándo pasó, cuánto duró y de qué lado se
+    /// quedó corto — la cola, que es la red llegando tarde, o el driver, que es esta máquina no
+    /// dándole el hilo a tiempo. Se arreglan en lugares distintos, y sin esto no había forma de
+    /// saber cuál de los dos arreglar.
+    /// <para>
+    /// Llega desde el hilo del driver de audio, así que lo único que se hace es encolar un renglón
+    /// —que es lo que <see cref="RuntimeTrace"/> promete que cuesta nanosegundos—. Cualquier cosa
+    /// que tarde acá se oye.
+    /// </para>
+    /// </remarks>
+    private void LiveOnGapHeard(object? sender, LiveAudioGapEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        var gap = eventArgs.Gap;
+        var lado = gap.Kind == LiveAudioGapKind.Queue
+            ? "la cola quedó vacía (llegó tarde el audio del servidor)"
+            : "el driver volvió tarde a buscar audio (es la máquina, no la red)";
+
+        RuntimeTrace.Write(
+            "vivo.parlante.hueco",
+            $"{gap.Duration.TotalMilliseconds:0} ms a los {gap.SinceStart.TotalSeconds:0.00} s · {lado}");
+    }
+
+    /// <summary>
+    /// Algo se rompió y la sesión se recompuso sola.
+    /// </summary>
+    /// <remarks>
+    /// No cierra nada ni cambia el camino: sólo deja el renglón. <b>Un corte de transporte vacía la
+    /// cola del parlante</b>, así que desde el cuarto se oye exactamente como que la voz se cortó a
+    /// mitad de frase — y hasta ahora no dejaba rastro ninguno, con lo cual era indistinguible de
+    /// que no hubiera pasado nada. Es el candidato más directo a lo que reportó el usuario.
+    /// </remarks>
+    private void LiveOnHiccup(object? sender, LiveFailureEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write("vivo.hipo", eventArgs.Message);
+    }
+
+    /// <summary>
+    /// Se soltó la antesala del micrófono de golpe.
+    /// </summary>
+    /// <remarks>
+    /// Se anota para poder cruzarlo con los cortes de voz. La sospecha es que esta ráfaga —hasta
+    /// trescientos milisegundos entrando de una— es lo que el servidor lee como una interrupción y
+    /// por eso se calla sola; con la marca en la bitácora, esa sospecha se confirma o se tira abajo
+    /// mirando si el corte cae al lado. Sin la marca no se puede hacer ninguna de las dos cosas, que
+    /// es donde estábamos.
+    /// </remarks>
+    private void LiveOnPreRollReleased(object? sender, LivePreRollReleasedEventArgs eventArgs)
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        RuntimeTrace.Write(
+            "vivo.microfono.rafaga",
+            $"{eventArgs.Blocks} bloques · {eventArgs.Duration.TotalMilliseconds:0} ms de una");
     }
 
     /// <summary>

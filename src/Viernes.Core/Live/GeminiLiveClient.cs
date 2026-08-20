@@ -513,6 +513,16 @@ public sealed class GeminiLiveClient : IAsyncDisposable
                 // al usuario el final de una respuesta que la sesión nueva no va a recordar.
                 _sink.Flush();
 
+                // Y eso, oído desde el cuarto, es la voz cortándose en seco a mitad de frase. Se
+                // avisa aunque la reconexión salga bien: sin este renglón, un corte de transporte es
+                // exactamente igual de invisible en la bitácora que no haber pasado nada, y el
+                // usuario que reporta «se le corta la voz» no tiene forma de que le crean.
+                Raise(
+                    Failed,
+                    new LiveFailureEventArgs(
+                        $"Se cortó el transporte de la sesión en vivo (intento {consecutiveFailures + 1}).",
+                        fatal: false));
+
                 if (++consecutiveFailures > MaximumConsecutiveReconnects)
                 {
                     LastFailure = "Se cortó la sesión en vivo y no pude reconectar.";

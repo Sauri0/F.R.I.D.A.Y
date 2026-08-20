@@ -159,6 +159,18 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     public event EventHandler<LiveFailureEventArgs>? FellBack;
 
     /// <summary>
+    /// Algo salió mal pero la charla siguió: un corte de transporte, un error suelto del servidor.
+    /// </summary>
+    /// <remarks>
+    /// Es lo contrario de <see cref="FellBack"/> y por eso va aparte: acá no hay nada que decidir,
+    /// la sesión se recompuso sola. Existe porque hasta ahora estas cosas se tragaban enteras, y una
+    /// reconexión vacía la cola del parlante —o sea que <b>se oye como que la voz se corta en seco a
+    /// mitad de frase</b>—. Sin este aviso, en la bitácora eso es indistinguible de que no haya
+    /// pasado nada.
+    /// </remarks>
+    public event EventHandler<LiveFailureEventArgs>? Hiccup;
+
+    /// <summary>
     /// Pasó un minuto sin que nadie hable: la charla quedó abandonada.
     /// </summary>
     /// <remarks>
@@ -517,6 +529,7 @@ public sealed class LiveVoiceSession : IAsyncDisposable
     {
         if (!eventArgs.Fatal)
         {
+            Raise(Hiccup, eventArgs);
             return;
         }
 

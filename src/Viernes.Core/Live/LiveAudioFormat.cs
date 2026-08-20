@@ -52,7 +52,11 @@ public static class LiveAudioFormat
             : milliseconds * InputSampleRate / 1000 * BytesPerSample;
 
     /// <summary>Cuánto dura, dicho, este bloque de audio de respuesta.</summary>
-    public static TimeSpan OutputDurationOf(int byteCount) =>
+    /// <remarks>
+    /// Cuenta en <c>long</c> y no en <c>int</c> porque no siempre es un bloque: <c>LivePlayout</c> le
+    /// pasa todo lo que se le entregó al driver desde que arrancó una respuesta, y eso se acumula.
+    /// </remarks>
+    public static TimeSpan OutputDurationOf(long byteCount) =>
         byteCount <= 0
             ? TimeSpan.Zero
             : TimeSpan.FromSeconds((double)byteCount / (OutputSampleRate * BytesPerSample));
