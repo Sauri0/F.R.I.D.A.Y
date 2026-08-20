@@ -506,13 +506,17 @@ internal sealed partial class AssistantRuntime
                 // Sin la frase: la bitácora es un archivo de texto que se pega en un reporte. El
                 // número de tramos alcanza para saber cuánto está cortando de más el servidor.
                 RuntimeTrace.Write("vivo.frase.unida", $"tramos={_liveUtterance.Parts}");
-                AmendLastConversationTurn(whole);
+                AmendLastConversationTurn(whole, heard);
             }
             else
             {
                 AddConversationTurn(whole);
             }
         }
+
+        // Lo que contestó ella, que hasta ahora no se guardaba en ningún lado: la lista de turnos
+        // es sólo lo que pidió la persona, así que ni media charla quedaba para releer.
+        NoteAssistantTurn(said);
 
         // Lo vencido se borra igual que lo contestado: en los dos casos lo que quedó escrito es de
         // otra frase, y dejarlo puesto hace que la nueva se lea pegada a la vieja.

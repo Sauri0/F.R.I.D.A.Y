@@ -17,6 +17,7 @@ using Viernes.Core.Tools;
 using Viernes.Core.Tools.BuiltIn;
 using Viernes.Core.Usage;
 using Viernes.Core.Voice;
+using Viernes.Memory.Chats;
 using Viernes.Memory.Models;
 using Viernes.Memory.Persistence;
 using Viernes.Platform.Windows.Actions;
@@ -172,6 +173,17 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
     /// <summary>Lo que dijo el usuario en la charla, para destilar al cerrarla. No se persiste.</summary>
     private readonly List<string> _conversationTurns = [];
+
+    /// <summary>
+    /// La charla abierta, tal como va quedando escrita.
+    /// </summary>
+    /// <remarks>
+    /// Nulo entre conversaciones. Lo tocan el bucle de conversación, el hilo que lee del socket y el
+    /// del cierre, así que se lee y se escribe con <see cref="Volatile"/>: lo que no puede pasar es
+    /// que un turno tardío escriba en una charla que ya se cerró, y por eso el campo se pone en nulo
+    /// antes de cerrarla y no después.
+    /// </remarks>
+    private ChatArchive? _chat;
 
     // Las listas de frases de cierre viven en Viernes.Core.Conversation.ClosingPhrase: es lógica de
     // texto pura, y acá adentro no había forma de probarla —el proyecto de pruebas no puede
@@ -1153,6 +1165,28 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// <summary><paramref name="spoken"/> pide una respuesta para decir, no para leer.</summary>
     public async Task<string> SendAsync(string text, bool spoken, CancellationToken cancellationToken)
     {
+        // Lo escrito entra por acá sin pasar por AddConversationTurn, que es del camino hablado: sin
+        // esto, la mitad de las charlas quedaría con las respuestas y sin las preguntas.
+        if (!spoken)
+        {
+            Charla()?.Note(ChatVoice.Persona, text);
+        }
+
+        var respuesta = await SendCoreAsync(text, spoken, cancellationToken).ConfigureAwait(false);
+        NoteAssistantTurn(respuesta);
+        return respuesta;
+    }
+
+    /// <summary>
+    /// El envío de siempre. Lo de afuera es sólo dejar la charla escrita.
+    /// </summary>
+    /// <remarks>
+    /// Se partió en dos porque acá adentro hay ocho salidas distintas —ocupada, cortada, presupuesto,
+    /// herramienta local, la respuesta del modelo— y anotar la respuesta en cada una es garantizar
+    /// que la próxima que se agregue se olvide. Una sola envoltura anota todas.
+    /// </remarks>
+    private async Task<string> SendCoreAsync(string text, bool spoken, CancellationToken cancellationToken)
+    {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
 
@@ -1846,8 +1880,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         _conversationActive = false;
 
         // El freno cierra la charla sin pasar por EndConversationAsync, así que vacía él los turnos:
-        // si no, lo dicho antes del pánico reaparecía en la destilación de la charla siguiente.
+        // si no, lo dicho antes del pánico reaparecía en la destilación de la charla siguiente. Y
+        // cierra también la charla escrita, por lo mismo.
         _ = TakeConversationTurns();
+        CerrarCharla();
         RuntimeTrace.Write("panico", "corte de emergencia por atajo global");
 
         _ = Task.Run(async () =>
@@ -2221,6 +2257,10 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
         RuntimeTrace.Write("conversacion.abierta", opening is null ? "sin frase" : "con la frase ya dicha");
 
+        // Cada vez que sale de reposo se abre una charla, y queda escrita mientras pasa. Antes no
+        // quedaba nada: los turnos vivían en una lista y se tiraban al cerrar.
+        AbrirCharla();
+
         _conversationActive = true;
         _conversationCancellation?.Dispose();
         _conversationCancellation = new CancellationTokenSource();
@@ -2317,6 +2357,11 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         {
             RuntimeTrace.Write("conversacion.turnos.descartados", $"{abandoned.Count} · {reason}");
         }
+
+        // Se cierra por TODOS los caminos de cierre y no sólo por los que destilan, que es el mismo
+        // error que este método vino a arreglar con los turnos: los caminos raros —un fallo del
+        // dispositivo, mute, la herramienta «descansar»— son justamente los que hay que poder releer.
+        CerrarCharla();
 
         if (!_conversationActive)
         {
@@ -2614,7 +2659,94 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
         {
             _conversationTurns.Add(transcript);
         }
+
+        Charla()?.Note(ChatVoice.Persona, transcript);
     }
+
+    /// <summary>Anota en la charla escrita lo que contestó ella.</summary>
+    /// <remarks>
+    /// Va aparte de <see cref="AddConversationTurn"/> porque son dos cosas distintas que hasta ahora
+    /// se confundían en una: aquella lista es <em>lo que pidió la persona</em>, y existe para
+    /// destilar. Lo que ella contesta nunca se guardaba en ningún lado, así que ni siquiera había
+    /// media charla que releer.
+    /// </remarks>
+    private void NoteAssistantTurn(string? reply) =>
+        Volatile.Read(ref _chat)?.Note(ChatVoice.Ella, reply);
+
+    /// <summary>
+    /// La charla escrita abierta, abriéndola si hacía falta.
+    /// </summary>
+    /// <remarks>
+    /// Se abre sola porque «sale de reposo» tiene más puertas de las que uno se acuerda: la palabra
+    /// de activación, tocar el orbe, el panel de escribir, un recordatorio que la despierta. Buscar
+    /// cada puerta y abrir la charla en todas es garantizar que la próxima que se agregue no la
+    /// abra, y ahí lo que se pierde es una charla entera sin que nada avise.
+    /// </remarks>
+    private ChatArchive? Charla()
+    {
+        if (Volatile.Read(ref _chat) is { } abierta)
+        {
+            return abierta;
+        }
+
+        AbrirCharla();
+        return Volatile.Read(ref _chat);
+    }
+
+    /// <summary>Abre la charla escrita, o no hace nada si algo falla.</summary>
+    /// <remarks>
+    /// No poder escribir la charla no puede impedir tenerla: un disco lleno, una carpeta sin
+    /// permiso, un antivirus. Se pierde el archivo y se anota por qué.
+    /// </remarks>
+    private void AbrirCharla()
+    {
+        try
+        {
+            Volatile.Write(ref _chat, ChatArchive.Open(CarpetaDeCharlas, RutaDeVoz));
+        }
+        catch (Exception excepcion) when (excepcion is System.IO.IOException or UnauthorizedAccessException)
+        {
+            RuntimeTrace.Write("charla.no.se.pudo.abrir", excepcion.GetType().Name);
+        }
+    }
+
+    /// <summary>Cierra la charla escrita, si había una.</summary>
+    /// <remarks>
+    /// El campo se pone en nulo <em>antes</em> de cerrar: un turno que llegue tarde —el hilo del
+    /// socket no se detiene en el mismo instante que el cierre— tiene que caer en el vacío y no en
+    /// una charla a medio cerrar.
+    /// </remarks>
+    private void CerrarCharla()
+    {
+        var charla = Interlocked.Exchange(ref _chat, null);
+        if (charla is null)
+        {
+            return;
+        }
+
+        charla.Note(ChatVoice.Nota, "— se cerró la charla —");
+        charla.Close();
+
+        if (charla.Turns > 1)
+        {
+            RuntimeTrace.Write("charla.escrita", $"turnos={charla.Turns}");
+        }
+    }
+
+    /// <summary>Dónde viven las charlas.</summary>
+    /// <remarks>
+    /// Adentro de «cerebro» y no sueltas en la carpeta de datos: lo que viene después —lo que ella
+    /// destile y organice— vive al lado, y la idea es que el usuario pueda abrir una sola carpeta y
+    /// tener ahí todo lo que ella sabe.
+    /// </remarks>
+    private static string CarpetaDeCharlas => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Viernes",
+        "cerebro",
+        "charlas");
+
+    /// <summary>Por dónde va la charla abierta, para la cabecera del archivo.</summary>
+    private string RutaDeVoz => IsLiveConversation ? "hablando" : "escribiendo";
 
     /// <summary>
     /// Reemplaza el último turno anotado por la frase entera, porque era el mismo pedido.
@@ -2630,8 +2762,14 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
     /// pedido cierre: si la charla se cierra con la frase a medio decir, lo dicho ya está anotado.
     /// </para>
     /// </remarks>
-    private void AmendLastConversationTurn(string transcript)
+    private void AmendLastConversationTurn(string transcript, string fragment)
     {
+        // A la charla escrita va el TRAMO, no la frase entera. La lista de turnos se corrige porque
+        // lo que se le manda al modelo tiene que ser el pedido completo; el archivo se agrega, así
+        // que escribir la frase entera otra vez duplicaría la primera mitad. Que en el archivo
+        // queden dos renglones es fiel: la persona dijo dos cosas seguidas, aunque fueran una sola.
+        Charla()?.Note(ChatVoice.Persona, fragment);
+
         lock (_confirmationGate)
         {
             if (_conversationTurns.Count == 0)
@@ -4166,6 +4304,11 @@ internal sealed partial class AssistantRuntime : IAssistantRuntime
 
         _isDisposed = true;
         _conversationActive = false;
+
+        // Antes de soltar nada: una charla que quedó abierta al apagar el programa tiene que quedar
+        // cerrada en disco, no a medio escribir.
+        CerrarCharla();
+
         await DisposeLiveAsync().ConfigureAwait(false);
         _ambientTimer?.Dispose();
         _ambientTimer = null;

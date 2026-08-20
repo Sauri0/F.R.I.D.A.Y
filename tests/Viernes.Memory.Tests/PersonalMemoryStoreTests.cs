@@ -21,9 +21,15 @@ public sealed class PersonalMemoryStoreTests
         Assert.True(review.IsObservationPaused);
         Assert.Equal(0, review.TotalCount);
         Assert.False(MemoryPrivacy.IsUsedForModelTraining);
-        Assert.False(MemoryPrivacy.StoresConversations);
         Assert.False(MemoryPrivacy.StoresCredentials);
-        Assert.Contains("no se usa para entrenar modelos", review.PrivacyNotice, StringComparison.OrdinalIgnoreCase);
+
+        // Cambió, y el aviso tiene que haber cambiado con él: desde que cada charla queda escrita en
+        // la carpeta «cerebro», decir que no se almacenan conversaciones es mentira. Esta prueba
+        // estaba puesta para que ese cambio no pasara callado, y saltó.
+        Assert.True(MemoryPrivacy.StoresConversations);
+        Assert.Contains("Las conversaciones quedan escritas", review.PrivacyNotice, StringComparison.Ordinal);
+        Assert.Contains("podés leer, corregir o borrar", review.PrivacyNotice, StringComparison.Ordinal);
+        Assert.Contains("nada se usa para entrenar modelos", review.PrivacyNotice, StringComparison.OrdinalIgnoreCase);
         Assert.False(File.Exists(scope.FilePath));
     }
 
