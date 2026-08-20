@@ -109,7 +109,10 @@ public sealed class AutonomyPolicy
         string? subject,
         CancellationToken cancellationToken = default)
     {
-        var rules = await LoadAsync(cancellationToken).ConfigureAwait(false);
+        // Una foto, tomada adentro del candado. Ver ListAsync: lo que devuelve la carga es la lista
+        // cacheada, y todo lo que sigue acá abajo la recorre tres veces. Es el mismo defecto y en el
+        // camino más caliente de los dos — esto corre en cada llamada a una herramienta riesgosa.
+        var rules = await FotoAsync(cancellationToken).ConfigureAwait(false);
         var wantedAction = Normalize(action);
         var wantedSubject = Normalize(subject);
 
@@ -173,8 +176,27 @@ public sealed class AutonomyPolicy
 
     public async Task<IReadOnlyList<AutonomyRule>> ListAsync(CancellationToken cancellationToken = default)
     {
-        var rules = await LoadAsync(cancellationToken).ConfigureAwait(false);
-        return rules.OrderByDescending(rule => rule.LearnedAt).ToArray();
+        // La copia se hace ADENTRO del candado, y no es prolijidad.
+        //
+        // Lo que devuelve la carga NO es una lista nueva: es la lista cacheada, la misma que
+        // «aprender» recorre y modifica en el lugar. Ordenarla y copiarla después de soltar el
+        // candado es recorrer una colección mientras otro hilo le saca y le agrega elementos, que en
+        // .NET termina en una excepción a mitad de camino.
+        //
+        // No es teórico desde que el mismo libro lo comparten tres llamadores en hilos distintos: la
+        // herramienta que enseña un permiso, el turno escrito que los lee, y el armado de la
+        // instrucción hablada. Lo encontró una auditoría; el escéptico lo descartó porque no logró
+        // reproducirlo, y una carrera que no reproduce sigue siendo una carrera.
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var rules = await LoadUnsafeAsync(cancellationToken).ConfigureAwait(false);
+            return rules.OrderByDescending(rule => rule.LearnedAt).ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     /// <summary>Lo aprendido, para que el modelo sepa qué puede hacer sin preguntar.</summary>
@@ -229,12 +251,21 @@ public sealed class AutonomyPolicy
         return string.IsNullOrEmpty(trimmed) ? "*" : trimmed;
     }
 
-    private async Task<List<AutonomyRule>> LoadAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Una copia de lo que hay, hecha adentro del candado.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reemplaza a una carga que devolvía la lista viva.</b> Quien la recibía la recorría ya
+    /// afuera del candado, sobre la misma colección que <c>Aprender</c> modifica en el lugar. El
+    /// nombre viejo —«cargar»— era parte del problema: no decía que lo que volvía seguía siendo de
+    /// adentro.
+    /// </remarks>
+    private async Task<List<AutonomyRule>> FotoAsync(CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await LoadUnsafeAsync(cancellationToken).ConfigureAwait(false);
+            return [.. await LoadUnsafeAsync(cancellationToken).ConfigureAwait(false)];
         }
         finally
         {
